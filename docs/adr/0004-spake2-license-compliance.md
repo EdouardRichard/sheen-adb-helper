@@ -1,6 +1,6 @@
 # ADR 0004：spake2-java 许可证合规处置
 
-- 状态：采用
+- 状态：`accepted`
 - 日期：2026-07-15
 - 负责人：Sheen ADB 助手项目
 
