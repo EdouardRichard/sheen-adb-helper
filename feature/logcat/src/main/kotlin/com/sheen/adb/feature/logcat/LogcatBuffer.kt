@@ -49,3 +49,67 @@ class LogcatBuffer(
         return value.substring(start)
     }
 }
+
+internal class LogcatWindow(
+    private val buffer: LogcatBuffer = LogcatBuffer(),
+    private val visibleLimit: Int = 100,
+) {
+    private var keyword: String = ""
+    private var paused = false
+    private val visibleLines = ArrayDeque<String>()
+
+    init {
+        require(visibleLimit > 0)
+    }
+
+    fun add(line: String) {
+        buffer.add(line)
+        if (!paused && matches(line)) {
+            visibleLines.addLast(line)
+            while (visibleLines.size > visibleLimit) visibleLines.removeFirst()
+        }
+    }
+
+    fun updateKeyword(value: String) {
+        keyword = value
+        refresh()
+    }
+
+    fun pause() {
+        paused = true
+    }
+
+    fun resume() {
+        paused = false
+        refresh()
+    }
+
+    fun clear() {
+        buffer.clear()
+        visibleLines.clear()
+    }
+
+    fun reset() {
+        clear()
+        keyword = ""
+        paused = false
+    }
+
+    fun snapshot(): List<String> = visibleLines.toList()
+
+    val droppedOldest: Boolean
+        get() = buffer.droppedOldest
+
+    private fun refresh() {
+        val refreshed = buffer.snapshot()
+            .asSequence()
+            .filter(::matches)
+            .toList()
+            .takeLast(visibleLimit)
+        visibleLines.clear()
+        visibleLines.addAll(refreshed)
+    }
+
+    private fun matches(line: String): Boolean =
+        keyword.trim().let { it.isEmpty() || line.contains(it, ignoreCase = true) }
+}

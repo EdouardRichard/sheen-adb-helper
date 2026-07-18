@@ -7,6 +7,7 @@ import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.ProtocolException
 import java.net.SocketTimeoutException
+import java.io.IOException
 import javax.net.ssl.SSLHandshakeException
 import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
@@ -20,7 +21,11 @@ class AdbExceptionMapperTest {
         assertTrue(AdbExceptionMapper.map(SocketTimeoutException(), stage) is AdbError.Timeout)
         assertTrue(AdbExceptionMapper.map(SSLHandshakeException("x"), stage) is AdbError.AuthenticationFailed)
         assertTrue(AdbExceptionMapper.map(ProtocolException(), stage) is AdbError.ProtocolIncompatible)
+        assertTrue(AdbExceptionMapper.map(IllegalStateException(), stage) is AdbError.ProtocolIncompatible)
         assertTrue(AdbExceptionMapper.map(EOFException(), stage) is AdbError.RemoteClosed)
+        assertTrue(AdbExceptionMapper.map(ProtocolCommandStreamException(), AdbOperationStage.SHELL) is AdbError.CommandStreamClosed)
+        assertTrue(AdbExceptionMapper.map(ProtocolCommandStreamException(), AdbOperationStage.LOGCAT) is AdbError.CommandStreamClosed)
+        assertTrue(AdbExceptionMapper.map(IOException(), AdbOperationStage.SHELL) is AdbError.IoFailure)
     }
 
     @Test

@@ -11,6 +11,10 @@ enum class AdbOperationStage {
     OVERVIEW,
     PROCESSES,
     LOGCAT,
+    APPLICATIONS_LIST,
+    APPLICATION_FORCE_STOP,
+    APPLICATION_SET_ENABLED,
+    APPLICATION_VERIFY,
     DISCONNECT,
 }
 
@@ -80,6 +84,86 @@ sealed interface AdbError {
         override val userMessage = "ADB 会话已被远端关闭。"
         override val nextStep = "返回系统无线调试页面确认端口，然后重新连接。"
         override val technicalCode = "ADB_REMOTE_CLOSED"
+    }
+
+    data class CommandStreamClosed(override val stage: AdbOperationStage) : AdbError {
+        override val userMessage = "本次 ADB 命令流在完成前已关闭。"
+        override val nextStep = "活动连接仍会保留；请直接重试命令，若持续出现再重新连接。"
+        override val technicalCode = "ADB_COMMAND_STREAM_CLOSED"
+    }
+
+    data class IoFailure(override val stage: AdbOperationStage) : AdbError {
+        override val userMessage = "本次 ADB 子流发生输入输出错误。"
+        override val nextStep = "活动连接仍会保留；可直接重试，若设备已离线再重新连接。"
+        override val technicalCode = "ADB_IO_FAILURE"
+    }
+
+    data object ApplicationCurrentUserUnavailable : AdbError {
+        override val stage = AdbOperationStage.APPLICATIONS_LIST
+        override val userMessage = "无法确认被控端当前 Android 用户。"
+        override val nextStep = "检查 ROM 是否支持当前用户查询；不会回退到其他用户。"
+        override val technicalCode = "ADB_APP_CURRENT_USER_UNAVAILABLE"
+    }
+
+    data object ApplicationListUnsupported : AdbError {
+        override val stage = AdbOperationStage.APPLICATIONS_LIST
+        override val userMessage = "ROM 未提供可安全解析的第三方应用列表。"
+        override val nextStep = "其他调试功能仍可使用；可重连后重试应用列表。"
+        override val technicalCode = "ADB_APP_LIST_UNSUPPORTED"
+    }
+
+    data object ApplicationListCapacityExceeded : AdbError {
+        override val stage = AdbOperationStage.APPLICATIONS_LIST
+        override val userMessage = "应用列表超过 20,000 项安全上限。"
+        override val nextStep = "不会加载部分列表；请检查被控端包管理服务后重试。"
+        override val technicalCode = "ADB_APP_LIST_CAPACITY_EXCEEDED"
+    }
+
+    data class ApplicationPackageNotFound(
+        override val stage: AdbOperationStage,
+    ) : AdbError {
+        override val userMessage = "目标应用已不存在或不再属于当前列表。"
+        override val nextStep = "刷新应用列表后，以设备当前状态为准。"
+        override val technicalCode = "ADB_APP_PACKAGE_NOT_FOUND"
+    }
+
+    data class ApplicationTargetNotAllowed(
+        override val stage: AdbOperationStage,
+    ) : AdbError {
+        override val userMessage = "该应用不在允许操作的当前用户第三方应用范围内。"
+        override val nextStep = "系统应用、本机 Sheen 自身、未知状态或范围外目标不可绕过限制。"
+        override val technicalCode = "ADB_APP_TARGET_NOT_ALLOWED"
+    }
+
+    data class ApplicationPolicyRejected(
+        override val stage: AdbOperationStage,
+    ) : AdbError {
+        override val userMessage = "ROM 或设备管理策略拒绝了应用操作。"
+        override val nextStep = "在被控端检查企业管理或系统策略，然后刷新确认实际状态。"
+        override val technicalCode = "ADB_APP_POLICY_REJECTED"
+    }
+
+    data object ApplicationStateVerifyFailed : AdbError {
+        override val stage = AdbOperationStage.APPLICATION_VERIFY
+        override val userMessage = "操作后读取到的应用状态与目标状态不一致。"
+        override val nextStep = "刷新列表并以设备实际状态为准。"
+        override val technicalCode = "ADB_APP_STATE_VERIFY_FAILED"
+    }
+
+    data class ApplicationOutcomeUnknown(
+        override val stage: AdbOperationStage,
+    ) : AdbError {
+        override val userMessage = "连接中断、超时或取消，无法确认设备是否已执行操作。"
+        override val nextStep = "重新连接并刷新列表，以设备实际状态为准。"
+        override val technicalCode = "ADB_APP_OUTCOME_UNKNOWN"
+    }
+
+    data class ApplicationSessionInvalid(
+        override val stage: AdbOperationStage,
+    ) : AdbError {
+        override val userMessage = "发起操作的 ADB 会话已失效或已切换。"
+        override val nextStep = "返回当前设备的应用列表并重新发起操作。"
+        override val technicalCode = "ADB_APP_SESSION_INVALID"
     }
 
     data class Unknown(override val stage: AdbOperationStage) : AdbError {
@@ -170,6 +254,52 @@ data class ProcessSnapshot(
     val processes: List<DeviceProcess>,
     val degradedReason: String? = null,
 )
+
+enum class RemoteApplicationEnabledState {
+    ENABLED,
+    DISABLED,
+    UNKNOWN,
+}
+
+enum class ApplicationField {
+    VERSION_CODE,
+    VERSION_NAME,
+    INSTALLER_PACKAGE,
+}
+
+data class RemoteApplication(
+    val packageName: String,
+    val userId: Int,
+    val enabledState: RemoteApplicationEnabledState,
+    val versionCode: Long? = null,
+    val versionName: String? = null,
+    val installerPackage: String? = null,
+    val isSystem: Boolean,
+)
+
+data class ApplicationSnapshot(
+    val sessionId: String,
+    val userId: Int,
+    val applications: List<RemoteApplication>,
+    val unavailableFields: Set<ApplicationField>,
+    val degradedReason: String? = null,
+)
+
+sealed interface ApplicationMutationResult {
+    val sessionId: String
+
+    data class Verified(
+        override val sessionId: String,
+        val application: RemoteApplication,
+    ) : ApplicationMutationResult
+
+    data class RequestAccepted(override val sessionId: String) : ApplicationMutationResult
+
+    data class OutcomeUnknown(
+        override val sessionId: String,
+        val reason: AdbError,
+    ) : ApplicationMutationResult
+}
 
 enum class LogcatLevel(val argument: String) {
     VERBOSE("V"), DEBUG("D"), INFO("I"), WARN("W"), ERROR("E"), FATAL("F")

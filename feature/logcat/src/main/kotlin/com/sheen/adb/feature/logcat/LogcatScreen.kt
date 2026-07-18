@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -21,6 +22,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -58,11 +60,18 @@ fun LogcatRoute(viewModel: LogcatViewModel) {
 @Composable
 fun LogcatScreen(state: LogcatUiState, actions: LogcatViewModel) {
     val context = LocalContext.current
+    val listState = rememberLazyListState()
     val createDocument = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         uri?.let(actions::export)
     }
+    LaunchedEffect(state.visibleLines.size, state.visibleLines.lastOrNull()) {
+        if (state.visibleLines.isNotEmpty() && !state.isPaused) {
+            listState.scrollToItem(state.visibleLines.size)
+        }
+    }
     LazyColumn(
         Modifier.padding(SheenDimensions.screenPadding),
+        state = listState,
         verticalArrangement = Arrangement.spacedBy(SheenDimensions.itemSpacing),
     ) {
         item {
@@ -96,6 +105,7 @@ fun LogcatScreen(state: LogcatUiState, actions: LogcatViewModel) {
                     OutlinedButton({ createDocument.launch("sheen-logcat.txt") }, enabled = state.visibleLines.isNotEmpty()) { Text("导出 UTF-8 文本") }
                 }
                 if (state.droppedOldest) Text("已达到 10,000 行或 4 MiB 上限，最早内容已丢弃。", color = MaterialTheme.colorScheme.error)
+                Text("界面仅滚动展示当前过滤条件下最新 100 条；采集内容只保存在内存中。")
                 state.exportNotice?.let { Text(it) }
                 state.error?.let { Text("${it.userMessage} ${it.nextStep}", color = MaterialTheme.colorScheme.error) }
                 if (state.visibleLines.isEmpty()) Text("暂无可见 Logcat")

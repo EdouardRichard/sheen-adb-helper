@@ -5,6 +5,8 @@ import java.nio.charset.StandardCharsets
 
 enum class ShellEntryStatus { RUNNING, SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, DISCONNECTED }
 
+enum class ShellDispatchMode { EXACT, CONFIRMED_HOST_WRAPPER_REMOVAL }
+
 data class ShellEntry(
     val sequence: Long,
     val command: String,
@@ -14,6 +16,7 @@ data class ShellEntry(
     val outputMode: ShellOutputMode = ShellOutputMode.SEPARATED,
     val status: ShellEntryStatus = ShellEntryStatus.RUNNING,
     val wasTruncated: Boolean = false,
+    val dispatchMode: ShellDispatchMode = ShellDispatchMode.EXACT,
 )
 
 class ShellTranscriptBuffer(private val maxOutputBytes: Int = 1024 * 1024) {

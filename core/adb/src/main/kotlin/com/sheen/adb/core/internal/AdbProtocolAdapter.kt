@@ -20,10 +20,20 @@ internal interface ProtocolShellStream : AutoCloseable {
     fun read(): ProtocolShellPacket
 }
 
+internal interface ProtocolShellCommand : AutoCloseable {
+    fun execute(): ProtocolShellResponse
+}
+
 internal interface AdbProtocolClient : AutoCloseable {
     fun execute(command: String): ProtocolShellResponse
+    fun openShellCommand(command: String): ProtocolShellCommand = object : ProtocolShellCommand {
+        override fun execute(): ProtocolShellResponse = this@AdbProtocolClient.execute(command)
+        override fun close() = Unit
+    }
     fun openShellStream(command: String): ProtocolShellStream
 }
+
+internal class ProtocolCommandStreamException : java.io.IOException()
 
 internal interface AdbProtocolClientFactory {
     fun open(endpoint: AdbEndpoint): AdbProtocolClient

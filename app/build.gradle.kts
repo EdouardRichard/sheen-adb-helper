@@ -11,8 +11,8 @@ android {
         applicationId = "com.sheen.adbhelper"
         minSdk = 30
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.0.1"
+        versionCode = 2
+        versionName = "0.0.2"
     }
 
     buildFeatures {
@@ -67,6 +67,7 @@ dependencies {
     implementation(project(":feature:processes"))
     implementation(project(":feature:logcat"))
     implementation(project(":feature:settings"))
+    implementation(project(":feature:apps"))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)

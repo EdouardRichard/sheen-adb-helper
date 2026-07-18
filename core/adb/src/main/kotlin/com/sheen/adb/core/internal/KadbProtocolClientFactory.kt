@@ -6,6 +6,7 @@ import com.flyfishxu.kadb.cert.KadbCert
 import com.flyfishxu.kadb.cert.KadbCertPolicy
 import com.flyfishxu.kadb.shell.AdbShellPacket
 import com.sheen.adb.core.AdbEndpoint
+import java.io.EOFException
 import java.nio.charset.StandardCharsets
 import okio.Buffer
 
@@ -34,50 +35,70 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
             host = endpoint.host,
             port = endpoint.port,
             connectTimeout = CONNECT_TIMEOUT_MS,
-            socketTimeout = IO_TIMEOUT_MS,
+            socketTimeout = KadbProtocolTimeouts.SOCKET_IO_TIMEOUT_MS,
         )
         return object : AdbProtocolClient {
-            override fun execute(command: String): ProtocolShellResponse {
+            override fun execute(command: String): ProtocolShellResponse =
+                openShellCommand(command).use { it.execute() }
+
+            override fun openShellCommand(command: String): ProtocolShellCommand {
                 val separated = kadb.supportsFeature("shell_v2")
                 if (!separated) {
-                    val response = kadb.shell(command)
-                    val stdout = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES).apply {
-                        append(response.output.toByteArray(StandardCharsets.UTF_8))
+                    val stream = kadb.open("shell:$command")
+                    return object : ProtocolShellCommand {
+                        override fun execute(): ProtocolShellResponse {
+                            val output = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES)
+                            val buffer = Buffer()
+                            while (true) {
+                                val count = stream.source.read(buffer, STREAM_CHUNK_BYTES)
+                                if (count < 0) break
+                                output.append(buffer.readByteArray())
+                            }
+                            return ProtocolShellResponse(
+                                stdout = output.text(),
+                                stderr = "",
+                                exitCode = 0,
+                                streamsSeparated = false,
+                                wasTruncated = output.truncated,
+                            )
+                        }
+
+                        override fun close() = stream.close()
                     }
-                    val stderr = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES).apply {
-                        append(response.errorOutput.toByteArray(StandardCharsets.UTF_8))
-                    }
-                    return ProtocolShellResponse(
-                        stdout = stdout.text(),
-                        stderr = stderr.text(),
-                        exitCode = response.exitCode,
-                        streamsSeparated = false,
-                        wasTruncated = stdout.truncated || stderr.truncated,
-                    )
                 }
-                val stdout = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES)
-                val stderr = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES)
-                var exitCode = 0
-                kadb.openShell(command).use { stream ->
-                    var finished = false
-                    while (!finished) {
-                        when (val packet = stream.read()) {
-                            is AdbShellPacket.StdOut -> stdout.append(packet.payload)
-                            is AdbShellPacket.StdError -> stderr.append(packet.payload)
-                            is AdbShellPacket.Exit -> {
-                                exitCode = packet.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
-                                finished = true
+                val stream = kadb.openShell(command)
+                return object : ProtocolShellCommand {
+                    override fun execute(): ProtocolShellResponse {
+                        val stdout = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES)
+                        val stderr = BoundedByteTail(MAX_SHELL_OUTPUT_BYTES)
+                        var exitCode = 0
+                        var finished = false
+                        while (!finished) {
+                            val packet = try {
+                                stream.read()
+                            } catch (error: Throwable) {
+                                throw normalizedStreamReadFailure(error)
+                            }
+                            when (packet) {
+                                is AdbShellPacket.StdOut -> stdout.append(packet.payload)
+                                is AdbShellPacket.StdError -> stderr.append(packet.payload)
+                                is AdbShellPacket.Exit -> {
+                                    exitCode = packet.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0
+                                    finished = true
+                                }
                             }
                         }
+                        return ProtocolShellResponse(
+                            stdout = stdout.text(),
+                            stderr = stderr.text(),
+                            exitCode = exitCode,
+                            streamsSeparated = true,
+                            wasTruncated = stdout.truncated || stderr.truncated,
+                        )
                     }
+
+                    override fun close() = stream.close()
                 }
-                return ProtocolShellResponse(
-                    stdout = stdout.text(),
-                    stderr = stderr.text(),
-                    exitCode = exitCode,
-                    streamsSeparated = true,
-                    wasTruncated = stdout.truncated || stderr.truncated,
-                )
             }
 
             override fun openShellStream(command: String): ProtocolShellStream {
@@ -100,12 +121,16 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
                 }
                 val stream = kadb.openShell(command)
                 return object : ProtocolShellStream {
-                    override fun read(): ProtocolShellPacket = when (val packet = stream.read()) {
-                        is AdbShellPacket.StdOut -> ProtocolShellPacket.StandardOutput(packet.payload)
-                        is AdbShellPacket.StdError -> ProtocolShellPacket.StandardError(packet.payload)
-                        is AdbShellPacket.Exit -> ProtocolShellPacket.Exit(
-                            packet.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0,
-                        )
+                    override fun read(): ProtocolShellPacket = try {
+                        when (val packet = stream.read()) {
+                            is AdbShellPacket.StdOut -> ProtocolShellPacket.StandardOutput(packet.payload)
+                            is AdbShellPacket.StdError -> ProtocolShellPacket.StandardError(packet.payload)
+                            is AdbShellPacket.Exit -> ProtocolShellPacket.Exit(
+                                packet.payload.firstOrNull()?.toInt()?.and(0xff) ?: 0,
+                            )
+                        }
+                    } catch (error: Throwable) {
+                        throw normalizedStreamReadFailure(error)
                     }
 
                     override fun close() = stream.close()
@@ -134,9 +159,22 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 10_000
-        const val IO_TIMEOUT_MS = 30_000
         const val MAX_SHELL_OUTPUT_BYTES = 1024 * 1024
         const val STREAM_CHUNK_BYTES = 16_384L
+    }
+
+    private fun normalizedStreamReadFailure(error: Throwable): Throwable {
+        if (error is ProtocolCommandStreamException) return error
+        val type = error.javaClass.simpleName
+        val message = error.message.orEmpty().lowercase()
+        val isCommandEof = error is EOFException || type.contains("AdbStreamClosed") ||
+            type.contains("StreamClosed") ||
+            (error is IllegalStateException && (
+                message.contains("not listening") ||
+                    message.contains("stream closed") ||
+                    message.contains("closed stream")
+                ))
+        return if (isCommandEof) ProtocolCommandStreamException() else error
     }
 
     private class BoundedByteTail(private val limit: Int) {
@@ -162,4 +200,10 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
             return String(data, start, data.size - start, StandardCharsets.UTF_8)
         }
     }
+}
+
+internal object KadbProtocolTimeouts {
+    // Long-lived foreground streams must not inherit a connection-wide idle read timeout.
+    // Finite commands remain bounded by AdbSessionManager coroutine timeouts.
+    const val SOCKET_IO_TIMEOUT_MS = 0
 }

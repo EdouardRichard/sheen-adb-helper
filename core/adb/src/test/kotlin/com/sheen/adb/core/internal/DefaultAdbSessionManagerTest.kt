@@ -5,6 +5,8 @@ import com.sheen.adb.core.AdbDiagnosticOutcome
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.LogcatConfig
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -17,6 +19,11 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 class DefaultAdbSessionManagerTest {
+    @Test
+    fun `protocol connection has no idle read timeout for foreground streams`() {
+        assertEquals(KadbProtocolTimeouts.SOCKET_IO_TIMEOUT_MS, 0)
+    }
+
     @Test
     fun `connect validates protocol then executes command and disconnects`() = runBlocking {
         val client = FakeClient()
@@ -123,6 +130,67 @@ class DefaultAdbSessionManagerTest {
         assertTrue(manager.connectionState.value is AdbConnectionState.Connected)
     }
 
+    @Test
+    fun `logcat remains active while packets continue and closes only stream on stop`() = runBlocking {
+        val stream = OneThenBlockingStream()
+        val client = FakeClient(stream = stream)
+        val manager = DefaultAdbSessionManager(FakeFactory(client), Dispatchers.IO)
+        manager.connect(AdbEndpoint("logcat.local", 40007))
+
+        val received = AtomicBoolean(false)
+        val collection = async(Dispatchers.Default) {
+            manager.streamLogcat(LogcatConfig()).collect { result ->
+                if (result is AdbOperationResult.Success) received.set(true)
+            }
+        }
+        while (!received.get() || !stream.blockingReadStarted.get()) Thread.yield()
+        assertTrue(collection.isActive)
+        assertTrue(manager.connectionState.value is AdbConnectionState.Connected)
+
+        collection.cancel()
+        collection.join()
+        assertTrue(stream.closed.get())
+        assertTrue(!client.closed.get())
+        assertTrue(manager.connectionState.value is AdbConnectionState.Connected)
+        assertTrue("line" !in manager.diagnosticEvents.value.joinToString())
+    }
+
+    @Test
+    fun `disconnect stops logcat and releases both stream and session`() = runBlocking {
+        val client = LifecycleClient()
+        val manager = DefaultAdbSessionManager(FakeFactory(client), Dispatchers.IO)
+        manager.connect(AdbEndpoint("disconnect.local", 40008))
+
+        val collection = async(Dispatchers.Default) { manager.streamLogcat(LogcatConfig()).collect() }
+        while (!client.stream.started.get()) Thread.yield()
+        assertTrue(manager.disconnect() is AdbOperationResult.Success)
+        collection.join()
+
+        assertTrue(client.closed.get())
+        assertTrue(client.stream.closed.get())
+        assertTrue(manager.connectionState.value is AdbConnectionState.Disconnected)
+    }
+
+    @Test
+    fun `session switch stops old logcat without corrupting new connection state`() = runBlocking {
+        val first = LifecycleClient()
+        val second = FakeClient()
+        val manager = DefaultAdbSessionManager(QueueFactory(first, second), Dispatchers.IO)
+        manager.connect(AdbEndpoint("old.local", 40009))
+        val oldSessionId = (manager.connectionState.value as AdbConnectionState.Connected).sessionId
+
+        val collection = async(Dispatchers.Default) { manager.streamLogcat(LogcatConfig()).collect() }
+        while (!first.stream.started.get()) Thread.yield()
+        assertTrue(manager.connect(AdbEndpoint("new.local", 40010)) is AdbOperationResult.Success)
+        collection.join()
+
+        val current = manager.connectionState.value as AdbConnectionState.Connected
+        assertTrue(first.closed.get())
+        assertTrue(first.stream.closed.get())
+        assertTrue(current.sessionId != oldSessionId)
+        assertEquals(current.endpoint.host, "new.local")
+    }
+
     private class FakeClient(
         private val block: Boolean = false,
         private val stream: ProtocolShellStream? = null,
@@ -155,6 +223,54 @@ class DefaultAdbSessionManagerTest {
             return ProtocolShellPacket.Exit(0)
         }
         override fun close() { closed.set(true) }
+    }
+
+    private class OneThenBlockingStream : ProtocolShellStream {
+        private val delivered = AtomicBoolean(false)
+        val blockingReadStarted = AtomicBoolean(false)
+        val closed = AtomicBoolean(false)
+        override fun read(): ProtocolShellPacket {
+            if (delivered.compareAndSet(false, true)) return ProtocolShellPacket.StandardOutput("line\n".encodeToByteArray())
+            blockingReadStarted.set(true)
+            Thread.sleep(10_000)
+            return ProtocolShellPacket.Exit(0)
+        }
+        override fun close() { closed.set(true) }
+    }
+
+    private class LifecycleClient : AdbProtocolClient {
+        val stream = CloseReleasedStream()
+        val closed = AtomicBoolean(false)
+
+        override fun execute(command: String) =
+            ProtocolShellResponse("ok\n", "", 0, streamsSeparated = true, wasTruncated = false)
+
+        override fun openShellStream(command: String): ProtocolShellStream = stream
+
+        override fun close() {
+            closed.set(true)
+            stream.releaseFromConnectionClose()
+        }
+    }
+
+    private class CloseReleasedStream : ProtocolShellStream {
+        private val connectionClosed = CountDownLatch(1)
+        val started = AtomicBoolean(false)
+        val closed = AtomicBoolean(false)
+
+        override fun read(): ProtocolShellPacket {
+            started.set(true)
+            check(connectionClosed.await(10, TimeUnit.SECONDS))
+            throw ProtocolCommandStreamException()
+        }
+
+        fun releaseFromConnectionClose() {
+            connectionClosed.countDown()
+        }
+
+        override fun close() {
+            closed.set(true)
+        }
     }
 
     private open class FakeFactory(private val client: AdbProtocolClient) : AdbProtocolClientFactory {

@@ -33,4 +33,21 @@ class AppUiPolicyTest {
         assertTrue(isMenuEnabled(requiresConnection = true, connected = true))
     }
 
+    @Test
+    fun `application management is ordered after overview and is connection dependent`() {
+        assertEquals(
+            Destination.entries.map { it.label },
+            listOf("设备列表 / 首页", "设备概览", "应用管理", "Shell 终端", "进程监控", "Logcat", "设置与隐私"),
+        )
+        assertTrue(Destination.APPS.requiresConnection)
+        assertFalse(isMenuEnabled(Destination.APPS.requiresConnection, connected = false))
+    }
+
+    @Test
+    fun `disconnect returns connection dependent destinations to home`() {
+        assertEquals(destinationAfterConnectionChange(Destination.APPS, connected = false), Destination.DEVICES)
+        assertEquals(destinationAfterConnectionChange(Destination.SETTINGS, connected = false), Destination.SETTINGS)
+        assertEquals(destinationAfterConnectionChange(Destination.APPS, connected = true), Destination.APPS)
+    }
+
 }

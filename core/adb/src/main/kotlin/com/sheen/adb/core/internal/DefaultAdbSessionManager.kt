@@ -8,6 +8,9 @@ import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.AdbSessionManager
+import com.sheen.adb.core.ApplicationField
+import com.sheen.adb.core.ApplicationMutationResult
+import com.sheen.adb.core.ApplicationSnapshot
 import com.sheen.adb.core.DiagnosticRedactor
 import com.sheen.adb.core.DeviceOverview
 import com.sheen.adb.core.DynamicDeviceMetrics
@@ -15,6 +18,8 @@ import com.sheen.adb.core.DisconnectionReason
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLine
 import com.sheen.adb.core.ProcessSnapshot
+import com.sheen.adb.core.RemoteApplication
+import com.sheen.adb.core.RemoteApplicationEnabledState
 import com.sheen.adb.core.ShellResult
 import com.sheen.adb.core.ShellOutputMode
 import java.io.Closeable
@@ -52,9 +57,11 @@ internal class DefaultAdbSessionManager(
     )
 
     private val mutex = Mutex()
+    private val applicationMutex = Mutex()
     private val closed = AtomicBoolean(false)
     private val diagnosticSequence = AtomicLong(0)
     private var active: ActiveSession? = null
+    private var applicationSnapshot: ApplicationSnapshot? = null
     private val mutableState = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected())
     override val connectionState: StateFlow<AdbConnectionState> = mutableState.asStateFlow()
     private val mutableDiagnosticEvents = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
@@ -172,12 +179,19 @@ internal class DefaultAdbSessionManager(
             )
             appendDiagnostic(AdbOperationStage.SHELL, AdbDiagnosticOutcome.STARTED, "ADB_SHELL_STARTED", session.endpoint)
             val mark = TimeSource.Monotonic.markNow()
+            var commandStream: ProtocolShellCommand? = null
             try {
                 val response = withTimeout(timeout) {
-                    runInterruptible(ioDispatcher) { session.client.execute(command) }
+                    runInterruptible(ioDispatcher) {
+                        session.client.openShellCommand(command).also { commandStream = it }.execute()
+                    }
                 }
                 if (active?.id != session.id) {
-                    return@withLock failure(AdbError.RemoteClosed(AdbOperationStage.SHELL), session.endpoint, null)
+                    return@withLock operationFailure(
+                        AdbError.RemoteClosed(AdbOperationStage.SHELL),
+                        session.endpoint,
+                        null,
+                    )
                 }
                 AdbOperationResult.Success(
                     ShellResult(
@@ -197,17 +211,23 @@ internal class DefaultAdbSessionManager(
                     )
                 }
             } catch (error: TimeoutCancellationException) {
-                closeSession(session)
-                failure(AdbError.Timeout(AdbOperationStage.SHELL), session.endpoint, error)
+                operationFailure(AdbError.Timeout(AdbOperationStage.SHELL), session.endpoint, error)
             } catch (error: CancellationException) {
-                closeSession(session)
-                mutableState.value = AdbConnectionState.Disconnected(DisconnectionReason.SHELL_CANCELLED)
                 appendDiagnostic(AdbOperationStage.SHELL, AdbDiagnosticOutcome.CANCELLED, "ADB_SHELL_CANCELLED", session.endpoint)
                 AdbOperationResult.Cancelled
             } catch (error: Throwable) {
-                closeSession(session)
                 val mapped = AdbExceptionMapper.map(error, AdbOperationStage.SHELL)
-                failure(mapped, session.endpoint, error)
+                operationFailure(mapped, session.endpoint, error)
+            } finally {
+                withContext(NonCancellable + ioDispatcher) { runCatching { commandStream?.close() } }
+                if (commandStream != null) {
+                    appendDiagnostic(
+                        AdbOperationStage.SHELL,
+                        AdbDiagnosticOutcome.RESOURCE_CLOSED,
+                        "ADB_SHELL_STREAM_CLOSED",
+                        session.endpoint,
+                    )
+                }
             }
         }
 
@@ -270,6 +290,362 @@ internal class DefaultAdbSessionManager(
         }
     }
 
+    override suspend fun listApplications(timeout: Duration): AdbOperationResult<ApplicationSnapshot> =
+        applicationMutex.withLock {
+            val session = mutex.withLock { active } ?: return@withLock applicationFailure(
+                AdbError.ApplicationSessionInvalid(AdbOperationStage.APPLICATIONS_LIST),
+                null,
+            )
+            appendDiagnostic(
+                AdbOperationStage.APPLICATIONS_LIST,
+                AdbDiagnosticOutcome.STARTED,
+                "ADB_APP_LIST_STARTED",
+                session.endpoint,
+            )
+            try {
+                withTimeout(timeout) { loadApplicationSnapshot(session, timeout, remember = true) }
+            } catch (error: TimeoutCancellationException) {
+                applicationFailure(AdbError.Timeout(AdbOperationStage.APPLICATIONS_LIST), session.endpoint)
+            } catch (error: CancellationException) {
+                appendDiagnostic(
+                    AdbOperationStage.APPLICATIONS_LIST,
+                    AdbDiagnosticOutcome.CANCELLED,
+                    "ADB_APP_LIST_CANCELLED",
+                    session.endpoint,
+                )
+                AdbOperationResult.Cancelled
+            }
+        }
+
+    override suspend fun forceStopApplication(
+        packageName: String,
+        expectedSessionId: String,
+        timeout: Duration,
+    ): AdbOperationResult<ApplicationMutationResult> = applicationMutex.withLock {
+        mutateApplication(
+            packageName = packageName,
+            expectedSessionId = expectedSessionId,
+            timeout = timeout,
+            stage = AdbOperationStage.APPLICATION_FORCE_STOP,
+            enabled = null,
+        )
+    }
+
+    override suspend fun setApplicationEnabled(
+        packageName: String,
+        enabled: Boolean,
+        expectedSessionId: String,
+        timeout: Duration,
+    ): AdbOperationResult<ApplicationMutationResult> = applicationMutex.withLock {
+        mutateApplication(
+            packageName = packageName,
+            expectedSessionId = expectedSessionId,
+            timeout = timeout,
+            stage = AdbOperationStage.APPLICATION_SET_ENABLED,
+            enabled = enabled,
+        )
+    }
+
+    private suspend fun mutateApplication(
+        packageName: String,
+        expectedSessionId: String,
+        timeout: Duration,
+        stage: AdbOperationStage,
+        enabled: Boolean?,
+    ): AdbOperationResult<ApplicationMutationResult> {
+        val session = mutex.withLock { active }
+            ?: return applicationFailure(AdbError.ApplicationSessionInvalid(stage), null)
+        if (session.id != expectedSessionId) {
+            return applicationFailure(AdbError.ApplicationSessionInvalid(stage), session.endpoint)
+        }
+        val remembered = applicationSnapshot
+        val rememberedTarget = remembered?.takeIf { it.sessionId == expectedSessionId }
+            ?.applications?.singleOrNull { it.packageName == packageName }
+        if (!isAllowedApplicationTarget(session, rememberedTarget, packageName, enabled != null)) {
+            return applicationFailure(AdbError.ApplicationTargetNotAllowed(stage), session.endpoint)
+        }
+
+        appendDiagnostic(stage, AdbDiagnosticOutcome.STARTED, "ADB_APP_MUTATION_STARTED", session.endpoint)
+        var dispatched = false
+        return try {
+            withTimeout(timeout) {
+                val fresh = when (val loaded = loadApplicationSnapshot(session, timeout, remember = true)) {
+                    is AdbOperationResult.Success -> loaded.value
+                    is AdbOperationResult.Failure -> return@withTimeout loaded
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                val freshTarget = fresh.applications.singleOrNull { it.packageName == packageName }
+                    ?: return@withTimeout applicationFailure(AdbError.ApplicationPackageNotFound(stage), session.endpoint)
+                if (!isAllowedApplicationTarget(session, freshTarget, packageName, enabled != null)) {
+                    return@withTimeout applicationFailure(AdbError.ApplicationTargetNotAllowed(stage), session.endpoint)
+                }
+                if (mutex.withLock { active?.id } != expectedSessionId) {
+                    return@withTimeout applicationFailure(AdbError.ApplicationSessionInvalid(stage), session.endpoint)
+                }
+
+                val command = if (enabled == null) {
+                    ApplicationCommands.forceStop(fresh.userId, packageName)
+                } else {
+                    ApplicationCommands.setEnabled(fresh.userId, packageName, enabled)
+                }
+                dispatched = true
+                when (val commandResult = executeShell(command, timeout)) {
+                    is AdbOperationResult.Success -> {
+                        val rejection = ApplicationParsers.rejectedOutput(
+                            commandResult.value.stdout,
+                            commandResult.value.stderr,
+                            commandResult.value.exitCode,
+                        )
+                        if (rejection != null) {
+                            return@withTimeout when (rejection) {
+                                ApplicationCommandRejection.PACKAGE_NOT_FOUND -> applicationFailure(
+                                    AdbError.ApplicationPackageNotFound(stage),
+                                    session.endpoint,
+                                )
+                                ApplicationCommandRejection.POLICY -> applicationFailure(
+                                    AdbError.ApplicationPolicyRejected(stage),
+                                    session.endpoint,
+                                )
+                            }
+                        }
+                    }
+                    is AdbOperationResult.Failure -> {
+                        if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
+                        return@withTimeout unknownMutation(session, stage)
+                    }
+                    AdbOperationResult.Cancelled -> {
+                        if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
+                        return@withTimeout unknownMutation(session, stage)
+                    }
+                }
+
+                if (enabled == null) {
+                    appendDiagnostic(stage, AdbDiagnosticOutcome.SUCCEEDED, "ADB_APP_FORCE_STOP_ACCEPTED", session.endpoint)
+                    return@withTimeout AdbOperationResult.Success(ApplicationMutationResult.RequestAccepted(session.id))
+                }
+
+                val verifiedSnapshot = when (val loaded = loadApplicationSnapshot(session, timeout, remember = true)) {
+                    is AdbOperationResult.Success -> loaded.value
+                    is AdbOperationResult.Failure -> return@withTimeout unknownMutation(session, stage)
+                    AdbOperationResult.Cancelled -> return@withTimeout unknownMutation(session, stage)
+                }
+                val verifiedTarget = verifiedSnapshot.applications.singleOrNull { it.packageName == packageName }
+                    ?: return@withTimeout applicationFailure(
+                        AdbError.ApplicationPackageNotFound(AdbOperationStage.APPLICATION_VERIFY),
+                        session.endpoint,
+                    )
+                val expectedState = if (enabled) RemoteApplicationEnabledState.ENABLED else RemoteApplicationEnabledState.DISABLED
+                if (verifiedTarget.enabledState != expectedState) {
+                    return@withTimeout applicationFailure(AdbError.ApplicationStateVerifyFailed, session.endpoint)
+                }
+                appendDiagnostic(
+                    AdbOperationStage.APPLICATION_VERIFY,
+                    AdbDiagnosticOutcome.SUCCEEDED,
+                    "ADB_APP_STATE_VERIFIED",
+                    session.endpoint,
+                )
+                AdbOperationResult.Success(ApplicationMutationResult.Verified(session.id, verifiedTarget))
+            }
+        } catch (error: TimeoutCancellationException) {
+            if (dispatched) {
+                if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
+                unknownMutation(session, stage)
+            }
+            else applicationFailure(AdbError.Timeout(stage), session.endpoint)
+        } catch (error: CancellationException) {
+            if (dispatched) {
+                if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
+                unknownMutation(session, stage)
+            } else AdbOperationResult.Cancelled
+        }
+    }
+
+    private suspend fun loadApplicationSnapshot(
+        session: ActiveSession,
+        timeout: Duration,
+        remember: Boolean,
+    ): AdbOperationResult<ApplicationSnapshot> {
+        val userId = when (val current = currentUser(timeout)) {
+            is AdbOperationResult.Success -> current.value
+            is AdbOperationResult.Failure -> return current
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        if (mutex.withLock { active?.id } != session.id) {
+            return applicationFailure(
+                AdbError.ApplicationSessionInvalid(AdbOperationStage.APPLICATIONS_LIST),
+                session.endpoint,
+            )
+        }
+        val all = when (val parsed = queryPackageNames(userId, disabledOnly = false, timeout)) {
+            is PackageQueryResult.Names -> parsed.names
+            PackageQueryResult.Empty -> linkedSetOf()
+            PackageQueryResult.CapacityExceeded -> return applicationFailure(
+                AdbError.ApplicationListCapacityExceeded,
+                session.endpoint,
+            )
+            PackageQueryResult.Unsupported -> return applicationFailure(
+                AdbError.ApplicationListUnsupported,
+                session.endpoint,
+            )
+            is PackageQueryResult.OperationFailure -> return parsed.result
+            PackageQueryResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        var degradedReason: String? = OPTIONAL_FIELDS_UNAVAILABLE_REASON
+        val disabled = when (val parsed = queryPackageNames(userId, disabledOnly = true, timeout)) {
+            is PackageQueryResult.Names -> parsed.names
+            PackageQueryResult.Empty -> linkedSetOf()
+            PackageQueryResult.CapacityExceeded -> return applicationFailure(
+                AdbError.ApplicationListCapacityExceeded,
+                session.endpoint,
+            )
+            PackageQueryResult.Unsupported -> null.also {
+                degradedReason = "$OPTIONAL_FIELDS_UNAVAILABLE_REASON；ROM 未提供可靠启用状态，相关操作已禁用"
+            }
+            is PackageQueryResult.OperationFailure -> return parsed.result
+            PackageQueryResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        val applications = all.map { packageName ->
+            RemoteApplication(
+                packageName = packageName,
+                userId = userId,
+                enabledState = when {
+                    disabled == null -> RemoteApplicationEnabledState.UNKNOWN
+                    packageName in disabled -> RemoteApplicationEnabledState.DISABLED
+                    else -> RemoteApplicationEnabledState.ENABLED
+                },
+                isSystem = false,
+            )
+        }
+        val snapshot = ApplicationSnapshot(
+            sessionId = session.id,
+            userId = userId,
+            applications = applications,
+            unavailableFields = ApplicationField.entries.toSet(),
+            degradedReason = degradedReason,
+        )
+        if (remember && mutex.withLock { active?.id } == session.id) applicationSnapshot = snapshot
+        appendDiagnostic(
+            AdbOperationStage.APPLICATIONS_LIST,
+            AdbDiagnosticOutcome.SUCCEEDED,
+            "ADB_APP_LIST_SUCCEEDED",
+            session.endpoint,
+        )
+        return AdbOperationResult.Success(snapshot)
+    }
+
+    private suspend fun currentUser(timeout: Duration): AdbOperationResult<Int> {
+        for (command in listOf(ApplicationCommands.CURRENT_USER, ApplicationCommands.CURRENT_USER_FALLBACK)) {
+            when (val result = executeShell(command, timeout)) {
+                is AdbOperationResult.Success -> if (result.value.exitCode == 0) {
+                    ApplicationParsers.currentUser(result.value.stdout)?.let { return AdbOperationResult.Success(it) }
+                }
+                is AdbOperationResult.Failure -> return restagedFailure(result, AdbOperationStage.APPLICATIONS_LIST)
+                AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+            }
+        }
+        return applicationFailure(AdbError.ApplicationCurrentUserUnavailable, mutex.withLock { active?.endpoint })
+    }
+
+    private suspend fun queryPackageNames(
+        userId: Int,
+        disabledOnly: Boolean,
+        timeout: Duration,
+    ): PackageQueryResult {
+        repeat(2) { index ->
+            val command = if (disabledOnly) {
+                ApplicationCommands.listDisabledThirdParty(userId, fallback = index == 1)
+            } else {
+                ApplicationCommands.listThirdParty(userId, fallback = index == 1)
+            }
+            when (val result = executeShell(command, timeout)) {
+                is AdbOperationResult.Success -> if (result.value.exitCode == 0) {
+                    when (val parsed = ApplicationParsers.packageNames(result.value.stdout)) {
+                        is PackageNamesParse.Success -> return PackageQueryResult.Names(parsed.names)
+                        PackageNamesParse.Empty -> return PackageQueryResult.Empty
+                        PackageNamesParse.CapacityExceeded -> return PackageQueryResult.CapacityExceeded
+                        PackageNamesParse.Malformed -> Unit
+                    }
+                }
+                is AdbOperationResult.Failure -> return PackageQueryResult.OperationFailure(
+                    restagedFailure(result, AdbOperationStage.APPLICATIONS_LIST),
+                )
+                AdbOperationResult.Cancelled -> return PackageQueryResult.Cancelled
+            }
+        }
+        return PackageQueryResult.Unsupported
+    }
+
+    private fun isAllowedApplicationTarget(
+        session: ActiveSession,
+        target: RemoteApplication?,
+        packageName: String,
+        stateMutation: Boolean,
+    ): Boolean {
+        if (!ApplicationParsers.isValidPackageName(packageName)) return false
+        if (target == null || target.packageName != packageName || target.isSystem || target.userId < 0) return false
+        if (target.enabledState == RemoteApplicationEnabledState.UNKNOWN) return false
+        if (stateMutation && target.enabledState == RemoteApplicationEnabledState.UNKNOWN) return false
+        val local = session.endpoint.host.equals("127.0.0.1", true) ||
+            session.endpoint.host.equals("::1", true) || session.endpoint.host.equals("localhost", true)
+        return !(local && packageName == SELF_PACKAGE_NAME)
+    }
+
+    private fun unknownMutation(
+        session: ActiveSession,
+        stage: AdbOperationStage,
+    ): AdbOperationResult.Success<ApplicationMutationResult> {
+        val reason = AdbError.ApplicationOutcomeUnknown(stage)
+        val state = mutableState.value
+        if (active?.id != session.id) {
+            mutableState.value = if (state is AdbConnectionState.Error) {
+                state.copy(error = reason)
+            } else {
+                AdbConnectionState.Error(
+                    reason,
+                    "code=${reason.technicalCode}; target=${session.endpoint.redacted()}",
+                )
+            }
+        }
+        appendDiagnostic(stage, AdbDiagnosticOutcome.FAILED, reason.technicalCode, session.endpoint)
+        return AdbOperationResult.Success(ApplicationMutationResult.OutcomeUnknown(session.id, reason))
+    }
+
+    private fun applicationFailure(
+        error: AdbError,
+        endpoint: AdbEndpoint?,
+    ): AdbOperationResult.Failure {
+        appendDiagnostic(error.stage, AdbDiagnosticOutcome.FAILED, error.technicalCode, endpoint)
+        return AdbOperationResult.Failure(error)
+    }
+
+    private fun restagedFailure(
+        failure: AdbOperationResult.Failure,
+        stage: AdbOperationStage,
+    ): AdbOperationResult.Failure {
+        val error = when (failure.error) {
+            is AdbError.NetworkUnreachable -> AdbError.NetworkUnreachable(stage)
+            is AdbError.Timeout -> AdbError.Timeout(stage)
+            is AdbError.AuthenticationFailed -> AdbError.AuthenticationFailed(stage)
+            is AdbError.DeviceRejected -> AdbError.DeviceRejected(stage)
+            is AdbError.ProtocolIncompatible -> AdbError.ProtocolIncompatible(stage)
+            is AdbError.RemoteClosed -> AdbError.RemoteClosed(stage)
+            is AdbError.Unknown -> AdbError.Unknown(stage)
+            else -> failure.error
+        }
+        val state = mutableState.value
+        if (state is AdbConnectionState.Error) mutableState.value = state.copy(error = error)
+        return AdbOperationResult.Failure(error)
+    }
+
+    private sealed interface PackageQueryResult {
+        data class Names(val names: LinkedHashSet<String>) : PackageQueryResult
+        data class OperationFailure(val result: AdbOperationResult.Failure) : PackageQueryResult
+        data object Empty : PackageQueryResult
+        data object Unsupported : PackageQueryResult
+        data object CapacityExceeded : PackageQueryResult
+        data object Cancelled : PackageQueryResult
+    }
+
     override fun streamLogcat(config: LogcatConfig): Flow<AdbOperationResult<LogcatLine>> = flow {
         val session = mutex.withLock { active }
         if (session == null) {
@@ -294,19 +670,26 @@ internal class DefaultAdbSessionManager(
                     is ProtocolShellPacket.StandardError -> stderr.append(packet.bytes).forEach {
                         emit(AdbOperationResult.Success(LogcatLine(it, fromStandardError = true)))
                     }
-                    is ProtocolShellPacket.Exit -> finished = true
+                    is ProtocolShellPacket.Exit -> {
+                        emit(
+                            operationFailure(
+                                AdbError.CommandStreamClosed(AdbOperationStage.LOGCAT),
+                                session.endpoint,
+                                null,
+                            ),
+                        )
+                        finished = true
+                    }
                 }
             }
             stdout.finish().forEach { emit(AdbOperationResult.Success(LogcatLine(it))) }
             stderr.finish().forEach { emit(AdbOperationResult.Success(LogcatLine(it, true))) }
-            appendDiagnostic(AdbOperationStage.LOGCAT, AdbDiagnosticOutcome.SUCCEEDED, "ADB_LOGCAT_FINISHED", session.endpoint)
         } catch (error: CancellationException) {
             appendDiagnostic(AdbOperationStage.LOGCAT, AdbDiagnosticOutcome.CANCELLED, "ADB_LOGCAT_CANCELLED", session.endpoint)
             throw error
         } catch (error: Throwable) {
             val mapped = AdbExceptionMapper.map(error, AdbOperationStage.LOGCAT)
-            closeSession(session)
-            emit(failure(mapped, session.endpoint, error))
+            emit(operationFailure(mapped, session.endpoint, error))
         } finally {
             withContext(NonCancellable + ioDispatcher) { runCatching { stream?.close() } }
             appendDiagnostic(
@@ -329,14 +712,17 @@ internal class DefaultAdbSessionManager(
             AdbOperationResult.Success(Unit)
         } catch (error: TimeoutCancellationException) {
             active = null
+            applicationSnapshot = null
             failure(AdbError.Timeout(AdbOperationStage.DISCONNECT), null, error)
         } catch (error: CancellationException) {
             active = null
+            applicationSnapshot = null
             mutableState.value = AdbConnectionState.Disconnected(DisconnectionReason.DISCONNECT_CANCELLED)
             appendDiagnostic(AdbOperationStage.DISCONNECT, AdbDiagnosticOutcome.CANCELLED, "ADB_DISCONNECT_CANCELLED", null)
             AdbOperationResult.Cancelled
         } catch (error: Throwable) {
             active = null
+            applicationSnapshot = null
             failure(AdbExceptionMapper.map(error, AdbOperationStage.DISCONNECT), null, error)
         } finally {
             if (sessionToClose != null) {
@@ -377,6 +763,7 @@ internal class DefaultAdbSessionManager(
         if (closed.compareAndSet(false, true)) {
             val session = active
             active = null
+            applicationSnapshot = null
             runCatching { session?.client?.close() }
             if (session != null) {
                 appendDiagnostic(
@@ -393,6 +780,7 @@ internal class DefaultAdbSessionManager(
     private fun closeActiveIfPresent() {
         val session = active ?: return
         active = null
+        applicationSnapshot = null
         try {
             session.client.close()
         } finally {
@@ -406,7 +794,10 @@ internal class DefaultAdbSessionManager(
     }
 
     private suspend fun closeSession(session: ActiveSession) {
-        if (active?.id == session.id) active = null
+        if (active?.id == session.id) {
+            active = null
+            applicationSnapshot = null
+        }
         withContext(NonCancellable + ioDispatcher) { runCatching { session.client.close() } }
         appendDiagnostic(
             AdbOperationStage.DISCONNECT,
@@ -420,6 +811,15 @@ internal class DefaultAdbSessionManager(
         val details = cause?.let { AdbExceptionMapper.safeTechnicalDetails(it, endpoint) }
             ?: "code=${error.technicalCode}; target=${endpoint?.redacted() ?: "<无目标>"}"
         mutableState.value = AdbConnectionState.Error(error, DiagnosticRedactor.redact(details))
+        appendDiagnostic(error.stage, AdbDiagnosticOutcome.FAILED, error.technicalCode, endpoint, cause)
+        return AdbOperationResult.Failure(error)
+    }
+
+    private fun operationFailure(
+        error: AdbError,
+        endpoint: AdbEndpoint?,
+        cause: Throwable?,
+    ): AdbOperationResult.Failure {
         appendDiagnostic(error.stage, AdbDiagnosticOutcome.FAILED, error.technicalCode, endpoint, cause)
         return AdbOperationResult.Failure(error)
     }
@@ -464,5 +864,8 @@ internal class DefaultAdbSessionManager(
         const val CONNECTION_PROBE = "echo sheen-session-ready"
         const val MAX_DIAGNOSTIC_EVENTS = 100
         const val AUTHORIZATION_RETRY_MILLIS = 1_000L
+        const val SELF_PACKAGE_NAME = "com.sheen.adbhelper"
+        const val OPTIONAL_FIELDS_UNAVAILABLE_REASON =
+            "设备基础包列表可用；版本号、版本名和安装器字段未通过跨 ROM 可靠性验证，已明确省略"
     }
 }

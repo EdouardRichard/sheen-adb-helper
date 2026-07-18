@@ -7,12 +7,11 @@ import com.sheen.adb.core.AdbConnectionState
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
-import com.sheen.adb.core.LogcatBuffer as AdbLogcatBuffer
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLevel
 import com.sheen.adb.data.TextExporter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -41,11 +40,11 @@ class LogcatViewModel(
     private val manager: AdbSessionManager,
     private val exporter: TextExporter,
 ) : ViewModel() {
-    private val buffer = LogcatBuffer()
+    private val window = LogcatWindow()
     private val mutableState = MutableStateFlow(LogcatUiState())
     val state: StateFlow<LogcatUiState> = mutableState.asStateFlow()
     private var capture: Job? = null
-    private var pendingPublish: Job? = null
+    private var captureGeneration = 0L
     private var foreground = false
 
     init {
@@ -54,14 +53,15 @@ class LogcatViewModel(
                 val connected = connection as? AdbConnectionState.Connected
                 if (connected?.sessionId != mutableState.value.sessionId) {
                     stop()
-                    buffer.clear()
-                    mutableState.value = LogcatUiState(
+                    window.reset()
+                    mutableState.value = mutableState.value.resetForSession(
                         isConnected = connected != null,
                         sessionId = connected?.sessionId,
                     )
                 } else if (connected == null) {
                     stop()
-                    mutableState.update { it.copy(isConnected = false) }
+                    window.reset()
+                    mutableState.value = mutableState.value.resetForSession(false, null)
                 } else mutableState.update { it.copy(isConnected = true) }
             }
         }
@@ -76,45 +76,67 @@ class LogcatViewModel(
             current.copy(buffers = updated.takeIf { it.isNotEmpty() } ?: current.buffers)
         }
     }
-    fun updateKeyword(value: String) { mutableState.update { it.copy(keyword = value) }; publish() }
+    fun updateKeyword(value: String) {
+        window.updateKeyword(value)
+        mutableState.update { it.copy(keyword = value) }
+        publish()
+    }
 
     fun start() {
         val current = mutableState.value
         if (!foreground || !current.isConnected || current.isCapturing || current.buffers.isEmpty()) return
+        val captureSessionId = current.sessionId ?: return
+        val generation = ++captureGeneration
+        window.resume()
         mutableState.update { it.copy(isCapturing = true, isPaused = false, error = null, exportNotice = null) }
         capture = viewModelScope.launch {
             val config = LogcatConfig(current.minimumLevel, current.buffers)
-            manager.streamLogcat(config).collect { result ->
-                when (result) {
-                    is AdbOperationResult.Success -> {
-                        val prefix = if (result.value.fromStandardError) "[stderr] " else ""
-                        buffer.add(prefix + result.value.text)
-                        if (!mutableState.value.isPaused) requestPublish()
+            try {
+                manager.streamLogcat(config).collect { result ->
+                    if (generation != captureGeneration || mutableState.value.sessionId != captureSessionId) {
+                        return@collect
                     }
-                    is AdbOperationResult.Failure -> mutableState.update { it.copy(error = result.error) }
-                    AdbOperationResult.Cancelled -> Unit
+                    when (result) {
+                        is AdbOperationResult.Success -> {
+                            val prefix = if (result.value.fromStandardError) "[stderr] " else ""
+                            window.add(prefix + result.value.text)
+                            if (!mutableState.value.isPaused) publish()
+                        }
+                        is AdbOperationResult.Failure -> mutableState.update { it.copy(error = result.error) }
+                        AdbOperationResult.Cancelled -> Unit
+                    }
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } finally {
+                if (generation == captureGeneration && mutableState.value.sessionId == captureSessionId) {
+                    mutableState.update { it.stopped() }
+                    capture = null
                 }
             }
-            mutableState.update { it.copy(isCapturing = false, isPaused = false) }
-            capture = null
         }
     }
 
     fun stop() {
+        captureGeneration++
         capture?.cancel()
         capture = null
-        pendingPublish?.cancel()
-        pendingPublish = null
-        mutableState.update { it.copy(isCapturing = false, isPaused = false) }
+        mutableState.update { it.stopped() }
         publish()
     }
 
     fun togglePause() {
-        mutableState.update { it.copy(isPaused = !it.isPaused) }
-        if (!mutableState.value.isPaused) publish()
+        if (mutableState.value.isPaused) {
+            window.resume()
+            mutableState.update { it.copy(isPaused = false) }
+            publish()
+        } else {
+            window.pause()
+            mutableState.update { it.copy(isPaused = true) }
+        }
     }
 
-    fun clear() { buffer.clear(); publish() }
+    fun clear() { window.clear(); publish() }
 
     fun export(target: Uri) {
         val text = mutableState.value.visibleLines.joinToString("\n")
@@ -127,21 +149,18 @@ class LogcatViewModel(
     fun visibleText(): String = mutableState.value.visibleLines.joinToString("\n")
 
     private fun publish() = mutableState.update { current ->
-        val needle = current.keyword.trim()
         current.copy(
-            visibleLines = buffer.snapshot().filter { needle.isEmpty() || it.contains(needle, ignoreCase = true) },
-            droppedOldest = buffer.droppedOldest,
+            visibleLines = window.snapshot(),
+            droppedOldest = window.droppedOldest,
         )
     }
 
-    private fun requestPublish() {
-        if (pendingPublish?.isActive == true) return
-        pendingPublish = viewModelScope.launch {
-            delay(100)
-            publish()
-            pendingPublish = null
-        }
-    }
-
-    override fun onCleared() { stop(); buffer.clear(); super.onCleared() }
+    override fun onCleared() { stop(); window.reset(); super.onCleared() }
 }
+
+internal fun LogcatUiState.stopped(): LogcatUiState = copy(isCapturing = false, isPaused = false)
+
+internal fun LogcatUiState.resetForSession(
+    isConnected: Boolean,
+    sessionId: String?,
+): LogcatUiState = LogcatUiState(isConnected = isConnected, sessionId = sessionId)

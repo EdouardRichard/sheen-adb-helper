@@ -48,9 +48,10 @@ fun ShellScreen(state: ShellUiState, actions: ShellViewModel) {
             value = state.commandInput,
             onValueChange = actions::updateCommand,
             modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp),
-            label = { Text("原始 ADB Shell 命令（支持多行）") },
+            label = { Text("设备端 Shell 命令（支持多行）") },
             enabled = state.isConnected && !state.isRunning,
         )
+        Text("此页面已经直接连接被控端；若输入电脑端的 adb shell 写法，执行前会明确询问是否移除该前导包装。")
         Text("当前超时：${state.timeoutSeconds} 秒（最多 300 秒）")
         Slider(
             value = state.timeoutSeconds.toFloat(),
@@ -73,6 +74,9 @@ fun ShellScreen(state: ShellUiState, actions: ShellViewModel) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("#${entry.sequence} · ${entry.status.displayName()}", style = MaterialTheme.typography.labelLarge)
                     Text(entry.command, style = MaterialTheme.typography.bodyMedium)
+                    if (entry.dispatchMode == ShellDispatchMode.CONFIRMED_HOST_WRAPPER_REMOVAL) {
+                        Text("已按你的确认移除电脑端 adb shell 前导包装")
+                    }
                     if (entry.outputMode == ShellOutputMode.MERGED) Text("底层协议仅提供合并输出")
                     if (entry.stdout.isNotEmpty()) Text("标准输出\n${entry.stdout}")
                     if (entry.stderr.isNotEmpty()) Text("标准错误\n${entry.stderr}")
@@ -85,14 +89,37 @@ fun ShellScreen(state: ShellUiState, actions: ShellViewModel) {
     if (state.showRiskNotice) AlertDialog(
         onDismissRequest = actions::dismissRiskNotice,
         title = { Text("Shell 风险说明") },
-        text = { Text("命令会以 ADB shell 权限原样发送，可能修改或删除设备数据。应用不设白名单，也不会替你撤销结果。") },
+        text = { Text("命令会以 ADB shell 权限发送，可能修改或删除设备数据。普通输入始终原样执行；电脑端 adb shell 前导包装只有在你明确确认后才会移除。") },
         confirmButton = { TextButton(onClick = actions::dismissRiskNotice) { Text("我已了解") } },
     )
-    state.pendingRiskCommand?.let {
+    state.pendingHostWrapper?.let { plan ->
+        AlertDialog(
+            onDismissRequest = actions::dismissHostWrapper,
+            title = { Text("检测到电脑端 ADB 写法") },
+            text = {
+                Text(
+                    if (plan.remoteCommand == null) {
+                        "当前页面已经直接连接被控端，不能启动交互式 adb shell。你可以返回补充设备端命令，或仍按原文执行。"
+                    } else {
+                        "当前页面已经直接连接被控端，设备内通常没有 adb。选择“执行设备命令”后，将执行下方内容；不会静默改写。\n\n${plan.remoteCommand}"
+                    },
+                )
+            },
+            confirmButton = {
+                if (plan.remoteCommand != null) {
+                    TextButton(onClick = actions::confirmHostWrapper) { Text("执行设备命令") }
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = actions::executeHostWrapperExactly) { Text("仍原样执行") }
+            },
+        )
+    }
+    state.pendingRiskExecution?.let {
         AlertDialog(
             onDismissRequest = actions::dismissRisk,
             title = { Text("命令可能具有破坏性") },
-            text = { Text("请确认你理解命令后果。应用将原样执行，不会修改命令。") },
+            text = { Text("请确认你理解命令后果。应用会按上一界面已经明确的执行方式发送命令。") },
             confirmButton = { TextButton(onClick = actions::confirmRisk) { Text("仍要执行") } },
             dismissButton = { TextButton(onClick = actions::dismissRisk) { Text("取消") } },
         )

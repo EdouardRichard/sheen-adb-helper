@@ -31,6 +31,21 @@ interface AdbSessionManager : AutoCloseable {
 
     suspend fun listProcesses(timeout: Duration = 15.seconds): AdbOperationResult<ProcessSnapshot>
 
+    suspend fun listApplications(timeout: Duration = 15.seconds): AdbOperationResult<ApplicationSnapshot>
+
+    suspend fun forceStopApplication(
+        packageName: String,
+        expectedSessionId: String,
+        timeout: Duration = 10.seconds,
+    ): AdbOperationResult<ApplicationMutationResult>
+
+    suspend fun setApplicationEnabled(
+        packageName: String,
+        enabled: Boolean,
+        expectedSessionId: String,
+        timeout: Duration = 15.seconds,
+    ): AdbOperationResult<ApplicationMutationResult>
+
     fun streamLogcat(config: LogcatConfig): Flow<AdbOperationResult<LogcatLine>>
 
     suspend fun disconnect(timeout: Duration = 5.seconds): AdbOperationResult<Unit>

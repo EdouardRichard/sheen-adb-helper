@@ -39,6 +39,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.sheen.adb.core.AdbConnectionState
+import com.sheen.adb.feature.apps.AppsRoute
+import com.sheen.adb.feature.apps.AppsViewModel
 import com.sheen.adb.feature.devices.DevicesRoute
 import com.sheen.adb.feature.devices.DevicesViewModel
 import com.sheen.adb.feature.logcat.LogcatRoute
@@ -54,9 +56,10 @@ import com.sheen.adb.feature.settings.SettingsViewModel
 import com.sheen.adb.ui.SheenDimensions
 import kotlinx.coroutines.launch
 
-private enum class Destination(val label: String, val requiresConnection: Boolean) {
+internal enum class Destination(val label: String, val requiresConnection: Boolean) {
     DEVICES("设备列表 / 首页", false),
     OVERVIEW("设备概览", true),
+    APPS("应用管理", true),
     SHELL("Shell 终端", true),
     PROCESSES("进程监控", true),
     LOGCAT("Logcat", true),
@@ -69,6 +72,7 @@ fun SheenApp(container: AppContainer) {
         DevicesViewModel(container.adbManager, container.deviceProfiles)
     })
     val overview: OverviewViewModel = viewModel(factory = factory { OverviewViewModel(container.adbManager) })
+    val apps: AppsViewModel = viewModel(factory = factory { AppsViewModel(container.adbManager) })
     val shell: ShellViewModel = viewModel(factory = factory { ShellViewModel(container.adbManager) })
     val processes: ProcessesViewModel = viewModel(factory = factory { ProcessesViewModel(container.adbManager) })
     val logcat: LogcatViewModel = viewModel(factory = factory {
@@ -87,7 +91,17 @@ fun SheenApp(container: AppContainer) {
     var destination by rememberSaveable { mutableStateOf(Destination.DEVICES) }
 
     LaunchedEffect(connected) {
-        if (!connected && destination.requiresConnection) destination = Destination.DEVICES
+        destination = destinationAfterConnectionChange(destination, connected)
+    }
+
+    LaunchedEffect(devicesState.connectionState, devicesState.profiles) {
+        val connection = devicesState.connectionState as? AdbConnectionState.Connected
+        val displayName = connection?.let { connectedState ->
+            devicesState.profiles.firstOrNull {
+                it.host == connectedState.endpoint.host && it.debugPort == connectedState.endpoint.port
+            }?.displayName
+        }
+        if (displayName != null) apps.setDeviceDisplayName(displayName)
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -97,7 +111,7 @@ fun SheenApp(container: AppContainer) {
                     DrawerContent(destination, connected, { destination = it }, devices::prefillLocalhost)
                 }
                 AppScaffold(destination, devicesState.connectionState, null) {
-                    DestinationContent(destination, devices, overview, shell, processes, logcat, settings)
+                    DestinationContent(destination, devices, overview, apps, shell, processes, logcat, settings)
                 }
             }
         } else {
@@ -121,7 +135,7 @@ fun SheenApp(container: AppContainer) {
                 },
             ) {
                 AppScaffold(destination, devicesState.connectionState, { scope.launch { drawer.open() } }) {
-                    DestinationContent(destination, devices, overview, shell, processes, logcat, settings)
+                    DestinationContent(destination, devices, overview, apps, shell, processes, logcat, settings)
                 }
             }
         }
@@ -199,6 +213,7 @@ private fun DestinationContent(
     destination: Destination,
     devices: DevicesViewModel,
     overview: OverviewViewModel,
+    apps: AppsViewModel,
     shell: ShellViewModel,
     processes: ProcessesViewModel,
     logcat: LogcatViewModel,
@@ -207,6 +222,7 @@ private fun DestinationContent(
     when (destination) {
         Destination.DEVICES -> DevicesRoute(devices)
         Destination.OVERVIEW -> OverviewRoute(overview)
+        Destination.APPS -> AppsRoute(apps)
         Destination.SHELL -> ShellRoute(shell)
         Destination.PROCESSES -> ProcessesRoute(processes)
         Destination.LOGCAT -> LogcatRoute(logcat)
@@ -216,6 +232,9 @@ private fun DestinationContent(
 
 internal fun isMenuEnabled(requiresConnection: Boolean, connected: Boolean): Boolean =
     connected || !requiresConnection
+
+internal fun destinationAfterConnectionChange(current: Destination, connected: Boolean): Destination =
+    if (!connected && current.requiresConnection) Destination.DEVICES else current
 
 internal fun connectionStatusName(connection: AdbConnectionState): String = when (connection) {
     is AdbConnectionState.Disconnected -> "未连接"
