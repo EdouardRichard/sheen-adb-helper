@@ -24,6 +24,7 @@ import com.sheen.adb.core.WirelessServiceType
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.util.concurrent.CancellationException
 import java.util.concurrent.Executor
 
 internal class AndroidNsdWirelessDiscoverySourceFactory(context: Context) : WirelessDiscoverySourceFactory {
@@ -42,14 +43,14 @@ private class AndroidNsdWirelessDiscoverySource(
     private var gateway: AndroidNsdDiscoveryPlatformGateway? = null
     private var closed = false
 
-    override fun start(request: WirelessDiscoverySourceRequest): WirelessDiscoverySourceStartResult =
-        synchronized(monitor) {
-            if (closed) {
-                return@synchronized WirelessDiscoverySourceStartResult.Rejected(
-                    WirelessDiscoverySourceFailure.PLATFORM_FAILURE,
-                )
-            }
-            try {
+    override fun start(request: WirelessDiscoverySourceRequest): WirelessDiscoverySourceStartResult {
+        val components = try {
+            synchronized(monitor) {
+                if (closed) {
+                    return WirelessDiscoverySourceStartResult.Rejected(
+                        WirelessDiscoverySourceFailure.PLATFORM_FAILURE,
+                    )
+                }
                 val platform = gateway ?: AndroidNsdDiscoveryPlatformGateway(applicationContext).also { gateway = it }
                 val activeAdapter = adapter ?: AndroidNsdDiscoveryAdapter(
                     platform = platform,
@@ -63,24 +64,55 @@ private class AndroidNsdWirelessDiscoverySource(
                         }
                     },
                 ).also { adapter = it }
-                activeAdapter.start(
-                    NsdDiscoveryRequest(
-                        generation = request.generation,
-                        apiLevel = Build.VERSION.SDK_INT,
-                        currentNetwork = platform.currentNetwork(),
-                    ),
-                ).toSourceResult()
-            } catch (_: Exception) {
-                WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
+                platform to activeAdapter
+            }
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (_: SecurityException) {
+            return WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PERMISSION_UNAVAILABLE)
+        } catch (_: Exception) {
+            return WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
+        }
+        val (platform, activeAdapter) = components
+        val result = try {
+            activeAdapter.start(
+                NsdDiscoveryRequest(
+                    generation = request.generation,
+                    apiLevel = Build.VERSION.SDK_INT,
+                    currentNetwork = platform.currentNetwork(),
+                ),
+            ).toSourceResult()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: InterruptedException) {
+            throw error
+        } catch (_: SecurityException) {
+            WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PERMISSION_UNAVAILABLE)
+        } catch (_: Exception) {
+            WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
+        }
+        if (synchronized(monitor) { closed }) {
+            activeAdapter.close()
+            return WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
+        }
+        return result
+    }
+
+    override fun close() {
+        val adapterToClose = synchronized(monitor) {
+            if (closed) {
+                null
+            } else {
+                closed = true
+                adapter.also {
+                    adapter = null
+                    gateway = null
+                }
             }
         }
-
-    override fun close() = synchronized(monitor) {
-        if (closed) return@synchronized
-        closed = true
-        adapter?.close()
-        adapter = null
-        gateway = null
+        adapterToClose?.close()
     }
 
     private fun NsdDiscoveryStartResult.toSourceResult(): WirelessDiscoverySourceStartResult = when (this) {
@@ -106,8 +138,10 @@ class AndroidNsdDiscoveryAdapter(
 ) : AutoCloseable {
     private val monitor = Any()
     private var active: ActiveDiscovery? = null
+    private var closed = false
 
     fun start(request: NsdDiscoveryRequest): NsdDiscoveryStartResult = synchronized(monitor) {
+        if (closed) return NsdDiscoveryStartResult.Rejected(NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
         end(active)
         val decision = policy.decisionFor(request)
             ?: return NsdDiscoveryStartResult.Rejected(NsdDiscoveryFailure.NETWORK_UNAVAILABLE)
@@ -133,6 +167,15 @@ class AndroidNsdDiscoveryAdapter(
                 },
             )
             if (isActive(session)) NsdDiscoveryStartResult.Started else rejectedTerminal(session)
+        } catch (error: CancellationException) {
+            endIgnoringCleanupControl(session)
+            throw error
+        } catch (error: InterruptedException) {
+            endIgnoringCleanupControl(session)
+            throw error
+        } catch (error: SecurityException) {
+            endIgnoringCleanupControl(session)
+            throw error
         } catch (_: Exception) {
             end(session)
             rejectedTerminal(session)
@@ -143,53 +186,91 @@ class AndroidNsdDiscoveryAdapter(
 
     fun cancel() = stop()
 
-    override fun close() = stop()
+    override fun close() = synchronized(monitor) {
+        if (closed) return@synchronized
+        closed = true
+        end(active)
+    }
 
     private fun discoveryCallbacks(session: ActiveDiscovery, serviceType: String): NsdDiscoveryCallbacks =
         object : NsdDiscoveryCallbacks {
-            override fun onServiceFound(service: NsdServiceRef) = synchronized(monitor) {
-                if (!isActive(session) || service.serviceType != serviceType) return@synchronized
-                try {
-                    session.track(platform.resolve(service, session.decision.network, resolveCallbacks(session)))
-                } catch (_: Exception) {
-                    fail(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+            override fun onServiceFound(service: NsdServiceRef) {
+                var shouldNotifyFailure = false
+                synchronized(monitor) {
+                    if (!isActive(session) || service.serviceType != serviceType) return@synchronized
+                    try {
+                        session.track(platform.resolve(service, session.decision.network, resolveCallbacks(session)))
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: InterruptedException) {
+                        throw error
+                    } catch (error: SecurityException) {
+                        throw error
+                    } catch (_: Exception) {
+                        shouldNotifyFailure = failLocked(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+                    }
                 }
+                if (shouldNotifyFailure) notifyFailure(NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
             }
 
-            override fun onDiscoveryFailure(failure: NsdPlatformFailure) = synchronized(monitor) {
-                if (isActive(session)) fail(session, failure.asDiscoveryFailure())
+            override fun onDiscoveryFailure(failure: NsdPlatformFailure) {
+                val mapped = failure.asDiscoveryFailure()
+                val shouldNotifyFailure = synchronized(monitor) {
+                    isActive(session) && failLocked(session, mapped)
+                }
+                if (shouldNotifyFailure) notifyFailure(mapped)
             }
         }
 
     private fun resolveCallbacks(session: ActiveDiscovery): NsdResolveCallbacks = object : NsdResolveCallbacks {
-        override fun onResolved(service: NsdResolvedService) = synchronized(monitor) {
-            if (!isActive(session)) return@synchronized
-            try {
-                val type = WirelessServiceType.fromDnsSdType(service.service.serviceType) ?: return@synchronized
-                val addresses = if (session.decision.publishAllAddresses) service.allAddresses else listOf(service.primaryAddress)
-                val observation = WirelessServiceObservation(
-                    observationId = session.observationIdFor(service.service),
-                    serviceType = type,
-                    serviceName = service.service.serviceName,
-                    addresses = addresses,
-                    port = service.port,
-                    status = WirelessServiceStatus.RESOLVED,
-                    lastSeenAt = monotonicNanos(),
-                )
-                notifyEvent(WirelessDiscoveryEvent.ServiceObserved(session.generation, observation))
-            } catch (_: Exception) {
-                fail(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+        override fun onResolved(service: NsdResolvedService) {
+            var event: WirelessDiscoveryEvent? = null
+            var shouldNotifyFailure = false
+            synchronized(monitor) {
+                if (!isActive(session)) return@synchronized
+                try {
+                    val type = WirelessServiceType.fromDnsSdType(service.service.serviceType) ?: return@synchronized
+                    val addresses = if (session.decision.publishAllAddresses) service.allAddresses else listOf(service.primaryAddress)
+                    val observation = WirelessServiceObservation(
+                        observationId = session.observationIdFor(service.service),
+                        serviceType = type,
+                        serviceName = service.service.serviceName,
+                        addresses = addresses,
+                        port = service.port,
+                        status = WirelessServiceStatus.RESOLVED,
+                        lastSeenAt = monotonicNanos(),
+                    )
+                    event = WirelessDiscoveryEvent.ServiceObserved(session.generation, observation)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: InterruptedException) {
+                    throw error
+                } catch (error: SecurityException) {
+                    throw error
+                } catch (_: Exception) {
+                    shouldNotifyFailure = failLocked(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+                }
             }
+            event?.let(::notifyEvent)
+            if (shouldNotifyFailure) notifyFailure(NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
         }
 
-        override fun onResolveFailure(failure: NsdPlatformFailure) = synchronized(monitor) {
-            if (isActive(session)) fail(session, failure.asResolveFailure())
+        override fun onResolveFailure(failure: NsdPlatformFailure) {
+            val mapped = failure.asResolveFailure()
+            val shouldNotifyFailure = synchronized(monitor) {
+                isActive(session) && failLocked(session, mapped)
+            }
+            if (shouldNotifyFailure) notifyFailure(mapped)
         }
     }
 
     private fun networkCallbacks(session: ActiveDiscovery): NsdNetworkChangeCallbacks = object : NsdNetworkChangeCallbacks {
-        override fun onNetworkChanged(network: NsdNetworkRef) = synchronized(monitor) {
-            if (isActive(session)) end(session)
+        override fun onNetworkChanged(network: NsdNetworkRef) {
+            val failure = NsdDiscoveryFailure.NETWORK_UNAVAILABLE
+            val shouldNotifyFailure = synchronized(monitor) {
+                isActive(session) && failLocked(session, failure)
+            }
+            if (shouldNotifyFailure) notifyFailure(failure)
         }
     }
 
@@ -203,12 +284,20 @@ class AndroidNsdDiscoveryAdapter(
         else -> NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED
     }
 
-    private fun fail(session: ActiveDiscovery, failure: NsdDiscoveryFailure) {
-        if (session.ended) return
+    private fun failLocked(session: ActiveDiscovery, failure: NsdDiscoveryFailure): Boolean {
+        if (session.ended) return false
         session.terminalFailure = failure
         end(session)
+        return true
+    }
+
+    private fun notifyFailure(failure: NsdDiscoveryFailure) {
         try {
             observer.onFailure(failure)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: InterruptedException) {
+            throw error
         } catch (_: Exception) {
             // Observers are outside the platform callback boundary.
         }
@@ -217,6 +306,10 @@ class AndroidNsdDiscoveryAdapter(
     private fun notifyEvent(event: WirelessDiscoveryEvent) {
         try {
             observer.onEvent(event)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: InterruptedException) {
+            throw error
         } catch (_: Exception) {
             // A consumer failure must not escape an Android callback.
         }
@@ -231,12 +324,28 @@ class AndroidNsdDiscoveryAdapter(
         if (session == null || session.ended) return
         session.ended = true
         if (active === session) active = null
+        var controlFailure: Exception? = null
         session.resources.forEach { resource ->
             try {
                 resource.cancel()
+            } catch (error: CancellationException) {
+                if (controlFailure == null) controlFailure = error
+            } catch (error: InterruptedException) {
+                if (controlFailure == null) controlFailure = error
             } catch (_: Exception) {
                 // Platform cleanup is best-effort and intentionally silent.
             }
+        }
+        controlFailure?.let { throw it }
+    }
+
+    private fun endIgnoringCleanupControl(session: ActiveDiscovery) {
+        try {
+            end(session)
+        } catch (_: CancellationException) {
+            // Preserve the control-flow exception that initiated cleanup.
+        } catch (_: InterruptedException) {
+            // Preserve the control-flow exception that initiated cleanup.
         }
     }
 
@@ -260,6 +369,10 @@ class AndroidNsdDiscoveryAdapter(
             if (ended) {
                 try {
                     resource.cancel()
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: InterruptedException) {
+                    throw error
                 } catch (_: Exception) {
                     // A synchronously-completed operation still owns this resource.
                 }
@@ -475,6 +588,12 @@ internal class AndroidNsdDiscoveryPlatformGateway(
 
     private inline fun <T> platformOperation(block: () -> T): T = try {
         block()
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: InterruptedException) {
+        throw error
+    } catch (error: SecurityException) {
+        throw error
     } catch (exception: NsdPlatformOperationException) {
         throw exception
     } catch (_: Exception) {
