@@ -43,6 +43,39 @@ class DiagnosticRedactorTest {
     }
 
     @Test
+    fun `redacts wireless pairing discovery and application values from diagnostic context`() {
+        val serviceInstance = "synthetic-adb-pairing-A7"
+        val qrPassword = "syntheticQrPass9"
+        val qrPayload = "WIFI:T:ADB;S:$serviceInstance;P:$qrPassword;;"
+        val ipv4Endpoint = "192.0.2.44:37123"
+        val unbracketedScopedIpv6Endpoint = "fe80::7%synthetic0:37124"
+        val bracketedScopedIpv6Endpoint = "[fe80::8%synthetic1]:37125"
+        val packageName = "com.example.syntheticdiagnostics"
+        val raw = listOf(
+            "qrPayload=$qrPayload",
+            "qrPassword=$qrPassword",
+            "serviceType=_adb-tls-pairing._tcp serviceName=$serviceInstance",
+            "endpoint=$ipv4Endpoint",
+            "endpoint=$unbracketedScopedIpv6Endpoint",
+            "endpoint=$bracketedScopedIpv6Endpoint",
+            "packageName=$packageName application=$packageName",
+            "exception=IllegalStateException: pairing failed for $qrPayload",
+            "message=discovery failed for $serviceInstance at $unbracketedScopedIpv6Endpoint",
+            "context=$qrPassword $bracketedScopedIpv6Endpoint $packageName",
+        ).joinToString("; ")
+
+        val redacted = DiagnosticRedactor.redact(raw)
+
+        assertFalse(redacted.contains(qrPayload))
+        assertFalse(redacted.contains(qrPassword))
+        assertFalse(redacted.contains(serviceInstance))
+        assertFalse(redacted.contains(ipv4Endpoint))
+        assertFalse(redacted.contains(unbracketedScopedIpv6Endpoint))
+        assertFalse(redacted.contains(bracketedScopedIpv6Endpoint))
+        assertFalse(redacted.contains(packageName))
+    }
+
+    @Test
     fun `structured diagnostic fields use an explicit safe whitelist`() {
         val fields = DiagnosticRedactor.safeFields(
             mapOf(
@@ -55,6 +88,14 @@ class DiagnosticRedactorTest {
                 "packageName" to "com.example.synthetic",
                 "shellOutput" to "SYNTHETIC_SHELL_CONTENT",
                 "logcat" to "SYNTHETIC_LOGCAT_CONTENT",
+                "qrPayload" to "WIFI:T:ADB;S:synthetic-adb-pairing-A7;P:syntheticQrPass9;;",
+                "qrPassword" to "syntheticQrPass9",
+                "serviceName" to "synthetic-adb-pairing-A7",
+                "endpoint" to "fe80::7%synthetic0:37124",
+                "application" to "com.example.syntheticdiagnostics",
+                "exception" to "IllegalStateException: syntheticQrPass9",
+                "message" to "synthetic-adb-pairing-A7 failed",
+                "context" to "192.0.2.44:37123",
             ),
         )
 
