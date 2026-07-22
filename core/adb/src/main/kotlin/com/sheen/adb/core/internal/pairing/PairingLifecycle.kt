@@ -8,23 +8,25 @@ import com.sheen.adb.core.PairingCommandResult
 import com.sheen.adb.core.PairingFailure
 import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.PairingSecret
+import java.util.concurrent.CancellationException
 
-fun interface MonotonicClock {
+internal fun interface MonotonicClock {
     fun nowMillis(): Long
 }
 
-fun interface PairingAction {
+internal fun interface PairingAction {
     fun pair(method: PairingMethod, secret: CharArray)
 }
 
-class PairingLifecycle(
+internal class PairingLifecycle(
     private val clock: MonotonicClock,
     private val action: PairingAction,
-) {
+) : AutoCloseable {
     private val lock = Any()
     private val usedIds = mutableSetOf<PairingAttemptId>()
     private var current: PairingAttemptState? = null
     private var retainedSecret: PairingSecret? = null
+    private var closed = false
 
     fun startQr(
         attemptId: PairingAttemptId,
@@ -42,9 +44,14 @@ class PairingLifecycle(
     }
 
     fun awaitTarget(attemptId: PairingAttemptId): PairingCommandResult = synchronized(lock) {
-        val state = matchingState(attemptId) ?: return@synchronized mismatch(attemptId)
+        val state = matchingState(attemptId) ?: return@synchronized unmatchedCommand()
         if (isTerminal(state)) return@synchronized rejected(PairingCommandRejection.TERMINAL_ATTEMPT)
         if (isExpired(state)) return@synchronized terminal(PairingAttemptPhase.EXPIRED, PairingFailure.EXPIRED)
+        if (state.method != PairingMethod.QR ||
+            (state.phase != PairingAttemptPhase.PREPARING && state.phase != PairingAttemptPhase.WAITING_FOR_TARGET)
+        ) {
+            return@synchronized rejected(PairingCommandRejection.INVALID_PHASE)
+        }
         if (state.phase == PairingAttemptPhase.PREPARING) {
             current = state.copy(phase = PairingAttemptPhase.WAITING_FOR_TARGET)
         }
@@ -52,31 +59,34 @@ class PairingLifecycle(
     }
 
     fun onTargetReady(attemptId: PairingAttemptId): PairingCommandResult = synchronized(lock) {
-        val state = matchingState(attemptId) ?: return@synchronized mismatch(attemptId)
+        val state = matchingState(attemptId) ?: return@synchronized unmatchedCommand()
         if (isTerminal(state)) return@synchronized rejected(PairingCommandRejection.TERMINAL_ATTEMPT)
         if (isExpired(state)) return@synchronized terminal(PairingAttemptPhase.EXPIRED, PairingFailure.EXPIRED)
         if (state.method != PairingMethod.QR || state.phase != PairingAttemptPhase.WAITING_FOR_TARGET) {
-            return@synchronized rejected(PairingCommandRejection.STALE_ATTEMPT)
+            return@synchronized rejected(PairingCommandRejection.INVALID_PHASE)
         }
+        val secret = retainedSecret ?: return@synchronized terminal(PairingAttemptPhase.FAILED, PairingFailure.ACTION_FAILED)
         current = state.copy(phase = PairingAttemptPhase.PAIRING)
         try {
-            retainedSecret?.withChars { secret -> action.pair(PairingMethod.QR, secret) }
+            secret.withChars { chars -> action.pair(PairingMethod.QR, chars) }
             terminal(PairingAttemptPhase.SUCCEEDED, null)
-        } catch (_: Throwable) {
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
             terminal(PairingAttemptPhase.FAILED, PairingFailure.ACTION_FAILED)
         } finally {
-            retainedSecret?.clear()
-            retainedSecret = null
+            secret.clear()
+            if (retainedSecret === secret) retainedSecret = null
         }
     }
 
     fun submitCode(attemptId: PairingAttemptId, code: CharArray): PairingCommandResult = synchronized(lock) {
         try {
-            val state = matchingState(attemptId) ?: return@synchronized mismatch(attemptId)
+            val state = matchingState(attemptId) ?: return@synchronized unmatchedCommand()
             if (isTerminal(state)) return@synchronized rejected(PairingCommandRejection.TERMINAL_ATTEMPT)
             if (isExpired(state)) return@synchronized terminal(PairingAttemptPhase.EXPIRED, PairingFailure.EXPIRED)
             if (state.method != PairingMethod.SIX_DIGIT_CODE || state.phase != PairingAttemptPhase.WAITING_FOR_CODE) {
-                return@synchronized rejected(PairingCommandRejection.STALE_ATTEMPT)
+                return@synchronized rejected(PairingCommandRejection.INVALID_PHASE)
             }
             if (!isSixAsciiDigits(code)) return@synchronized rejected(PairingCommandRejection.INVALID_CODE)
 
@@ -84,7 +94,9 @@ class PairingLifecycle(
             try {
                 action.pair(PairingMethod.SIX_DIGIT_CODE, code)
                 terminal(PairingAttemptPhase.SUCCEEDED, null)
-            } catch (_: Throwable) {
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
                 terminal(PairingAttemptPhase.FAILED, PairingFailure.ACTION_FAILED)
             }
         } finally {
@@ -105,7 +117,23 @@ class PairingLifecycle(
     }
 
     fun expire(attemptId: PairingAttemptId): PairingCommandResult = synchronized(lock) {
-        terminalCommand(attemptId, PairingAttemptPhase.EXPIRED, PairingFailure.EXPIRED)
+        val state = matchingState(attemptId) ?: return@synchronized unmatchedCommand()
+        when {
+            isTerminal(state) -> accepted()
+            !isExpired(state) -> rejected(PairingCommandRejection.NOT_EXPIRED)
+            else -> terminal(PairingAttemptPhase.EXPIRED, PairingFailure.EXPIRED)
+        }
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            if (closed) return
+            retainedSecret?.clear()
+            retainedSecret = null
+            current = null
+            usedIds.clear()
+            closed = true
+        }
     }
 
     private fun start(
@@ -115,6 +143,10 @@ class PairingLifecycle(
         deadlineMillis: Long,
         secret: PairingSecret?,
     ): PairingCommandResult {
+        if (closed) {
+            secret?.clear()
+            return rejected(PairingCommandRejection.CLOSED)
+        }
         if (attemptId in usedIds) {
             secret?.clear()
             return rejected(PairingCommandRejection.ATTEMPT_ID_REUSED)
@@ -125,9 +157,13 @@ class PairingLifecycle(
             return rejected(PairingCommandRejection.ACTIVE_ATTEMPT_EXISTS)
         }
         usedIds += attemptId
-        retainedSecret?.clear()
+        val newState = PairingAttemptState(attemptId, method, initialPhase, deadlineMillis)
+        current = newState
+        if (isExpired(newState)) {
+            secret?.clear()
+            return terminal(PairingAttemptPhase.EXPIRED, PairingFailure.EXPIRED)
+        }
         retainedSecret = secret
-        current = PairingAttemptState(attemptId, method, initialPhase, deadlineMillis)
         return accepted()
     }
 
@@ -136,12 +172,12 @@ class PairingLifecycle(
         phase: PairingAttemptPhase,
         failure: PairingFailure,
     ): PairingCommandResult {
-        val state = matchingState(attemptId) ?: return mismatch(attemptId)
+        val state = matchingState(attemptId) ?: return unmatchedCommand()
         return if (isTerminal(state)) accepted() else terminal(phase, failure)
     }
 
     private fun terminal(phase: PairingAttemptPhase, failure: PairingFailure?): PairingCommandResult {
-        val state = requireNotNull(current)
+        val state = current ?: return rejected(PairingCommandRejection.NO_ACTIVE_ATTEMPT)
         retainedSecret?.clear()
         retainedSecret = null
         current = state.copy(phase = phase, failure = failure)
@@ -151,14 +187,16 @@ class PairingLifecycle(
     private fun matchingState(attemptId: PairingAttemptId): PairingAttemptState? =
         current?.takeIf { it.attemptId == attemptId }
 
-    private fun mismatch(attemptId: PairingAttemptId): PairingCommandResult =
-        if (attemptId in usedIds) rejected(PairingCommandRejection.STALE_ATTEMPT)
-        else rejected(PairingCommandRejection.STALE_ATTEMPT)
+    private fun unmatchedCommand(): PairingCommandResult = when {
+        closed -> rejected(PairingCommandRejection.CLOSED)
+        current == null -> rejected(PairingCommandRejection.NO_ACTIVE_ATTEMPT)
+        else -> rejected(PairingCommandRejection.STALE_ATTEMPT)
+    }
 
-    private fun accepted(): PairingCommandResult = PairingCommandResult(requireNotNull(current))
+    private fun accepted(): PairingCommandResult = PairingCommandResult(current ?: IDLE_STATE)
 
     private fun rejected(rejection: PairingCommandRejection): PairingCommandResult =
-        PairingCommandResult(requireNotNull(current), rejection)
+        PairingCommandResult(current ?: IDLE_STATE, rejection)
 
     private fun isExpired(state: PairingAttemptState): Boolean = clock.nowMillis() >= state.deadlineMillis
 
@@ -169,6 +207,13 @@ class PairingLifecycle(
 
     private companion object {
         const val SIX_DIGIT_CODE_LENGTH = 6
+        val IDLE_STATE = PairingAttemptState(
+            attemptId = PairingAttemptId.sentinel(),
+            method = PairingMethod.NONE,
+            phase = PairingAttemptPhase.IDLE,
+            deadlineMillis = 0,
+            failure = PairingFailure.NO_ACTIVE_ATTEMPT,
+        )
         val TERMINAL_PHASES = setOf(
             PairingAttemptPhase.SUCCEEDED,
             PairingAttemptPhase.CANCELLED,

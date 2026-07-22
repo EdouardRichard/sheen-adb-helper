@@ -14,6 +14,8 @@ class PairingAttemptId private constructor(
             require(token.isNotBlank()) { "Pairing attempt ID must not be blank." }
             return PairingAttemptId(token)
         }
+
+        internal fun sentinel(): PairingAttemptId = PairingAttemptId("")
     }
 }
 
@@ -30,11 +32,13 @@ class PairingSecret(
 }
 
 enum class PairingMethod {
+    NONE,
     QR,
     SIX_DIGIT_CODE,
 }
 
 enum class PairingAttemptPhase {
+    IDLE,
     PREPARING,
     WAITING_FOR_TARGET,
     WAITING_FOR_CODE,
@@ -47,6 +51,7 @@ enum class PairingAttemptPhase {
 }
 
 enum class PairingFailure {
+    NO_ACTIVE_ATTEMPT,
     CANCELLED,
     EXPIRED,
     EXPLICIT_FAILURE,
@@ -55,7 +60,11 @@ enum class PairingFailure {
 }
 
 enum class PairingCommandRejection {
+    NO_ACTIVE_ATTEMPT,
+    CLOSED,
     INVALID_CODE,
+    INVALID_PHASE,
+    NOT_EXPIRED,
     STALE_ATTEMPT,
     TERMINAL_ATTEMPT,
     ATTEMPT_ID_REUSED,
