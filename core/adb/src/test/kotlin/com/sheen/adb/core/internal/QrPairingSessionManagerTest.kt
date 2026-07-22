@@ -183,7 +183,7 @@ class QrPairingSessionManagerTest {
     }
 
     private companion object {
-        const val QR_PASSWORD_LENGTH = 12
+        const val QR_PASSWORD_LENGTH = 19
         const val SIX_DIGIT_CODE_LENGTH = 6
         val QR_ALPHABET = charArrayOf('A', 'b', '7', '-', '_')
         val QR_ENDPOINT = AdbEndpoint("qr-target.invalid", 47101)
