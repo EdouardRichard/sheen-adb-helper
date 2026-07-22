@@ -121,6 +121,7 @@ feature/logcat/
 - 只发现 `_adb-tls-pairing._tcp` 与 `_adb-tls-connect._tcp`；不发现旧式不安全 `_adb._tcp`，不枚举地址空间或探测端口。
 - 同一 `(Network, serviceType, serviceName)` 的重复回调去重。跨 pairing/connect 记录只在成功建立 TLS/ADB Session 后，由 `AdbSessionManager` 已验证的主机公钥指纹生成进程内 opaque `verifiedDeviceId`，并同时回填到同一 attempt 中用户选择的 pairing observation 与最终连接成功的 connect observation；只有两个 observation 的该值相同才合并。配对成功但尚未连接时，或 Kadb 未暴露可靠对端身份时，默认分开展示并要求用户选择，不按名称、地址或端口猜测。
 - API 30–32 使用 legacy discover/resolve 加临时 `MulticastLock`；API 33+ 绑定当前 `Network`；API 34+ 使用多地址回调。每次发现有 generation token，停止后丢弃迟到回调并释放监听器/锁。
+- manager 接线分为两个独立实施边界：先在 `AdbModels.kt` 与 `AdbSessionManager.kt` 定义 `AdbOperationStage.DISCOVERY`、不含平台/端点原文的结构化发现错误、项目自有 discovery source/coordinator 契约与状态流；再仅在 `DefaultAdbSessionManager.kt` 实现唯一活动发现、generation/session guard、并发拒绝、超时/取消终态和 `close()` 清理。这样 Android NSD 类型不会泄漏到公开 API，并保持每个实施任务最多修改两个文件。
 
 ### 2. 本机通知与短时前台服务
 
