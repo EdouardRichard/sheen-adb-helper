@@ -64,7 +64,7 @@ internal class QrPairingCoordinator(
         QrPairingMatch(
             attemptId = attemptId,
             observationId = observation.observationId,
-            secret = attempt.material.pairingSecret(),
+            secret = attempt.material.pairingSecret,
         )
     }
 
@@ -160,21 +160,23 @@ internal class QrPairingMaterial(
     private val password: CharArray,
 ) {
     private val lock = Any()
+    private val pairingSecretReference = PairingSecret(password)
     private var active = true
     private var payloadReference: String? = buildPayload(serviceInstance, password)
 
     val payload: String?
         get() = synchronized(lock) { payloadReference }
 
-    internal fun pairingSecret(): PairingSecret = synchronized(lock) {
-        check(active) { "QR pairing material is no longer active." }
-        PairingSecret(password)
-    }
+    val pairingSecret: PairingSecret
+        get() = synchronized(lock) {
+            check(active) { "QR pairing material is no longer active." }
+            pairingSecretReference
+        }
 
     internal fun invalidate() = synchronized(lock) {
         if (!active) return@synchronized
         active = false
-        password.fill('\u0000')
+        pairingSecretReference.clear()
         payloadReference = null
     }
 
