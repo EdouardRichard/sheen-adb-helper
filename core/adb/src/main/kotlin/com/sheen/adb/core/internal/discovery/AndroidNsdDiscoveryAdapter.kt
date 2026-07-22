@@ -3,7 +3,6 @@ package com.sheen.adb.core.internal.discovery
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
-import android.net.NetworkRequest
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
@@ -26,6 +25,7 @@ class AndroidNsdDiscoveryAdapter(
     private val policy: NsdDiscoveryPolicy,
     private val scheduler: NsdScheduler,
     private val observer: NsdDiscoveryObserver,
+    private val monotonicNanos: () -> Long = System::nanoTime,
 ) : AutoCloseable {
     private val monitor = Any()
     private var active: ActiveDiscovery? = null
@@ -82,18 +82,22 @@ class AndroidNsdDiscoveryAdapter(
     private fun resolveCallbacks(session: ActiveDiscovery): NsdResolveCallbacks = object : NsdResolveCallbacks {
         override fun onResolved(service: NsdResolvedService) = synchronized(monitor) {
             if (!isActive(session)) return@synchronized
-            val type = WirelessServiceType.fromDnsSdType(service.service.serviceType) ?: return@synchronized
-            val addresses = if (session.decision.publishAllAddresses) service.allAddresses else listOf(service.primaryAddress)
-            val observation = WirelessServiceObservation(
-                observationId = WirelessObservationId("nsd-${session.generation}-${session.nextObservationId++}"),
-                serviceType = type,
-                serviceName = "redacted",
-                addresses = addresses,
-                port = service.port,
-                status = WirelessServiceStatus.RESOLVED,
-                lastSeenAt = 0L,
-            )
-            notifyEvent(WirelessDiscoveryEvent.ServiceObserved(session.generation, observation))
+            try {
+                val type = WirelessServiceType.fromDnsSdType(service.service.serviceType) ?: return@synchronized
+                val addresses = if (session.decision.publishAllAddresses) service.allAddresses else listOf(service.primaryAddress)
+                val observation = WirelessServiceObservation(
+                    observationId = session.observationIdFor(service.service),
+                    serviceType = type,
+                    serviceName = service.service.serviceName,
+                    addresses = addresses,
+                    port = service.port,
+                    status = WirelessServiceStatus.RESOLVED,
+                    lastSeenAt = monotonicNanos(),
+                )
+                notifyEvent(WirelessDiscoveryEvent.ServiceObserved(session.generation, observation))
+            } catch (_: Exception) {
+                fail(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+            }
         }
 
         override fun onResolveFailure(failure: NsdPlatformFailure) = synchronized(monitor) {
@@ -154,8 +158,15 @@ class AndroidNsdDiscoveryAdapter(
         val decision: NsdDiscoveryDecision,
     ) {
         val resources = mutableListOf<NsdPlatformResource>()
+        private val observationIds = mutableMapOf<ObservationKey, WirelessObservationId>()
         var ended = false
         var nextObservationId = 0
+
+        fun observationIdFor(service: NsdServiceRef): WirelessObservationId = observationIds.getOrPut(
+            ObservationKey(decision.network, service.serviceType, service.serviceName),
+        ) {
+            WirelessObservationId("nsd-$generation-${nextObservationId++}")
+        }
 
         fun track(resource: NsdPlatformResource) {
             if (ended) {
@@ -168,6 +179,12 @@ class AndroidNsdDiscoveryAdapter(
                 resources += resource
             }
         }
+
+        private data class ObservationKey(
+            val network: NsdNetworkRef?,
+            val serviceType: String,
+            val serviceName: String,
+        )
     }
 }
 
@@ -180,9 +197,15 @@ internal class AndroidNsdDiscoveryPlatformGateway(
     private val nsdManager = appContext.getSystemService(NsdManager::class.java)
     private val connectivityManager = appContext.getSystemService(ConnectivityManager::class.java)
     private val wifiManager = appContext.getSystemService(WifiManager::class.java)
+    private val monitor = Any()
     private val networks = mutableMapOf<NsdNetworkRef, Network>()
+    private val discoveredServices = mutableMapOf<NsdServiceRef, StoredService>()
 
-    fun currentNetwork(): NsdNetworkRef? = connectivityManager.activeNetwork?.let(::rememberNetwork)
+    fun currentNetwork(): NsdNetworkRef? =
+        if (apiLevel < NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) null
+        else connectivityManager.activeNetwork?.let { network ->
+            synchronized(monitor) { rememberNetwork(network) }
+        }
 
     override fun acquireMulticastLock(): NsdPlatformResource = platformOperation {
         val lock = wifiManager.createMulticastLock("sheen-adb-discovery")
@@ -196,17 +219,30 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         network: NsdNetworkRef?,
         callbacks: NsdDiscoveryCallbacks,
     ): NsdPlatformResource = platformOperation {
+        val registration = Any()
+        var registrationActive = true
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) = Unit
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
+                if (!synchronized(monitor) { registrationActive }) return
                 val reference = serviceInfo.toServiceRef(serviceType) ?: run {
                     callbacks.onDiscoveryFailure(NsdPlatformFailure.OPERATION_FAILED)
                     return
                 }
-                callbacks.onServiceFound(reference)
+                val accepted = synchronized(monitor) {
+                    if (!registrationActive) false else {
+                        discoveredServices[reference] = StoredService(serviceInfo, registration)
+                        true
+                    }
+                }
+                if (accepted) callbacks.onServiceFound(reference)
             }
 
-            override fun onServiceLost(serviceInfo: NsdServiceInfo) = Unit
+            override fun onServiceLost(serviceInfo: NsdServiceInfo) {
+                serviceInfo.toServiceRef(serviceType)?.let { reference ->
+                    synchronized(monitor) { removeDiscoveredService(reference, registration) }
+                }
+            }
             override fun onDiscoveryStopped(serviceType: String) = Unit
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 callbacks.onDiscoveryFailure(NsdPlatformFailure.DISCOVERY_FAILED)
@@ -227,7 +263,13 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         } else {
             nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
         }
-        CancelOnceResource { nsdManager.stopServiceDiscovery(listener) }
+        CancelOnceResource {
+            synchronized(monitor) {
+                registrationActive = false
+                discoveredServices.entries.removeAll { it.value.registration === registration }
+            }
+            nsdManager.stopServiceDiscovery(listener)
+        }
     }
 
     override fun resolve(
@@ -235,10 +277,11 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         network: NsdNetworkRef?,
         callbacks: NsdResolveCallbacks,
     ): NsdPlatformResource = platformOperation {
-        val info = NsdServiceInfo().apply {
-            serviceName = service.serviceName
-            serviceType = service.serviceType
-            if (apiLevel >= NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) setNetwork(requireNetwork(network))
+        val info = synchronized(monitor) {
+            discoveredServices[service]?.info
+        } ?: throw NsdPlatformOperationException(NsdPlatformFailure.OPERATION_FAILED)
+        if (apiLevel >= NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) {
+            info.setNetwork(requireNetwork(network))
         }
         val listener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
@@ -267,25 +310,46 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         network: NsdNetworkRef,
         callbacks: NsdNetworkChangeCallbacks,
     ): NsdPlatformResource = platformOperation {
+        val networkRef = network
         val expected = requireNetwork(network)
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                if (network != expected) callbacks.onNetworkChanged(rememberNetwork(network))
+                if (network != expected) callbacks.onNetworkChanged(NsdNetworkRef("network-changed"))
             }
 
             override fun onLost(network: Network) {
-                if (network == expected) callbacks.onNetworkChanged(NsdNetworkRef("network-lost"))
+                if (network == expected) {
+                    synchronized(monitor) { removeNetwork(network, networkRef) }
+                    callbacks.onNetworkChanged(NsdNetworkRef("network-lost"))
+                }
             }
         }
-        connectivityManager.registerDefaultNetworkCallback(callback)
-        CancelOnceResource { connectivityManager.unregisterNetworkCallback(callback) }
+        try {
+            connectivityManager.registerDefaultNetworkCallback(callback)
+        } catch (exception: Exception) {
+            synchronized(monitor) { removeNetwork(expected, networkRef) }
+            throw exception
+        }
+        CancelOnceResource {
+            synchronized(monitor) { removeNetwork(expected, networkRef) }
+            connectivityManager.unregisterNetworkCallback(callback)
+        }
     }
 
-    private fun requireNetwork(reference: NsdNetworkRef?): Network =
+    private fun requireNetwork(reference: NsdNetworkRef?): Network = synchronized(monitor) {
         reference?.let(networks::get) ?: throw NsdPlatformOperationException(NsdPlatformFailure.OPERATION_FAILED)
+    }
 
     private fun rememberNetwork(network: Network): NsdNetworkRef =
         NsdNetworkRef("network-${network.networkHandle}").also { networks[it] = network }
+
+    private fun removeNetwork(network: Network, reference: NsdNetworkRef) {
+        if (networks[reference] == network) networks.remove(reference)
+    }
+
+    private fun removeDiscoveredService(reference: NsdServiceRef, registration: Any) {
+        if (discoveredServices[reference]?.registration === registration) discoveredServices.remove(reference)
+    }
 
     private fun NsdServiceInfo.toServiceRef(expectedType: String): NsdServiceRef? = try {
         if (serviceType != expectedType || serviceName.isNullOrBlank()) null
@@ -335,7 +399,9 @@ internal class AndroidNsdScheduler(
 ) : NsdScheduler {
     override fun schedule(delayMillis: Long, action: () -> Unit): NsdPlatformResource {
         val runnable = Runnable(action)
-        handler.postDelayed(runnable, delayMillis)
+        if (!handler.postDelayed(runnable, delayMillis)) {
+            throw NsdPlatformOperationException(NsdPlatformFailure.OPERATION_FAILED)
+        }
         return CancelOnceResource { handler.removeCallbacks(runnable) }
     }
 }
@@ -363,3 +429,8 @@ private class CancelOnceResource(
         cancelAction()
     }
 }
+
+private data class StoredService(
+    val info: NsdServiceInfo,
+    val registration: Any,
+)
