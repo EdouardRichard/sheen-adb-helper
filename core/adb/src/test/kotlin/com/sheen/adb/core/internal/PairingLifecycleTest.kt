@@ -22,7 +22,8 @@ class PairingLifecycleTest {
     fun `QR attempt prepares waits for target then succeeds with its supplied password`() {
         val password = "qr-password-synthetic".toCharArray()
         val action = FakePairingAction(password)
-        val lifecycle = PairingLifecycle(FakeClock(nowMillis = 10), action)
+        val clock = FakeClock(nowMillis = 10)
+        val lifecycle = PairingLifecycle(clock, action)
         val attemptId = attemptId("qr")
 
         assertEquals(
@@ -37,21 +38,7 @@ class PairingLifecycleTest {
         assertEquals(action.calls, listOf(PairingCall(PairingMethod.QR, wasExpectedAndNonCleared = true)))
         assertCleared(password)
         assertTrue(action.expectedSourceIsCleared())
-        val lateCode = "012345".toCharArray()
-        val restartedSecret = "restart-secret-synthetic".toCharArray()
-        val lateAwait = lifecycle.awaitTarget(attemptId)
-        val lateTarget = lifecycle.onTargetReady(attemptId)
-        val lateSubmit = lifecycle.submitCode(attemptId, lateCode)
-        val restart = lifecycle.startQr(attemptId, PairingSecret(restartedSecret), deadlineMillis = 20)
-
-        assertEquals(lateAwait.state, success.state)
-        assertEquals(lateTarget.state, success.state)
-        assertEquals(lateSubmit.state, success.state)
-        assertEquals(lateSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
-        assertEquals(restart.state, success.state)
-        assertEquals(restart.rejection, PairingCommandRejection.ATTEMPT_ID_REUSED)
-        assertCleared(lateCode)
-        assertCleared(restartedSecret)
+        val lateSubmit = assertTerminalStateIsStable(lifecycle, attemptId, clock, success)
         assertSafeRendering(success, lateSubmit, "attempt-synthetic-qr", "qr-password-synthetic")
     }
 
@@ -128,26 +115,8 @@ class PairingLifecycleTest {
         assertFalse(secret.toString().contains("secret-synthetic"))
         assertFalse(runCatching { PairingAttemptId.of("   ") }.isSuccess)
         assertCleared(secretChars)
-        assertTrue(
-            PairingAttemptId::class.java.declaredMethods.none { method ->
-                Modifier.isPublic(method.modifiers) &&
-                    method.name != "toString" &&
-                    (method.returnType == String::class.java ||
-                        method.name.startsWith("copy") ||
-                        method.name.startsWith("component"))
-            },
-        )
-        assertTrue(
-            PairingSecret::class.java.declaredMethods.none { method ->
-                Modifier.isPublic(method.modifiers) &&
-                    method.name != "toString" &&
-                    (method.returnType == CharArray::class.java ||
-                        method.returnType == String::class.java ||
-                        Collection::class.java.isAssignableFrom(method.returnType) ||
-                        method.name.startsWith("copy") ||
-                        method.name.startsWith("component"))
-            },
-        )
+        assertOpaquePublicSurface(PairingAttemptId::class.java, setOf("equals", "hashCode", "toString"))
+        assertOpaquePublicSurface(PairingSecret::class.java, setOf("clear", "equals", "hashCode", "toString"))
     }
 
     @Test
@@ -295,32 +264,19 @@ class PairingLifecycleTest {
             ExpectedTerminal(PairingAttemptPhase.UNSUPPORTED, PairingFailure.UNSUPPORTED) { lifecycle, id -> lifecycle.markUnsupported(id) },
         ).forEachIndexed { index, terminal ->
             val password = "terminal-secret-$index".toCharArray()
-            val lifecycle = PairingLifecycle(FakeClock(), FakePairingAction(password))
+            val clock = FakeClock()
+            val lifecycle = PairingLifecycle(clock, FakePairingAction(password))
             val attemptId = attemptId("terminal-$index")
             lifecycle.startQr(attemptId, PairingSecret(password), deadlineMillis = 20)
 
             val terminalResult = terminal.transition(lifecycle, attemptId)
             val repeated = terminal.transition(lifecycle, attemptId)
-            val lateAwait = lifecycle.awaitTarget(attemptId)
-            val lateTarget = lifecycle.onTargetReady(attemptId)
-            val lateCode = "012345".toCharArray()
-            val lateSubmit = lifecycle.submitCode(attemptId, lateCode)
-            val restartedSecret = "restart-secret-$index".toCharArray()
-            val restart = lifecycle.startQr(attemptId, PairingSecret(restartedSecret), deadlineMillis = 20)
+            val lateSubmit = assertTerminalStateIsStable(lifecycle, attemptId, clock, terminalResult)
 
             assertEquals(repeated.state, terminalResult.state)
             assertEquals(terminalResult.state.phase, terminal.phase)
             assertEquals(terminalResult.state.failure, terminal.failure)
-            assertEquals(lateAwait.state, terminalResult.state)
-            assertEquals(lateAwait.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
-            assertEquals(lateTarget.state, terminalResult.state)
-            assertEquals(lateSubmit.state, terminalResult.state)
-            assertEquals(lateSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
-            assertEquals(restart.state, terminalResult.state)
-            assertEquals(restart.rejection, PairingCommandRejection.ATTEMPT_ID_REUSED)
             assertCleared(password)
-            assertCleared(lateCode)
-            assertCleared(restartedSecret)
             assertSafeRendering(
                 terminalResult,
                 lateSubmit,
@@ -343,27 +299,13 @@ class PairingLifecycleTest {
 
         val expired = lifecycle.expire(attemptId)
         val repeated = lifecycle.expire(attemptId)
-        val lateAwait = lifecycle.awaitTarget(attemptId)
-        val lateTarget = lifecycle.onTargetReady(attemptId)
-        val lateCode = "012345".toCharArray()
-        val lateSubmit = lifecycle.submitCode(attemptId, lateCode)
-        val restartedSecret = "expiry-restart-secret-synthetic".toCharArray()
-        val restart = lifecycle.startQr(attemptId, PairingSecret(restartedSecret), deadlineMillis = 20)
+        val lateSubmit = assertTerminalStateIsStable(lifecycle, attemptId, clock, expired)
 
         assertEquals(expired.state.phase, PairingAttemptPhase.EXPIRED)
         assertEquals(expired.state.failure, PairingFailure.EXPIRED)
         assertEquals(repeated.state, expired.state)
-        assertEquals(lateAwait.state, expired.state)
-        assertEquals(lateAwait.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
-        assertEquals(lateTarget.state, expired.state)
-        assertEquals(lateSubmit.state, expired.state)
-        assertEquals(lateSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
-        assertEquals(restart.state, expired.state)
-        assertEquals(restart.rejection, PairingCommandRejection.ATTEMPT_ID_REUSED)
         assertTrue(action.calls.isEmpty())
         assertCleared(password)
-        assertCleared(lateCode)
-        assertCleared(restartedSecret)
         assertSafeRendering(expired, lateSubmit, "attempt-synthetic-explicit-expiry", "expiry-secret-synthetic")
     }
 
@@ -375,21 +317,19 @@ class PairingLifecycleTest {
         val rawException = "raw-exception-synthetic"
         val password = "secret-synthetic-$service-$endpoint".toCharArray()
         val throwingAction = FakePairingAction(password, throwable = IllegalStateException(rawException))
-        val lifecycle = PairingLifecycle(FakeClock(), throwingAction)
+        val clock = FakeClock()
+        val lifecycle = PairingLifecycle(clock, throwingAction)
         val attemptId = PairingAttemptId.of(token)
         lifecycle.startQr(attemptId, PairingSecret(password), deadlineMillis = 20)
         lifecycle.awaitTarget(attemptId)
 
         val failed = lifecycle.onTargetReady(attemptId)
-        val lateCode = "012345".toCharArray()
-        val terminalSubmit = lifecycle.submitCode(attemptId, lateCode)
+        val terminalSubmit = assertTerminalStateIsStable(lifecycle, attemptId, clock, failed)
 
         assertEquals(failed.state.phase, PairingAttemptPhase.FAILED)
         assertEquals(failed.state.failure, PairingFailure.ACTION_FAILED)
         assertEquals(throwingAction.calls, listOf(PairingCall(PairingMethod.QR, wasExpectedAndNonCleared = true)))
-        assertEquals(terminalSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
         assertCleared(password)
-        assertCleared(lateCode)
         assertTrue(throwingAction.expectedSourceIsCleared())
         assertSafeRendering(failed, terminalSubmit, token, service, endpoint, rawException)
 
@@ -422,6 +362,54 @@ class PairingLifecycleTest {
         forbidden.forEach { value ->
             rendered.forEach { text -> assertFalse(text.contains(value)) }
         }
+    }
+
+    private fun assertOpaquePublicSurface(type: Class<*>, allowedNames: Set<String>) {
+        assertTrue(
+            type.declaredMethods
+                .filter { method ->
+                    Modifier.isPublic(method.modifiers) &&
+                        !method.isSynthetic &&
+                        '$' !in method.name
+                }
+                .all { method -> method.name in allowedNames },
+        )
+    }
+
+    private fun assertTerminalStateIsStable(
+        lifecycle: PairingLifecycle,
+        attemptId: PairingAttemptId,
+        clock: FakeClock,
+        expected: PairingCommandResult,
+    ): PairingCommandResult {
+        clock.nowMillis = 20
+        listOf(
+            lifecycle.cancel(attemptId),
+            lifecycle.fail(attemptId),
+            lifecycle.markUnsupported(attemptId),
+            lifecycle.expire(attemptId),
+        ).forEach { result ->
+            assertEquals(result.state, expected.state)
+            assertEquals(result.state.failure, expected.state.failure)
+        }
+
+        val lateAwait = lifecycle.awaitTarget(attemptId)
+        val lateTarget = lifecycle.onTargetReady(attemptId)
+        val lateCode = "012345".toCharArray()
+        val lateSubmit = lifecycle.submitCode(attemptId, lateCode)
+        val restartedSecret = "restart-secret-synthetic".toCharArray()
+        val restart = lifecycle.startQr(attemptId, PairingSecret(restartedSecret), deadlineMillis = 20)
+
+        assertEquals(lateAwait.state, expected.state)
+        assertEquals(lateAwait.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
+        assertEquals(lateTarget.state, expected.state)
+        assertEquals(lateSubmit.state, expected.state)
+        assertEquals(lateSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
+        assertEquals(restart.state, expected.state)
+        assertEquals(restart.rejection, PairingCommandRejection.ATTEMPT_ID_REUSED)
+        assertCleared(lateCode)
+        assertCleared(restartedSecret)
+        return lateSubmit
     }
 
     private fun attemptId(suffix: String): PairingAttemptId =
