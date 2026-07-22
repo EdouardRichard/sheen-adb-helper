@@ -53,7 +53,7 @@
   - **验收**: T009 通过；所有终态幂等、不可回到活动态，六位码只接受 `0`–`9`，secret 在 `finally` 路径清零且不进入错误文本。
 - [X] T011 [P] 先扩充敏感数据脱敏失败测试，覆盖 QR payload、非六位 QR password、NSD service name、IPv6/IPv4 端点和包名上下文于 `core/adb/src/test/kotlin/com/sheen/adb/core/DiagnosticRedactorTest.kt`
   - **验收**: 新断言在现有实现上失败，且测试仅使用合成值；现有配对码与端点脱敏测试保持通过。
-- [ ] T012 扩充诊断字段白名单与脱敏规则于 `core/adb/src/main/kotlin/com/sheen/adb/core/DiagnosticRedactor.kt`
+- [X] T012 扩充诊断字段白名单与脱敏规则于 `core/adb/src/main/kotlin/com/sheen/adb/core/DiagnosticRedactor.kt`
   - **验收**: T011 与全部既有 redactor 测试通过；输出只含 stage/outcome/technicalCode 等安全字段，不含 QR、端点、service name、包名或原始异常正文。
 - [ ] T013 先写 manager 无线发现契约失败测试，覆盖 generation/session 归属、取消、超时、结构化错误、并发发现拒绝和关闭清理于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/WirelessSessionManagerContractTest.kt`
   - **验收**: 目标测试因 `AdbSessionManager` 无无线契约或实现不完整而失败；测试使用 fake adapter，不打开 Socket/NSD。
