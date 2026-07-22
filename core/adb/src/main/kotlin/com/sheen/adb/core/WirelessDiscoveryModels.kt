@@ -109,6 +109,49 @@ class WirelessServiceObservation(
         require(port in 1..65535) { "Port must be between 1 and 65535." }
     }
 
+    fun copy(
+        observationId: WirelessObservationId = this.observationId,
+        serviceType: WirelessServiceType = this.serviceType,
+        serviceName: String = this.serviceName,
+        addresses: List<WirelessAddress> = this.addresses,
+        port: Int = this.port,
+        status: WirelessServiceStatus = this.status,
+        verifiedDeviceId: VerifiedWirelessDeviceId? = this.verifiedDeviceId,
+        lastSeenAt: Long = this.lastSeenAt,
+    ): WirelessServiceObservation = WirelessServiceObservation(
+        observationId = observationId,
+        serviceType = serviceType,
+        serviceName = serviceName,
+        addresses = addresses,
+        port = port,
+        status = status,
+        verifiedDeviceId = verifiedDeviceId,
+        lastSeenAt = lastSeenAt,
+    )
+
+    override fun equals(other: Any?): Boolean =
+        other is WirelessServiceObservation &&
+            observationId == other.observationId &&
+            serviceType == other.serviceType &&
+            serviceName == other.serviceName &&
+            addresses == other.addresses &&
+            port == other.port &&
+            status == other.status &&
+            verifiedDeviceId == other.verifiedDeviceId &&
+            lastSeenAt == other.lastSeenAt
+
+    override fun hashCode(): Int {
+        var result = observationId.hashCode()
+        result = 31 * result + serviceType.hashCode()
+        result = 31 * result + serviceName.hashCode()
+        result = 31 * result + addresses.hashCode()
+        result = 31 * result + port
+        result = 31 * result + status.hashCode()
+        result = 31 * result + (verifiedDeviceId?.hashCode() ?: 0)
+        result = 31 * result + lastSeenAt.hashCode()
+        return result
+    }
+
     override fun toString(): String = "WirelessServiceObservation(redacted)"
 }
 
@@ -117,11 +160,32 @@ class WirelessDisplayDevice(
     observations: List<WirelessServiceObservation>,
 ) {
     val observations: List<WirelessServiceObservation> = immutableList(observations)
-    val serviceTypes: Set<WirelessServiceType> = immutableSet(observations.map { it.serviceType })
+    val serviceTypes: Set<WirelessServiceType> = immutableSet(this.observations.map { it.serviceType })
 
     init {
-        require(observations.isNotEmpty()) { "A display device must contain an observation." }
+        require(this.observations.isNotEmpty()) { "A display device must contain an observation." }
+        if (verifiedDeviceId == null) {
+            require(this.observations.size == 1 && this.observations.single().verifiedDeviceId == null) {
+                "An unknown display device must contain exactly one unknown observation."
+            }
+        } else {
+            require(this.observations.all { it.verifiedDeviceId == verifiedDeviceId }) {
+                "A verified display device must contain observations for one verified identity."
+            }
+        }
     }
+
+    fun copy(
+        verifiedDeviceId: VerifiedWirelessDeviceId? = this.verifiedDeviceId,
+        observations: List<WirelessServiceObservation> = this.observations,
+    ): WirelessDisplayDevice = WirelessDisplayDevice(verifiedDeviceId, observations)
+
+    override fun equals(other: Any?): Boolean =
+        other is WirelessDisplayDevice &&
+            verifiedDeviceId == other.verifiedDeviceId &&
+            observations == other.observations
+
+    override fun hashCode(): Int = 31 * (verifiedDeviceId?.hashCode() ?: 0) + observations.hashCode()
 
     override fun toString(): String = "WirelessDisplayDevice(redacted)"
 }
@@ -130,10 +194,28 @@ class WirelessDiscoveryState(
     val generation: Long,
     val networkKey: WirelessNetworkKey? = null,
     services: List<WirelessServiceObservation> = emptyList(),
-    devices: List<WirelessDisplayDevice> = emptyList(),
 ) {
-    val services: List<WirelessServiceObservation> = immutableList(services)
-    val devices: List<WirelessDisplayDevice> = immutableList(devices)
+    val services: List<WirelessServiceObservation> = immutableList(services).also(::requireUniqueObservationIds)
+    val devices: List<WirelessDisplayDevice> = displayDevicesFor(this.services)
+
+    fun copy(
+        generation: Long = this.generation,
+        networkKey: WirelessNetworkKey? = this.networkKey,
+        services: List<WirelessServiceObservation> = this.services,
+    ): WirelessDiscoveryState = WirelessDiscoveryState(generation, networkKey, services)
+
+    override fun equals(other: Any?): Boolean =
+        other is WirelessDiscoveryState &&
+            generation == other.generation &&
+            networkKey == other.networkKey &&
+            services == other.services
+
+    override fun hashCode(): Int {
+        var result = generation.hashCode()
+        result = 31 * result + (networkKey?.hashCode() ?: 0)
+        result = 31 * result + services.hashCode()
+        return result
+    }
 
     override fun toString(): String =
         "WirelessDiscoveryState(generation=$generation, serviceCount=${services.size}, deviceCount=${devices.size})"
@@ -162,10 +244,49 @@ class WirelessDiscoverySession(
     val phase: WirelessDiscoveryPhase,
     services: List<WirelessServiceObservation> = emptyList(),
 ) {
-    val services: List<WirelessServiceObservation> = immutableList(services)
+    val services: List<WirelessServiceObservation> = immutableList(services).also(::requireUniqueObservationIds)
 
     init {
         require(deadline >= startedAt) { "Discovery deadline must not precede its start." }
+    }
+
+    fun copy(
+        generation: Long = this.generation,
+        mode: WirelessDiscoveryMode = this.mode,
+        networkKey: WirelessNetworkKey = this.networkKey,
+        startedAt: Long = this.startedAt,
+        deadline: Long = this.deadline,
+        phase: WirelessDiscoveryPhase = this.phase,
+        services: List<WirelessServiceObservation> = this.services,
+    ): WirelessDiscoverySession = WirelessDiscoverySession(
+        generation = generation,
+        mode = mode,
+        networkKey = networkKey,
+        startedAt = startedAt,
+        deadline = deadline,
+        phase = phase,
+        services = services,
+    )
+
+    override fun equals(other: Any?): Boolean =
+        other is WirelessDiscoverySession &&
+            generation == other.generation &&
+            mode == other.mode &&
+            networkKey == other.networkKey &&
+            startedAt == other.startedAt &&
+            deadline == other.deadline &&
+            phase == other.phase &&
+            services == other.services
+
+    override fun hashCode(): Int {
+        var result = generation.hashCode()
+        result = 31 * result + mode.hashCode()
+        result = 31 * result + networkKey.hashCode()
+        result = 31 * result + startedAt.hashCode()
+        result = 31 * result + deadline.hashCode()
+        result = 31 * result + phase.hashCode()
+        result = 31 * result + services.hashCode()
+        return result
     }
 
     override fun toString(): String =
@@ -188,3 +309,32 @@ private fun <T> immutableList(values: List<T>): List<T> =
 
 private fun <T> immutableSet(values: Collection<T>): Set<T> =
     Collections.unmodifiableSet(LinkedHashSet(values))
+
+private fun requireUniqueObservationIds(services: List<WirelessServiceObservation>) {
+    require(services.map { it.observationId }.toSet().size == services.size) {
+        "Discovery services must have unique observation identifiers."
+    }
+}
+
+private fun displayDevicesFor(
+    services: List<WirelessServiceObservation>,
+): List<WirelessDisplayDevice> {
+    val observationsByGroup = linkedMapOf<DisplayDeviceGroupKey, MutableList<WirelessServiceObservation>>()
+    services.forEach { observation ->
+        val groupKey = observation.verifiedDeviceId?.let(DisplayDeviceGroupKey::Verified)
+            ?: DisplayDeviceGroupKey.Unknown(observation.observationId)
+        observationsByGroup.getOrPut(groupKey) { mutableListOf() }.add(observation)
+    }
+    return observationsByGroup.map { (groupKey, observations) ->
+        WirelessDisplayDevice(
+            verifiedDeviceId = (groupKey as? DisplayDeviceGroupKey.Verified)?.value,
+            observations = observations,
+        )
+    }
+}
+
+private sealed interface DisplayDeviceGroupKey {
+    data class Verified(val value: VerifiedWirelessDeviceId) : DisplayDeviceGroupKey
+
+    data class Unknown(val value: WirelessObservationId) : DisplayDeviceGroupKey
+}

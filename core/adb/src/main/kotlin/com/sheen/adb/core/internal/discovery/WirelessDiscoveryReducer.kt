@@ -2,7 +2,6 @@ package com.sheen.adb.core.internal.discovery
 
 import com.sheen.adb.core.WirelessDiscoveryEvent
 import com.sheen.adb.core.WirelessDiscoveryState
-import com.sheen.adb.core.WirelessDisplayDevice
 import com.sheen.adb.core.WirelessServiceObservation
 
 class WirelessDiscoveryReducer {
@@ -31,21 +30,6 @@ class WirelessDiscoveryReducer {
             generation = generation,
             networkKey = networkKey,
             services = updatedServices,
-            devices = updatedServices.toDisplayDevices(),
         )
-    }
-
-    private fun List<WirelessServiceObservation>.toDisplayDevices(): List<WirelessDisplayDevice> {
-        val groupedByVerifiedIdentity = linkedMapOf<Any, MutableList<WirelessServiceObservation>>()
-        forEach { observation ->
-            val groupingKey: Any = observation.verifiedDeviceId ?: observation.observationId
-            groupedByVerifiedIdentity.getOrPut(groupingKey) { mutableListOf() }.add(observation)
-        }
-        return groupedByVerifiedIdentity.map { (groupingKey, observations) ->
-            WirelessDisplayDevice(
-                verifiedDeviceId = groupingKey as? com.sheen.adb.core.VerifiedWirelessDeviceId,
-                observations = observations,
-            )
-        }
     }
 }
