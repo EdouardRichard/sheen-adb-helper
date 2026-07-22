@@ -174,9 +174,11 @@ class WirelessSessionManagerContractTest {
         val createCancellation = CancellationException("synthetic-create-cancelled")
         val createFactory = FakeWirelessDiscoverySourceFactory(createFailure = createCancellation)
         val createManager = manager(createFactory)
+        val createEmissions = mutableListOf<AdbOperationResult<WirelessDiscoveryState>>()
         var caughtFromCreate: CancellationException? = null
         try {
-            createManager.observeWirelessServices(WirelessDiscoveryMode.LAN_FOREGROUND, 75.milliseconds).toList()
+            createManager.observeWirelessServices(WirelessDiscoveryMode.LAN_FOREGROUND, 75.milliseconds)
+                .collect(createEmissions::add)
         } catch (error: CancellationException) {
             caughtFromCreate = error
         } finally {
@@ -186,9 +188,11 @@ class WirelessSessionManagerContractTest {
         val startCancellation = CancellationException("synthetic-start-cancelled")
         val startFactory = FakeWirelessDiscoverySourceFactory(startFailure = startCancellation)
         val startManager = manager(startFactory)
+        val startEmissions = mutableListOf<AdbOperationResult<WirelessDiscoveryState>>()
         var caughtFromStart: CancellationException? = null
         try {
-            startManager.observeWirelessServices(WirelessDiscoveryMode.LAN_FOREGROUND, 75.milliseconds).toList()
+            startManager.observeWirelessServices(WirelessDiscoveryMode.LAN_FOREGROUND, 75.milliseconds)
+                .collect(startEmissions::add)
         } catch (error: CancellationException) {
             caughtFromStart = error
         } finally {
@@ -197,8 +201,10 @@ class WirelessSessionManagerContractTest {
         val startSource = startFactory.awaitSource(0)
 
         assertTrue(caughtFromCreate === createCancellation)
+        assertTrue(createEmissions.isEmpty())
         assertEquals(createFactory.sources.size, 0)
         assertTrue(caughtFromStart === startCancellation)
+        assertTrue(startEmissions.isEmpty())
         assertEquals(startSource.closeCalls.get(), 1)
     }
 
