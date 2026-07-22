@@ -10,6 +10,7 @@ import com.sheen.adb.core.PairingSecret
 import com.sheen.adb.core.internal.pairing.MonotonicClock
 import com.sheen.adb.core.internal.pairing.PairingAction
 import com.sheen.adb.core.internal.pairing.PairingLifecycle
+import java.lang.reflect.Modifier
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertNull
@@ -101,13 +102,15 @@ class PairingLifecycleTest {
         val action = FakePairingAction(valid)
         val lifecycle = PairingLifecycle(FakeClock(), action)
         val attemptId = attemptId("retry")
+        val retryInvalid = "12a456".toCharArray()
         lifecycle.startSixDigit(attemptId, deadlineMillis = 20)
-        lifecycle.submitCode(attemptId, "12a456".toCharArray())
+        lifecycle.submitCode(attemptId, retryInvalid)
 
         val retried = lifecycle.submitCode(attemptId, valid)
 
         assertEquals(retried.state.phase, PairingAttemptPhase.SUCCEEDED)
         assertEquals(action.calls, listOf(PairingCall(PairingMethod.SIX_DIGIT_CODE, wasExpectedAndNonCleared = true)))
+        assertCleared(retryInvalid)
         assertCleared(valid)
     }
 
@@ -115,14 +118,34 @@ class PairingLifecycleTest {
     fun `attempt identifiers are nonblank opaque and redacted`() {
         val token = "attempt-synthetic-redacted-token"
         val id = PairingAttemptId.of(token)
-        val secret = PairingSecret("secret-synthetic".toCharArray())
+        val secretChars = "secret-synthetic".toCharArray()
+        val secret = PairingSecret(secretChars)
+        val lifecycle = PairingLifecycle(FakeClock(), FakePairingAction())
+        lifecycle.startQr(id, secret, deadlineMillis = 20)
+        lifecycle.cancel(id)
 
         assertFalse(id.toString().contains(token))
         assertFalse(secret.toString().contains("secret-synthetic"))
         assertFalse(runCatching { PairingAttemptId.of("   ") }.isSuccess)
+        assertCleared(secretChars)
         assertTrue(
-            PairingSecret::class.java.methods.none { method ->
-                method.declaringClass == PairingSecret::class.java && method.returnType == CharArray::class.java
+            PairingAttemptId::class.java.declaredMethods.none { method ->
+                Modifier.isPublic(method.modifiers) &&
+                    method.name != "toString" &&
+                    (method.returnType == String::class.java ||
+                        method.name.startsWith("copy") ||
+                        method.name.startsWith("component"))
+            },
+        )
+        assertTrue(
+            PairingSecret::class.java.declaredMethods.none { method ->
+                Modifier.isPublic(method.modifiers) &&
+                    method.name != "toString" &&
+                    (method.returnType == CharArray::class.java ||
+                        method.returnType == String::class.java ||
+                        Collection::class.java.isAssignableFrom(method.returnType) ||
+                        method.name.startsWith("copy") ||
+                        method.name.startsWith("component"))
             },
         )
     }
@@ -266,18 +289,19 @@ class PairingLifecycleTest {
 
     @Test
     fun `all terminal transitions are idempotent clear retained material and cannot revive`() {
-        listOf<(PairingLifecycle, PairingAttemptId) -> PairingCommandResult>(
-            { lifecycle, id -> lifecycle.cancel(id) },
-            { lifecycle, id -> lifecycle.fail(id) },
-            { lifecycle, id -> lifecycle.markUnsupported(id) },
+        listOf(
+            ExpectedTerminal(PairingAttemptPhase.CANCELLED, PairingFailure.CANCELLED) { lifecycle, id -> lifecycle.cancel(id) },
+            ExpectedTerminal(PairingAttemptPhase.FAILED, PairingFailure.EXPLICIT_FAILURE) { lifecycle, id -> lifecycle.fail(id) },
+            ExpectedTerminal(PairingAttemptPhase.UNSUPPORTED, PairingFailure.UNSUPPORTED) { lifecycle, id -> lifecycle.markUnsupported(id) },
         ).forEachIndexed { index, terminal ->
             val password = "terminal-secret-$index".toCharArray()
             val lifecycle = PairingLifecycle(FakeClock(), FakePairingAction(password))
             val attemptId = attemptId("terminal-$index")
             lifecycle.startQr(attemptId, PairingSecret(password), deadlineMillis = 20)
 
-            val terminalResult = terminal(lifecycle, attemptId)
-            val repeated = terminal(lifecycle, attemptId)
+            val terminalResult = terminal.transition(lifecycle, attemptId)
+            val repeated = terminal.transition(lifecycle, attemptId)
+            val lateAwait = lifecycle.awaitTarget(attemptId)
             val lateTarget = lifecycle.onTargetReady(attemptId)
             val lateCode = "012345".toCharArray()
             val lateSubmit = lifecycle.submitCode(attemptId, lateCode)
@@ -285,6 +309,10 @@ class PairingLifecycleTest {
             val restart = lifecycle.startQr(attemptId, PairingSecret(restartedSecret), deadlineMillis = 20)
 
             assertEquals(repeated.state, terminalResult.state)
+            assertEquals(terminalResult.state.phase, terminal.phase)
+            assertEquals(terminalResult.state.failure, terminal.failure)
+            assertEquals(lateAwait.state, terminalResult.state)
+            assertEquals(lateAwait.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
             assertEquals(lateTarget.state, terminalResult.state)
             assertEquals(lateSubmit.state, terminalResult.state)
             assertEquals(lateSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
@@ -300,6 +328,43 @@ class PairingLifecycleTest {
                 "terminal-secret-$index",
             )
         }
+    }
+
+    @Test
+    fun `explicit expiry at the deadline is idempotent clears material and cannot revive`() {
+        val clock = FakeClock(nowMillis = 19)
+        val password = "expiry-secret-synthetic".toCharArray()
+        val action = FakePairingAction(password)
+        val lifecycle = PairingLifecycle(clock, action)
+        val attemptId = attemptId("explicit-expiry")
+        lifecycle.startQr(attemptId, PairingSecret(password), deadlineMillis = 20)
+        lifecycle.awaitTarget(attemptId)
+        clock.nowMillis = 20
+
+        val expired = lifecycle.expire(attemptId)
+        val repeated = lifecycle.expire(attemptId)
+        val lateAwait = lifecycle.awaitTarget(attemptId)
+        val lateTarget = lifecycle.onTargetReady(attemptId)
+        val lateCode = "012345".toCharArray()
+        val lateSubmit = lifecycle.submitCode(attemptId, lateCode)
+        val restartedSecret = "expiry-restart-secret-synthetic".toCharArray()
+        val restart = lifecycle.startQr(attemptId, PairingSecret(restartedSecret), deadlineMillis = 20)
+
+        assertEquals(expired.state.phase, PairingAttemptPhase.EXPIRED)
+        assertEquals(expired.state.failure, PairingFailure.EXPIRED)
+        assertEquals(repeated.state, expired.state)
+        assertEquals(lateAwait.state, expired.state)
+        assertEquals(lateAwait.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
+        assertEquals(lateTarget.state, expired.state)
+        assertEquals(lateSubmit.state, expired.state)
+        assertEquals(lateSubmit.rejection, PairingCommandRejection.TERMINAL_ATTEMPT)
+        assertEquals(restart.state, expired.state)
+        assertEquals(restart.rejection, PairingCommandRejection.ATTEMPT_ID_REUSED)
+        assertTrue(action.calls.isEmpty())
+        assertCleared(password)
+        assertCleared(lateCode)
+        assertCleared(restartedSecret)
+        assertSafeRendering(expired, lateSubmit, "attempt-synthetic-explicit-expiry", "expiry-secret-synthetic")
     }
 
     @Test
@@ -392,5 +457,11 @@ class PairingLifecycleTest {
     private data class PairingCall(
         val method: PairingMethod,
         val wasExpectedAndNonCleared: Boolean,
+    )
+
+    private data class ExpectedTerminal(
+        val phase: PairingAttemptPhase,
+        val failure: PairingFailure,
+        val transition: (PairingLifecycle, PairingAttemptId) -> PairingCommandResult,
     )
 }
