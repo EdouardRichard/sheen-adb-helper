@@ -2,12 +2,19 @@ package com.sheen.adb.core
 
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.Flow
+import java.io.InputStream
+import java.io.OutputStream
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
 interface AdbSessionManager : AutoCloseable {
     val connectionState: StateFlow<AdbConnectionState>
     val diagnosticEvents: StateFlow<List<AdbDiagnosticEvent>>
+
+    suspend fun acquireExclusiveOperation(
+        kind: AdbExclusiveOperationKind,
+        expectedSessionId: String,
+    ): AdbOperationResult<ExclusiveAdbOperationLease>
 
     suspend fun connect(
         endpoint: AdbEndpoint,
@@ -32,6 +39,48 @@ interface AdbSessionManager : AutoCloseable {
     suspend fun listProcesses(timeout: Duration = 15.seconds): AdbOperationResult<ProcessSnapshot>
 
     suspend fun listApplications(timeout: Duration = 15.seconds): AdbOperationResult<ApplicationSnapshot>
+
+    suspend fun loadRemoteDirectory(
+        path: String? = null,
+        expectedSessionId: String,
+        timeout: Duration = 5.seconds,
+    ): AdbOperationResult<RemoteDirectorySnapshot>
+
+    suspend fun pullRemoteFile(
+        remoteFile: RemotePathEntry,
+        destination: OutputStream,
+        expectedSessionId: String,
+        progress: (FileTransferProgress) -> Unit = {},
+        externalLease: ExclusiveAdbOperationLease? = null,
+    ): AdbOperationResult<RemoteFileTransferReceipt>
+
+    suspend fun pushRemoteFile(
+        source: InputStream,
+        sourceSize: Long?,
+        stagedRemotePath: String,
+        expectedSessionId: String,
+        progress: (FileTransferProgress) -> Unit = {},
+        externalLease: ExclusiveAdbOperationLease? = null,
+    ): AdbOperationResult<RemoteFileTransferReceipt>
+
+    suspend fun prepareRemoteUpload(
+        remoteDirectory: String,
+        displayName: String,
+        expectedSessionId: String,
+    ): AdbOperationResult<RemoteUploadPlan>
+
+    suspend fun commitRemoteUpload(
+        plan: RemoteUploadPlan,
+        conflictPolicy: RemoteFileConflictPolicy,
+        expectedSessionId: String,
+        externalLease: ExclusiveAdbOperationLease? = null,
+    ): AdbOperationResult<RemoteUploadCommitReceipt>
+
+    suspend fun cleanupRemoteStaging(
+        stagedRemotePath: String,
+        expectedSessionId: String,
+        externalLease: ExclusiveAdbOperationLease? = null,
+    ): AdbOperationResult<Unit>
 
     suspend fun forceStopApplication(
         packageName: String,

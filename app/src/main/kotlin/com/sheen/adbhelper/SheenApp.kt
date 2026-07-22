@@ -43,6 +43,10 @@ import com.sheen.adb.feature.apps.AppsRoute
 import com.sheen.adb.feature.apps.AppsViewModel
 import com.sheen.adb.feature.devices.DevicesRoute
 import com.sheen.adb.feature.devices.DevicesViewModel
+import com.sheen.adb.feature.files.FilesRoute
+import com.sheen.adb.feature.files.FilesViewModel
+import com.sheen.adb.feature.files.FileTaskSummaryBar
+import com.sheen.adb.feature.files.taskSummary
 import com.sheen.adb.feature.logcat.LogcatRoute
 import com.sheen.adb.feature.logcat.LogcatViewModel
 import com.sheen.adb.feature.overview.OverviewRoute
@@ -59,6 +63,7 @@ import kotlinx.coroutines.launch
 internal enum class Destination(val label: String, val requiresConnection: Boolean) {
     DEVICES("设备列表 / 首页", false),
     OVERVIEW("设备概览", true),
+    FILES("文件浏览", true),
     APPS("应用管理", true),
     SHELL("Shell 终端", true),
     PROCESSES("进程监控", true),
@@ -67,7 +72,7 @@ internal enum class Destination(val label: String, val requiresConnection: Boole
 }
 
 @Composable
-fun SheenApp(container: AppContainer) {
+fun SheenApp(container: AppContainer, files: FilesViewModel) {
     val devices: DevicesViewModel = viewModel(factory = factory {
         DevicesViewModel(container.adbManager, container.deviceProfiles)
     })
@@ -87,6 +92,7 @@ fun SheenApp(container: AppContainer) {
         )
     })
     val devicesState by devices.state.collectAsStateWithLifecycle()
+    val filesState by files.state.collectAsStateWithLifecycle()
     val connected = devicesState.connectionState is AdbConnectionState.Connected
     var destination by rememberSaveable { mutableStateOf(Destination.DEVICES) }
 
@@ -110,8 +116,20 @@ fun SheenApp(container: AppContainer) {
                 PermanentDrawerSheet(Modifier.width(SheenDimensions.expandedPaneWidth).fillMaxHeight()) {
                     DrawerContent(destination, connected, { destination = it }, devices::prefillLocalhost)
                 }
-                AppScaffold(destination, devicesState.connectionState, null) {
-                    DestinationContent(destination, devices, overview, apps, shell, processes, logcat, settings)
+                AppScaffold(
+                    destination,
+                    devicesState.connectionState,
+                    null,
+                    fileTaskSummary = {
+                        FileTaskSummaryBar(
+                            summary = filesState.taskSummary,
+                            showViewAction = destination != Destination.FILES,
+                            onView = { destination = Destination.FILES },
+                            onCancel = files::cancelActiveTask,
+                        )
+                    },
+                ) {
+                    DestinationContent(destination, devices, overview, files, apps, shell, processes, logcat, settings)
                 }
             }
         } else {
@@ -134,8 +152,20 @@ fun SheenApp(container: AppContainer) {
                     }
                 },
             ) {
-                AppScaffold(destination, devicesState.connectionState, { scope.launch { drawer.open() } }) {
-                    DestinationContent(destination, devices, overview, apps, shell, processes, logcat, settings)
+                AppScaffold(
+                    destination,
+                    devicesState.connectionState,
+                    { scope.launch { drawer.open() } },
+                    fileTaskSummary = {
+                        FileTaskSummaryBar(
+                            summary = filesState.taskSummary,
+                            showViewAction = destination != Destination.FILES,
+                            onView = { destination = Destination.FILES },
+                            onCancel = files::cancelActiveTask,
+                        )
+                    },
+                ) {
+                    DestinationContent(destination, devices, overview, files, apps, shell, processes, logcat, settings)
                 }
             }
         }
@@ -186,6 +216,7 @@ private fun AppScaffold(
     destination: Destination,
     connection: AdbConnectionState,
     onMenu: (() -> Unit)?,
+    fileTaskSummary: @Composable () -> Unit,
     content: @Composable () -> Unit,
 ) {
     Scaffold(
@@ -205,7 +236,12 @@ private fun AppScaffold(
                 },
             )
         },
-    ) { padding -> Box(Modifier.fillMaxSize().padding(padding)) { content() } }
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            fileTaskSummary()
+            Box(Modifier.weight(1f)) { content() }
+        }
+    }
 }
 
 @Composable
@@ -213,6 +249,7 @@ private fun DestinationContent(
     destination: Destination,
     devices: DevicesViewModel,
     overview: OverviewViewModel,
+    files: FilesViewModel,
     apps: AppsViewModel,
     shell: ShellViewModel,
     processes: ProcessesViewModel,
@@ -222,6 +259,7 @@ private fun DestinationContent(
     when (destination) {
         Destination.DEVICES -> DevicesRoute(devices)
         Destination.OVERVIEW -> OverviewRoute(overview)
+        Destination.FILES -> FilesRoute(files)
         Destination.APPS -> AppsRoute(apps)
         Destination.SHELL -> ShellRoute(shell)
         Destination.PROCESSES -> ProcessesRoute(processes)

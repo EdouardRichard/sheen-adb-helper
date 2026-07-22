@@ -68,6 +68,7 @@ dependencies {
     implementation(project(":feature:logcat"))
     implementation(project(":feature:settings"))
     implementation(project(":feature:apps"))
+    implementation(project(":feature:files"))
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)

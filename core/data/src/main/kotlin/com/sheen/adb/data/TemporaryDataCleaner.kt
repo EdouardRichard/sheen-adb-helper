@@ -8,6 +8,20 @@ interface TemporaryDataCleaner {
     suspend fun clear(): Boolean
 }
 
+class CompositeTemporaryDataCleaner(
+    private vararg val cleaners: TemporaryDataCleaner,
+) : TemporaryDataCleaner {
+    override suspend fun clear(): Boolean = cleaners.map { it.clear() }.all { it }
+}
+
+class SafTemporaryDataCleaner(
+    private val store: SafDocumentStore,
+) : TemporaryDataCleaner {
+    override suspend fun clear(): Boolean = withContext(Dispatchers.IO) {
+        store.clearTrackedTemporaries()
+    }
+}
+
 class AppTemporaryDataCleaner(context: Context) : TemporaryDataCleaner {
     private val cacheDirectory = context.applicationContext.cacheDir
     private val codeCacheDirectory = context.applicationContext.codeCacheDir

@@ -15,7 +15,27 @@ enum class AdbOperationStage {
     APPLICATION_FORCE_STOP,
     APPLICATION_SET_ENABLED,
     APPLICATION_VERIFY,
+    FILE_TRANSFER,
+    APK_EXTRACTION,
+    FILE_BROWSER,
     DISCONNECT,
+}
+
+enum class AdbExclusiveOperationKind(val stage: AdbOperationStage) {
+    FILE_TRANSFER(AdbOperationStage.FILE_TRANSFER),
+    APK_EXTRACTION(AdbOperationStage.APK_EXTRACTION),
+    LOGCAT(AdbOperationStage.LOGCAT),
+}
+
+interface ExclusiveAdbOperationLease : AutoCloseable {
+    val token: String
+    val sessionId: String
+    val kind: AdbExclusiveOperationKind
+    val isActive: Boolean
+
+    fun release()
+
+    override fun close() = release()
 }
 
 enum class AdbDiagnosticOutcome {
@@ -41,6 +61,137 @@ sealed interface AdbError {
     val nextStep: String
     val technicalCode: String
     val allowsPairingFallback: Boolean get() = false
+
+    data class OperationConflict(
+        val requestedKind: AdbExclusiveOperationKind,
+        val activeKind: AdbExclusiveOperationKind,
+    ) : AdbError {
+        override val stage = requestedKind.stage
+        override val userMessage = "另一个长时间 ADB 操作正在运行。"
+        override val nextStep = "请先停止或取消当前操作，然后重试。"
+        override val technicalCode = "OPERATION_CONFLICT"
+    }
+
+    data class SessionInvalid(
+        val operationKind: AdbExclusiveOperationKind,
+    ) : AdbError {
+        override val stage = operationKind.stage
+        override val userMessage = "发起操作的 ADB 会话已失效或已切换。"
+        override val nextStep = "请返回当前设备会话并重新发起操作。"
+        override val technicalCode = "SESSION_INVALID"
+    }
+
+    data object RemotePathInvalid : AdbError {
+        override val stage = AdbOperationStage.FILE_BROWSER
+        override val userMessage = "远端路径无效或超过安全长度。"
+        override val nextStep = "请从当前目录的已验证条目重新进入。"
+        override val technicalCode = "ADB_REMOTE_PATH_INVALID"
+    }
+
+    data object RemotePermissionDenied : AdbError {
+        override val stage = AdbOperationStage.FILE_BROWSER
+        override val userMessage = "当前 ADB 身份无权读取该目录。"
+        override val nextStep = "返回上级目录并选择可访问的位置。"
+        override val technicalCode = "ADB_REMOTE_PERMISSION_DENIED"
+    }
+
+    data object RemotePathNotFound : AdbError {
+        override val stage = AdbOperationStage.FILE_BROWSER
+        override val userMessage = "该远端路径已不存在。"
+        override val nextStep = "刷新上级目录后重试。"
+        override val technicalCode = "ADB_REMOTE_PATH_NOT_FOUND"
+    }
+
+    data object RemoteDirectoryCapacityExceeded : AdbError {
+        override val stage = AdbOperationStage.FILE_BROWSER
+        override val userMessage = "目录超过 10,000 项安全上限。"
+        override val nextStep = "不会显示部分结果；请选择较小的目录。"
+        override val technicalCode = "ADB_REMOTE_DIRECTORY_CAPACITY_EXCEEDED"
+    }
+
+    data object RemoteSessionInvalid : AdbError {
+        override val stage = AdbOperationStage.FILE_BROWSER
+        override val userMessage = "目录结果所属的 ADB 会话已失效或已切换。"
+        override val nextStep = "请在当前设备会话中重新打开文件浏览。"
+        override val technicalCode = "ADB_REMOTE_SESSION_INVALID"
+    }
+
+    data object RemoteSourceChanged : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "传输期间源文件发生了变化。"
+        override val nextStep = "请确认源文件不再被修改后重新传输。"
+        override val technicalCode = "SOURCE_CHANGED"
+    }
+
+    data object RemoteIntegrityUnavailable : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "当前设备无法可靠确认文件完整性。"
+        override val nextStep = "请更换设备或路径后重试；不会把未经确认的结果标记为成功。"
+        override val technicalCode = "INTEGRITY_UNAVAILABLE"
+    }
+
+    data object NoProgressTimeout : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "文件传输长时间没有进展。"
+        override val nextStep = "请检查连接和设备存储状态后重试。"
+        override val technicalCode = "NO_PROGRESS_TIMEOUT"
+    }
+
+    data object LocalFileReadFailed : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "无法读取主控端所选源文件。"
+        override val nextStep = "请确认文件仍存在且可读取，然后重新选择文件。"
+        override val technicalCode = "LOCAL_FILE_READ_FAILED"
+    }
+
+    data object LocalFileWriteFailed : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "无法写入主控端所选保存位置。"
+        override val nextStep = "请确认目标目录仍可写且空间充足，然后重试。"
+        override val technicalCode = "LOCAL_FILE_WRITE_FAILED"
+    }
+
+    data object RemoteFilePermissionDenied : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "当前 ADB 身份无权读取远端文件或写入目标目录。"
+        override val nextStep = "请选择共享存储中当前 ADB 身份可访问的位置。"
+        override val technicalCode = "REMOTE_FILE_PERMISSION_DENIED"
+    }
+
+    data object RemoteFilePathNotFound : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "远端源文件或目标路径已不存在。"
+        override val nextStep = "刷新远端目录后重新选择文件或目标位置。"
+        override val technicalCode = "REMOTE_FILE_PATH_NOT_FOUND"
+    }
+
+    data object RemoteFileStreamClosed : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "文件传输的 ADB 子流在完成前已关闭。"
+        override val nextStep = "当前连接会保留；请直接重试，若持续失败再重新连接。"
+        override val technicalCode = "REMOTE_FILE_STREAM_CLOSED"
+    }
+
+    data object RemoteConflict : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "目标位置已存在同名文件。"
+        override val nextStep = "请选择覆盖、自动重命名或取消。"
+        override val technicalCode = "CONFLICT"
+    }
+
+    data object RemoteCleanupFailed : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "未能清理本次任务产生的临时文件。"
+        override val nextStep = "请检查目标目录中的临时项后再重试。"
+        override val technicalCode = "CLEANUP_FAILED"
+    }
+
+    data object RemoteCommitFailed : AdbError {
+        override val stage = AdbOperationStage.FILE_TRANSFER
+        override val userMessage = "文件已传输，但无法安全提交到目标名称。"
+        override val nextStep = "原目标会尽力保持不变；请检查目标目录后重试。"
+        override val technicalCode = "REMOTE_COMMIT_FAILED"
+    }
 
     data class InvalidAddress(override val userMessage: String) : AdbError {
         override val stage = AdbOperationStage.ADDRESS
@@ -283,6 +434,85 @@ data class ApplicationSnapshot(
     val applications: List<RemoteApplication>,
     val unavailableFields: Set<ApplicationField>,
     val degradedReason: String? = null,
+)
+
+enum class RemoteFileKind { FILE, DIRECTORY, SYMLINK, OTHER }
+
+enum class RemoteLinkResolution { NOT_A_LINK, VERIFIED, MISSING, PERMISSION_DENIED, LOOP, UNSUPPORTED }
+
+enum class RemoteDirectorySource { STAT_V2, LIST_V2, SYNC_V1_DEGRADED }
+
+data class RemoteBreadcrumb(val label: String, val path: String)
+
+data class RemotePathEntry(
+    val absolutePath: String,
+    val displayName: String,
+    val kind: RemoteFileKind,
+    val sizeBytes: Long?,
+    val modifiedEpochSeconds: Long?,
+    val mode: Int?,
+    val deviceId: Long?,
+    val inode: Long?,
+    val linkResolution: RemoteLinkResolution = RemoteLinkResolution.NOT_A_LINK,
+    val targetKind: RemoteFileKind? = null,
+) {
+    val enterable: Boolean get() = kind == RemoteFileKind.DIRECTORY ||
+        (kind == RemoteFileKind.SYMLINK && linkResolution == RemoteLinkResolution.VERIFIED && targetKind == RemoteFileKind.DIRECTORY)
+    val selectable: Boolean get() = kind == RemoteFileKind.FILE ||
+        (kind == RemoteFileKind.SYMLINK && linkResolution == RemoteLinkResolution.VERIFIED && targetKind == RemoteFileKind.FILE)
+}
+
+data class RemoteDirectorySnapshot(
+    val sessionId: String,
+    val directory: String,
+    val entries: List<RemotePathEntry>,
+    val sourceCapabilities: Set<RemoteDirectorySource>,
+    val loadedAtMonotonicMillis: Long,
+) {
+    val breadcrumbs: List<RemoteBreadcrumb>
+        get() {
+            if (directory == "/") return listOf(RemoteBreadcrumb("/", "/"))
+            val parts = directory.trim('/').split('/').filter(String::isNotEmpty)
+            var path = ""
+            return listOf(RemoteBreadcrumb("/", "/")) + parts.map { part ->
+                path += "/$part"
+                RemoteBreadcrumb(part, path)
+            }
+        }
+}
+
+data class FileTransferProgress(
+    val transferredBytes: Long,
+    val totalBytes: Long?,
+) {
+    init {
+        require(transferredBytes >= 0L)
+        require(totalBytes == null || totalBytes >= 0L)
+    }
+}
+
+data class RemoteFileTransferReceipt(
+    val sessionId: String,
+    val transferredBytes: Long,
+) {
+    init { require(transferredBytes >= 0L) }
+}
+
+enum class RemoteFileConflictPolicy { CANCEL, OVERWRITE, AUTO_RENAME }
+
+data class RemoteUploadPlan(
+    val sessionId: String,
+    val directory: String,
+    val requestedName: String,
+    val stagedPath: String,
+    val finalPath: String,
+    val conflictExists: Boolean,
+)
+
+data class RemoteUploadCommitReceipt(
+    val sessionId: String,
+    val finalPath: String,
+    val replacedExisting: Boolean,
 )
 
 sealed interface ApplicationMutationResult {

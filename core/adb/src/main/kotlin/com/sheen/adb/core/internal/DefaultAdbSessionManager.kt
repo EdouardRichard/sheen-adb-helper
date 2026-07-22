@@ -5,6 +5,7 @@ import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbDiagnosticOutcome
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbError
+import com.sheen.adb.core.AdbExclusiveOperationKind
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.AdbSessionManager
@@ -15,17 +16,31 @@ import com.sheen.adb.core.DiagnosticRedactor
 import com.sheen.adb.core.DeviceOverview
 import com.sheen.adb.core.DynamicDeviceMetrics
 import com.sheen.adb.core.DisconnectionReason
+import com.sheen.adb.core.ExclusiveAdbOperationLease
+import com.sheen.adb.core.FileTransferProgress
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLine
 import com.sheen.adb.core.ProcessSnapshot
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
+import com.sheen.adb.core.RemoteDirectorySnapshot
+import com.sheen.adb.core.RemoteDirectorySource
+import com.sheen.adb.core.RemoteFileKind
+import com.sheen.adb.core.RemoteLinkResolution
+import com.sheen.adb.core.RemotePathEntry
+import com.sheen.adb.core.RemoteFileTransferReceipt
+import com.sheen.adb.core.RemoteFileConflictPolicy
+import com.sheen.adb.core.RemoteUploadCommitReceipt
+import com.sheen.adb.core.RemoteUploadPlan
 import com.sheen.adb.core.ShellResult
 import com.sheen.adb.core.ShellOutputMode
 import java.io.Closeable
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -44,11 +59,14 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
 internal class DefaultAdbSessionManager(
     private val clientFactory: AdbProtocolClientFactory,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val transferNoProgressTimeout: Duration = 30.seconds,
+    private val transferCancellationGrace: Duration = 3.seconds,
 ) : AdbSessionManager, Closeable {
     private data class ActiveSession(
         val id: String,
@@ -56,16 +74,593 @@ internal class DefaultAdbSessionManager(
         val client: AdbProtocolClient,
     )
 
+    private data class ActiveExclusiveOperation(
+        val token: String,
+        val sessionId: String,
+        val kind: AdbExclusiveOperationKind,
+        val active: AtomicBoolean = AtomicBoolean(true),
+    )
+
     private val mutex = Mutex()
     private val applicationMutex = Mutex()
+    private val exclusiveOperationLock = Any()
     private val closed = AtomicBoolean(false)
     private val diagnosticSequence = AtomicLong(0)
     private var active: ActiveSession? = null
+    private var activeExclusiveOperation: ActiveExclusiveOperation? = null
     private var applicationSnapshot: ApplicationSnapshot? = null
     private val mutableState = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected())
     override val connectionState: StateFlow<AdbConnectionState> = mutableState.asStateFlow()
     private val mutableDiagnosticEvents = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
     override val diagnosticEvents: StateFlow<List<AdbDiagnosticEvent>> = mutableDiagnosticEvents.asStateFlow()
+
+    override suspend fun acquireExclusiveOperation(
+        kind: AdbExclusiveOperationKind,
+        expectedSessionId: String,
+    ): AdbOperationResult<ExclusiveAdbOperationLease> = mutex.withLock {
+        val session = active
+        if (session == null || session.id != expectedSessionId) {
+            return@withLock operationFailure(AdbError.SessionInvalid(kind), session?.endpoint, null)
+        }
+
+        val (acquired, conflictingKind) = synchronized(exclusiveOperationLock) {
+            val current = activeExclusiveOperation?.takeIf { it.active.get() }
+            if (current != null) {
+                null to current.kind
+            } else {
+                ActiveExclusiveOperation(
+                    token = UUID.randomUUID().toString(),
+                    sessionId = session.id,
+                    kind = kind,
+                ).also { activeExclusiveOperation = it } to null
+            }
+        }
+        if (acquired == null) {
+            return@withLock operationFailure(
+                AdbError.OperationConflict(kind, checkNotNull(conflictingKind)),
+                session.endpoint,
+                null,
+            )
+        }
+        AdbOperationResult.Success(ManagerExclusiveOperationLease(acquired))
+    }
+
+    override suspend fun loadRemoteDirectory(
+        path: String?,
+        expectedSessionId: String,
+        timeout: Duration,
+    ): AdbOperationResult<RemoteDirectorySnapshot> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != expectedSessionId) {
+            return operationFailure(AdbError.RemoteSessionInvalid, session?.endpoint, null)
+        }
+        return try {
+            val (directory, listing) = if (path == null) {
+                val userId = when (val user = currentUser(timeout)) {
+                    is AdbOperationResult.Success -> user.value
+                    else -> 0
+                }
+                resolveSharedStorage(session, userId, timeout)
+            } else {
+                if (!RemoteFileCapabilities.isValidAbsolutePath(path)) {
+                    return operationFailure(AdbError.RemotePathInvalid, session.endpoint, null)
+                }
+                path to KadbRemoteFileProtocol.list(session.client, path, timeout)
+            }
+            try {
+                RemoteFileCapabilities.requireDirectoryCapacity(listing.entries.size)
+            } catch (_: RemoteDirectoryCapacityException) {
+                return operationFailure(AdbError.RemoteDirectoryCapacityExceeded, session.endpoint, null)
+            }
+            val currentStat = runCatching {
+                KadbRemoteFileProtocol.stat(session.client, directory, timeout)
+            }.getOrNull()
+            val entries = listing.entries.map { entry ->
+                toRemotePathEntry(session, directory, entry, listing.version, currentStat, timeout)
+            }.sortedWith(compareBy<RemotePathEntry>({ kindOrder(it.kind) }, { it.displayName.lowercase() }))
+            if (mutex.withLock { active?.id } != expectedSessionId) {
+                return operationFailure(AdbError.RemoteSessionInvalid, session.endpoint, null)
+            }
+            AdbOperationResult.Success(
+                RemoteDirectorySnapshot(
+                    sessionId = session.id,
+                    directory = directory,
+                    entries = entries,
+                    sourceCapabilities = if (listing.version == ProtocolSyncVersion.V2) {
+                        setOf(RemoteDirectorySource.LIST_V2, RemoteDirectorySource.STAT_V2)
+                    } else {
+                        setOf(RemoteDirectorySource.SYNC_V1_DEGRADED)
+                    },
+                    loadedAtMonotonicMillis = System.nanoTime() / 1_000_000,
+                ),
+            )
+        } catch (error: TimeoutCancellationException) {
+            operationFailure(AdbError.Timeout(AdbOperationStage.FILE_BROWSER), session.endpoint, error)
+        } catch (_: CancellationException) {
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            operationFailure(remoteFileError(error), session.endpoint, error)
+        }
+    }
+
+    override suspend fun pullRemoteFile(
+        remoteFile: RemotePathEntry,
+        destination: OutputStream,
+        expectedSessionId: String,
+        progress: (FileTransferProgress) -> Unit,
+        externalLease: ExclusiveAdbOperationLease?,
+    ): AdbOperationResult<RemoteFileTransferReceipt> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                session?.endpoint,
+                null,
+            )
+        }
+        if (!RemoteFileCapabilities.isValidAbsolutePath(remoteFile.absolutePath) || !remoteFile.selectable) {
+            return operationFailure(AdbError.RemotePathInvalid, session.endpoint, null)
+        }
+        val (lease, ownsLease) = when (val acquired = obtainFileTransferLease(expectedSessionId, externalLease)) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return acquired
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        val forcedSessionClose = AtomicBoolean(false)
+        return try {
+            val before = KadbRemoteFileProtocol.stat(session.client, remoteFile.absolutePath, FILE_PREPARE_TIMEOUT)
+            val reliableMetadata = before.hasReliableTransferMetadata()
+            val digestBefore = if (reliableMetadata) null else remoteDigest(session.client, remoteFile.absolutePath)
+                ?: return operationFailure(AdbError.RemoteIntegrityUnavailable, session.endpoint, null)
+            val transferred = KadbRemoteFileProtocol.receive(
+                client = session.client,
+                path = remoteFile.absolutePath,
+                destination = destination,
+                noProgressTimeout = transferNoProgressTimeout,
+                cancellationGrace = transferCancellationGrace,
+                onForcedSessionClose = {
+                    forcedSessionClose.set(true)
+                    runCatching { session.client.close() }
+                },
+            ) { bytes -> progress(FileTransferProgress(bytes, before.size.takeIf { it >= 0L })) }
+            val after = KadbRemoteFileProtocol.stat(session.client, remoteFile.absolutePath, FILE_PREPARE_TIMEOUT)
+            val stable = if (reliableMetadata) {
+                before.sameTransferIdentity(after) && transferred == before.size
+            } else {
+                val digestAfter = remoteDigest(session.client, remoteFile.absolutePath)
+                    ?: return operationFailure(AdbError.RemoteIntegrityUnavailable, session.endpoint, null)
+                digestBefore == digestAfter && transferred == after.size
+            }
+            if (!stable) return operationFailure(AdbError.RemoteSourceChanged, session.endpoint, null)
+            if (mutex.withLock { active?.id } != expectedSessionId || !lease.isActive) {
+                return operationFailure(
+                    AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                    session.endpoint,
+                    null,
+                )
+            }
+            AdbOperationResult.Success(RemoteFileTransferReceipt(session.id, transferred))
+        } catch (error: ProtocolNoProgressTimeoutException) {
+            operationFailure(AdbError.NoProgressTimeout, session.endpoint, error)
+        } catch (_: CancellationException) {
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            operationFailure(fileTransferError(error), session.endpoint, error)
+        } finally {
+            if (forcedSessionClose.get()) {
+                withContext(NonCancellable) { invalidateForcedTransferSession(session) }
+            }
+            if (ownsLease) lease.release()
+        }
+    }
+
+    override suspend fun pushRemoteFile(
+        source: InputStream,
+        sourceSize: Long?,
+        stagedRemotePath: String,
+        expectedSessionId: String,
+        progress: (FileTransferProgress) -> Unit,
+        externalLease: ExclusiveAdbOperationLease?,
+    ): AdbOperationResult<RemoteFileTransferReceipt> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                session?.endpoint,
+                null,
+            )
+        }
+        if (!RemoteFileCapabilities.isValidAbsolutePath(stagedRemotePath)) {
+            return operationFailure(AdbError.RemotePathInvalid, session.endpoint, null)
+        }
+        val (lease, ownsLease) = when (val acquired = obtainFileTransferLease(expectedSessionId, externalLease)) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return acquired
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        val forcedSessionClose = AtomicBoolean(false)
+        return try {
+            val transferred = KadbRemoteFileProtocol.send(
+                client = session.client,
+                path = stagedRemotePath,
+                source = source,
+                mode = DEFAULT_REMOTE_FILE_MODE,
+                modifiedEpochMillis = System.currentTimeMillis(),
+                noProgressTimeout = transferNoProgressTimeout,
+                cancellationGrace = transferCancellationGrace,
+                onForcedSessionClose = {
+                    forcedSessionClose.set(true)
+                    runCatching { session.client.close() }
+                },
+            ) { bytes -> progress(FileTransferProgress(bytes, sourceSize)) }
+            val uploaded = KadbRemoteFileProtocol.stat(session.client, stagedRemotePath, FILE_PREPARE_TIMEOUT)
+            if ((sourceSize != null && sourceSize != transferred) || uploaded.size != transferred) {
+                return operationFailure(AdbError.RemoteSourceChanged, session.endpoint, null)
+            }
+            if (mutex.withLock { active?.id } != expectedSessionId || !lease.isActive) {
+                return operationFailure(
+                    AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                    session.endpoint,
+                    null,
+                )
+            }
+            AdbOperationResult.Success(RemoteFileTransferReceipt(session.id, transferred))
+        } catch (error: ProtocolNoProgressTimeoutException) {
+            operationFailure(AdbError.NoProgressTimeout, session.endpoint, error)
+        } catch (_: CancellationException) {
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            operationFailure(fileTransferError(error), session.endpoint, error)
+        } finally {
+            if (forcedSessionClose.get()) {
+                withContext(NonCancellable) { invalidateForcedTransferSession(session) }
+            }
+            if (ownsLease) lease.release()
+        }
+    }
+
+    override suspend fun prepareRemoteUpload(
+        remoteDirectory: String,
+        displayName: String,
+        expectedSessionId: String,
+    ): AdbOperationResult<RemoteUploadPlan> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                session?.endpoint,
+                null,
+            )
+        }
+        return try {
+            val finalPath = RemoteFileCapabilities.safeChild(remoteDirectory, displayName)
+            val listing = KadbRemoteFileProtocol.list(session.client, remoteDirectory, FILE_PREPARE_TIMEOUT)
+            val names = listing.entries.mapTo(mutableSetOf()) { it.name }
+            val stagedName = generateSequence {
+                ".sheen-${UUID.randomUUID().toString().replace("-", "").take(16)}.part"
+            }.first { it !in names }
+            AdbOperationResult.Success(
+                RemoteUploadPlan(
+                    sessionId = session.id,
+                    directory = remoteDirectory,
+                    requestedName = displayName,
+                    stagedPath = RemoteFileCapabilities.safeChild(remoteDirectory, stagedName),
+                    finalPath = finalPath,
+                    conflictExists = displayName in names,
+                ),
+            )
+        } catch (error: CancellationException) {
+            AdbOperationResult.Cancelled
+        } catch (_: IllegalArgumentException) {
+            operationFailure(AdbError.RemotePathInvalid, session.endpoint, null)
+        } catch (error: Throwable) {
+            operationFailure(remoteFileError(error), session.endpoint, error)
+        }
+    }
+
+    override suspend fun commitRemoteUpload(
+        plan: RemoteUploadPlan,
+        conflictPolicy: RemoteFileConflictPolicy,
+        expectedSessionId: String,
+        externalLease: ExclusiveAdbOperationLease?,
+    ): AdbOperationResult<RemoteUploadCommitReceipt> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != expectedSessionId || plan.sessionId != expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                session?.endpoint,
+                null,
+            )
+        }
+        if (!isValidUploadPlan(plan)) {
+            return operationFailure(AdbError.RemotePathInvalid, session.endpoint, null)
+        }
+        val (lease, ownsLease) = when (val acquired = obtainFileTransferLease(expectedSessionId, externalLease)) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return acquired
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        return try {
+            val names = KadbRemoteFileProtocol.list(
+                session.client,
+                plan.directory,
+                FILE_PREPARE_TIMEOUT,
+            ).entries.mapTo(mutableSetOf()) { it.name }
+            val targetExists = plan.requestedName in names
+            if (targetExists && conflictPolicy == RemoteFileConflictPolicy.CANCEL) {
+                return operationFailure(AdbError.RemoteConflict, session.endpoint, null)
+            }
+            val targetPath = when {
+                targetExists && conflictPolicy == RemoteFileConflictPolicy.AUTO_RENAME -> {
+                    val renamed = autoRenamedName(plan.requestedName, names)
+                        ?: return operationFailure(AdbError.RemoteConflict, session.endpoint, null)
+                    RemoteFileCapabilities.safeChild(plan.directory, renamed)
+                }
+                else -> plan.finalPath
+            }
+            val replaced = targetExists && conflictPolicy == RemoteFileConflictPolicy.OVERWRITE
+            val committed = if (replaced) {
+                commitRemoteOverwrite(session.client, plan, targetPath, names)
+            } else {
+                remoteMove(session.client, plan.stagedPath, targetPath)
+            }
+            if (!committed) return operationFailure(AdbError.RemoteCommitFailed, session.endpoint, null)
+            if (mutex.withLock { active?.id } != expectedSessionId || !lease.isActive) {
+                return operationFailure(
+                    AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                    session.endpoint,
+                    null,
+                )
+            }
+            AdbOperationResult.Success(RemoteUploadCommitReceipt(session.id, targetPath, replaced))
+        } catch (_: CancellationException) {
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            operationFailure(AdbError.RemoteCommitFailed, session.endpoint, error)
+        } finally {
+            if (ownsLease) lease.release()
+        }
+    }
+
+    override suspend fun cleanupRemoteStaging(
+        stagedRemotePath: String,
+        expectedSessionId: String,
+        externalLease: ExclusiveAdbOperationLease?,
+    ): AdbOperationResult<Unit> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                session?.endpoint,
+                null,
+            )
+        }
+        if (!RemoteFileCapabilities.isValidAbsolutePath(stagedRemotePath) ||
+            !stagedRemotePath.substringAfterLast('/').startsWith(".sheen-")
+        ) {
+            return operationFailure(AdbError.RemotePathInvalid, session.endpoint, null)
+        }
+        val leaseUse = when (val acquired = obtainFileTransferLease(expectedSessionId, externalLease)) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return acquired
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        return try {
+            if (remoteDelete(session.client, stagedRemotePath)) {
+                AdbOperationResult.Success(Unit)
+            } else {
+                operationFailure(AdbError.RemoteCleanupFailed, session.endpoint, null)
+            }
+        } catch (_: CancellationException) {
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            operationFailure(AdbError.RemoteCleanupFailed, session.endpoint, error)
+        } finally {
+            if (leaseUse.second) leaseUse.first.release()
+        }
+    }
+
+    private suspend fun obtainFileTransferLease(
+        expectedSessionId: String,
+        externalLease: ExclusiveAdbOperationLease?,
+    ): AdbOperationResult<Pair<ExclusiveAdbOperationLease, Boolean>> {
+        if (externalLease == null) {
+            return when (val acquired = acquireExclusiveOperation(
+                AdbExclusiveOperationKind.FILE_TRANSFER,
+                expectedSessionId,
+            )) {
+                is AdbOperationResult.Success -> AdbOperationResult.Success(acquired.value to true)
+                is AdbOperationResult.Failure -> acquired
+                AdbOperationResult.Cancelled -> AdbOperationResult.Cancelled
+            }
+        }
+        val valid = externalLease.kind == AdbExclusiveOperationKind.FILE_TRANSFER &&
+            externalLease.sessionId == expectedSessionId &&
+            externalLease.isActive &&
+            synchronized(exclusiveOperationLock) {
+                val activeLease = activeExclusiveOperation
+                activeLease?.token == externalLease.token && activeLease.sessionId == expectedSessionId
+            }
+        return if (valid) {
+            AdbOperationResult.Success(externalLease to false)
+        } else {
+            val session = mutex.withLock { active }
+            operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.FILE_TRANSFER),
+                session?.endpoint,
+                null,
+            )
+        }
+    }
+
+    private fun isValidUploadPlan(plan: RemoteUploadPlan): Boolean =
+        RemoteFileCapabilities.isValidAbsolutePath(plan.directory) &&
+            RemoteFileCapabilities.safeChild(plan.directory, plan.requestedName) == plan.finalPath &&
+            plan.stagedPath.substringBeforeLast('/', "").ifEmpty { "/" } ==
+            plan.directory.trimEnd('/').ifEmpty { "/" } &&
+            plan.stagedPath.substringAfterLast('/').startsWith(".sheen-") &&
+            plan.stagedPath.endsWith(".part")
+
+    private fun autoRenamedName(requestedName: String, existing: Set<String>): String? {
+        val dot = requestedName.lastIndexOf('.').takeIf { it > 0 }
+        val stem = dot?.let { requestedName.substring(0, it) } ?: requestedName
+        val extension = dot?.let { requestedName.substring(it) }.orEmpty()
+        return (1..MAX_AUTO_RENAME_ATTEMPTS)
+            .asSequence()
+            .map { "$stem ($it)$extension" }
+            .firstOrNull { it !in existing }
+    }
+
+    private suspend fun commitRemoteOverwrite(
+        client: AdbProtocolClient,
+        plan: RemoteUploadPlan,
+        targetPath: String,
+        existing: Set<String>,
+    ): Boolean {
+        val backupName = generateSequence {
+            ".sheen-${UUID.randomUUID().toString().replace("-", "").take(16)}.bak"
+        }.first { it !in existing }
+        val backupPath = RemoteFileCapabilities.safeChild(plan.directory, backupName)
+        if (!remoteMove(client, targetPath, backupPath)) return false
+        if (!remoteMove(client, plan.stagedPath, targetPath)) {
+            remoteMove(client, backupPath, targetPath)
+            return false
+        }
+        if (!remoteDelete(client, backupPath)) {
+            remoteMove(client, backupPath, targetPath)
+            return false
+        }
+        return true
+    }
+
+    private suspend fun remoteMove(client: AdbProtocolClient, source: String, target: String): Boolean =
+        executeRemoteFileCommand(client, "mv ${shellQuote(source)} ${shellQuote(target)}").exitCode == 0
+
+    private suspend fun remoteDelete(client: AdbProtocolClient, target: String): Boolean =
+        executeRemoteFileCommand(client, "rm -f ${shellQuote(target)}").exitCode == 0
+
+    private suspend fun executeRemoteFileCommand(
+        client: AdbProtocolClient,
+        command: String,
+    ): ProtocolShellResponse = runInterruptible(ioDispatcher) { client.execute(command) }
+
+    private fun shellQuote(value: String): String = "'${value.replace("'", "'\\''")}'"
+
+    private fun ProtocolRemoteStat.hasReliableTransferMetadata(): Boolean =
+        size >= 0L && modifiedEpochSeconds > 0L
+
+    private fun ProtocolRemoteStat.sameTransferIdentity(other: ProtocolRemoteStat): Boolean =
+        size == other.size &&
+            modifiedEpochSeconds == other.modifiedEpochSeconds &&
+            (deviceId == null || other.deviceId == null || deviceId == other.deviceId) &&
+            (inode == null || other.inode == null || inode == other.inode)
+
+    private suspend fun remoteDigest(client: AdbProtocolClient, path: String): String? {
+        val escaped = path.replace("'", "'\\''")
+        val commands = listOf(
+            "toybox sha256sum -- '$escaped'",
+            "sha256sum -- '$escaped'",
+        )
+        val response = commands.firstNotNullOfOrNull { command ->
+            executeRemoteFileCommand(client, command).takeIf { it.exitCode == 0 }
+        } ?: return null
+        return response.stdout.trim().substringBefore(' ').takeIf { it.matches(Regex("[0-9a-fA-F]{64}")) }
+    }
+
+    private fun fileTransferError(error: Throwable): AdbError {
+        val causes = generateSequence(error) { it.cause }.take(8).toList()
+        val messages = causes.mapNotNull { it.message?.lowercase() }
+        return when {
+            causes.any { it is ProtocolLocalSourceException } -> AdbError.LocalFileReadFailed
+            causes.any { it is ProtocolLocalDestinationException } -> AdbError.LocalFileWriteFailed
+            messages.any { "permission denied" in it || "access denied" in it } ->
+                AdbError.RemoteFilePermissionDenied
+            messages.any { "no such file" in it || "not found" in it } ->
+                AdbError.RemoteFilePathNotFound
+            causes.any { it is java.io.EOFException || it.javaClass.simpleName.contains("StreamClosed", true) } ->
+                AdbError.RemoteFileStreamClosed
+            else -> AdbExceptionMapper.map(error, AdbOperationStage.FILE_TRANSFER)
+        }
+    }
+
+    private suspend fun resolveSharedStorage(
+        session: ActiveSession,
+        userId: Int,
+        timeout: Duration,
+    ): Pair<String, ProtocolDirectoryListing> {
+        for (candidate in RemoteFileCapabilities.sharedStorageCandidates(userId)) {
+            val listing = try {
+                KadbRemoteFileProtocol.list(session.client, candidate, timeout)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Throwable) {
+                null
+            }
+            if (listing != null) return candidate to listing
+        }
+        throw IOException("No shared storage path")
+    }
+
+    private suspend fun toRemotePathEntry(
+        session: ActiveSession,
+        directory: String,
+        entry: ProtocolRemoteEntry,
+        version: ProtocolSyncVersion,
+        currentDirectoryStat: ProtocolRemoteStat?,
+        timeout: Duration,
+    ): RemotePathEntry {
+        val kind = fileKind(entry.mode)
+        val child = RemoteFileCapabilities.safeChild(directory, entry.name)
+        var resolution = if (kind == RemoteFileKind.SYMLINK) RemoteLinkResolution.UNSUPPORTED else RemoteLinkResolution.NOT_A_LINK
+        var targetKind: RemoteFileKind? = null
+        if (kind == RemoteFileKind.SYMLINK && version == ProtocolSyncVersion.V2) {
+            try {
+                val target = KadbRemoteFileProtocol.stat(session.client, child, timeout)
+                targetKind = fileKind(target.mode)
+                resolution = if (
+                    currentDirectoryStat?.deviceId != null && currentDirectoryStat.inode != null &&
+                    target.deviceId == currentDirectoryStat.deviceId && target.inode == currentDirectoryStat.inode
+                ) RemoteLinkResolution.LOOP else RemoteLinkResolution.VERIFIED
+            } catch (error: Throwable) {
+                resolution = when {
+                    error.message.orEmpty().contains("permission", ignoreCase = true) -> RemoteLinkResolution.PERMISSION_DENIED
+                    else -> RemoteLinkResolution.MISSING
+                }
+            }
+        }
+        return RemotePathEntry(
+            absolutePath = child,
+            displayName = entry.name,
+            kind = kind,
+            sizeBytes = entry.size.takeIf { kind == RemoteFileKind.FILE },
+            modifiedEpochSeconds = entry.modifiedEpochSeconds,
+            mode = entry.mode,
+            deviceId = entry.deviceId,
+            inode = entry.inode,
+            linkResolution = resolution,
+            targetKind = targetKind,
+        )
+    }
+
+    private fun fileKind(mode: Int): RemoteFileKind = when (mode and 0xF000) {
+        0x4000 -> RemoteFileKind.DIRECTORY
+        0x8000 -> RemoteFileKind.FILE
+        0xA000 -> RemoteFileKind.SYMLINK
+        else -> RemoteFileKind.OTHER
+    }
+
+    private fun kindOrder(kind: RemoteFileKind): Int = when (kind) {
+        RemoteFileKind.DIRECTORY -> 0
+        RemoteFileKind.SYMLINK -> 1
+        RemoteFileKind.FILE -> 2
+        RemoteFileKind.OTHER -> 3
+    }
+
+    private fun remoteFileError(error: Throwable): AdbError = when {
+        error.message.orEmpty().contains("permission", ignoreCase = true) -> AdbError.RemotePermissionDenied
+        error.message.orEmpty().contains("not found", ignoreCase = true) -> AdbError.RemotePathNotFound
+        else -> AdbExceptionMapper.map(error, AdbOperationStage.FILE_BROWSER)
+    }
 
     override suspend fun connect(endpoint: AdbEndpoint, timeout: Duration): AdbOperationResult<Unit> =
         mutex.withLock {
@@ -726,6 +1321,7 @@ internal class DefaultAdbSessionManager(
             failure(AdbExceptionMapper.map(error, AdbOperationStage.DISCONNECT), null, error)
         } finally {
             if (sessionToClose != null) {
+                invalidateExclusiveOperation(sessionToClose.id)
                 if (active?.id == sessionToClose.id) active = null
                 withContext(NonCancellable + ioDispatcher) { runCatching { sessionToClose.client.close() } }
             }
@@ -764,6 +1360,7 @@ internal class DefaultAdbSessionManager(
             val session = active
             active = null
             applicationSnapshot = null
+            invalidateExclusiveOperation(session?.id)
             runCatching { session?.client?.close() }
             if (session != null) {
                 appendDiagnostic(
@@ -781,6 +1378,7 @@ internal class DefaultAdbSessionManager(
         val session = active ?: return
         active = null
         applicationSnapshot = null
+        invalidateExclusiveOperation(session.id)
         try {
             session.client.close()
         } finally {
@@ -798,6 +1396,7 @@ internal class DefaultAdbSessionManager(
             active = null
             applicationSnapshot = null
         }
+        invalidateExclusiveOperation(session.id)
         withContext(NonCancellable + ioDispatcher) { runCatching { session.client.close() } }
         appendDiagnostic(
             AdbOperationStage.DISCONNECT,
@@ -805,6 +1404,50 @@ internal class DefaultAdbSessionManager(
             "ADB_SESSION_CLOSED",
             session.endpoint,
         )
+    }
+
+    private suspend fun invalidateForcedTransferSession(session: ActiveSession) = mutex.withLock {
+        if (active?.id != session.id) return@withLock
+        active = null
+        applicationSnapshot = null
+        invalidateExclusiveOperation(session.id)
+        mutableState.value = AdbConnectionState.Disconnected()
+        appendDiagnostic(
+            AdbOperationStage.FILE_TRANSFER,
+            AdbDiagnosticOutcome.RESOURCE_CLOSED,
+            "ADB_TRANSFER_SESSION_FORCE_CLOSED",
+            session.endpoint,
+        )
+    }
+
+    private fun invalidateExclusiveOperation(sessionId: String?) {
+        synchronized(exclusiveOperationLock) {
+            val operation = activeExclusiveOperation ?: return
+            if (sessionId == null || operation.sessionId == sessionId) {
+                operation.active.set(false)
+                activeExclusiveOperation = null
+            }
+        }
+    }
+
+    private inner class ManagerExclusiveOperationLease(
+        private val operation: ActiveExclusiveOperation,
+    ) : ExclusiveAdbOperationLease {
+        override val token: String get() = operation.token
+        override val sessionId: String get() = operation.sessionId
+        override val kind: AdbExclusiveOperationKind get() = operation.kind
+
+        override val isActive: Boolean
+            get() = operation.active.get() && synchronized(exclusiveOperationLock) {
+                activeExclusiveOperation === operation
+            }
+
+        override fun release() {
+            if (!operation.active.compareAndSet(true, false)) return
+            synchronized(exclusiveOperationLock) {
+                if (activeExclusiveOperation === operation) activeExclusiveOperation = null
+            }
+        }
     }
 
     private fun failure(error: AdbError, endpoint: AdbEndpoint?, cause: Throwable?): AdbOperationResult.Failure {
@@ -867,5 +1510,8 @@ internal class DefaultAdbSessionManager(
         const val SELF_PACKAGE_NAME = "com.sheen.adbhelper"
         const val OPTIONAL_FIELDS_UNAVAILABLE_REASON =
             "设备基础包列表可用；版本号、版本名和安装器字段未通过跨 ROM 可靠性验证，已明确省略"
+        val FILE_PREPARE_TIMEOUT = 5.seconds
+        const val DEFAULT_REMOTE_FILE_MODE = 0x81A4
+        const val MAX_AUTO_RENAME_ATTEMPTS = 1_000
     }
 }

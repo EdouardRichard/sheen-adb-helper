@@ -5,10 +5,17 @@ import com.flyfishxu.kadb.Kadb
 import com.flyfishxu.kadb.cert.KadbCert
 import com.flyfishxu.kadb.cert.KadbCertPolicy
 import com.flyfishxu.kadb.shell.AdbShellPacket
+import com.flyfishxu.kadb.stream.AdbSyncDirEntry
+import com.flyfishxu.kadb.stream.AdbSyncDirEntryV2
+import com.flyfishxu.kadb.stream.AdbSyncStat
+import com.flyfishxu.kadb.stream.AdbSyncStatV2
 import com.sheen.adb.core.AdbEndpoint
 import java.io.EOFException
 import java.nio.charset.StandardCharsets
 import okio.Buffer
+import okio.Sink
+import okio.Source
+import okio.Timeout
 
 internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFactory {
     private val privateKeyStore = AndroidKeystorePrivateKeyStore(context.applicationContext)
@@ -137,6 +144,93 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
                 }
             }
 
+            override fun openSync(): ProtocolSyncStream {
+                val supportsStatV2 = kadb.supportsFeature("stat_v2")
+                val supportsListV2 = kadb.supportsFeature("ls_v2")
+                val supportsSendRecvV2 = kadb.supportsFeature("sendrecv_v2")
+                val sync = kadb.openSync()
+                return object : ProtocolSyncStream {
+                    override val version = if (supportsListV2 && supportsStatV2) {
+                        ProtocolSyncVersion.V2
+                    } else {
+                        ProtocolSyncVersion.V1
+                    }
+                    override val transferVersion = if (supportsSendRecvV2) {
+                        ProtocolSyncVersion.V2
+                    } else {
+                        ProtocolSyncVersion.V1
+                    }
+
+                    override fun list(path: String): List<ProtocolRemoteEntry> = if (supportsListV2) {
+                        sync.listV2(path).map { it.toProtocolEntry() }
+                    } else {
+                        sync.list(path).map { it.toProtocolEntry() }
+                    }
+
+                    override fun lstat(path: String): ProtocolRemoteStat = if (supportsStatV2) {
+                        sync.lstatV2(path).toProtocolStat()
+                    } else {
+                        sync.lstat(path).toProtocolStat()
+                    }
+
+                    override fun stat(path: String): ProtocolRemoteStat = if (supportsStatV2) {
+                        sync.statV2(path).toProtocolStat()
+                    } else {
+                        sync.lstat(path).toProtocolStat()
+                    }
+
+                    override fun recv(path: String, sink: (ByteArray, Int, Int) -> Unit) {
+                        sync.recv(
+                            object : Sink {
+                                override fun write(source: Buffer, byteCount: Long) {
+                                    var remaining = byteCount
+                                    while (remaining > 0L) {
+                                        val count = minOf(remaining, SYNC_TRANSFER_CHUNK_BYTES.toLong()).toInt()
+                                        val bytes = source.readByteArray(count.toLong())
+                                        sink(bytes, 0, bytes.size)
+                                        remaining -= count
+                                    }
+                                }
+
+                                override fun flush() = Unit
+                                override fun timeout(): Timeout = Timeout.NONE
+                                override fun close() = Unit
+                            },
+                            path,
+                        )
+                    }
+
+                    override fun send(
+                        path: String,
+                        mode: Int,
+                        modifiedEpochMillis: Long,
+                        source: (ByteArray) -> Int,
+                    ) {
+                        sync.send(
+                            object : Source {
+                                override fun read(sink: Buffer, byteCount: Long): Long {
+                                    val requested = minOf(byteCount, SYNC_TRANSFER_CHUNK_BYTES.toLong()).toInt()
+                                    val buffer = ByteArray(requested)
+                                    val count = source(buffer)
+                                    if (count < 0) return -1L
+                                    require(count <= requested)
+                                    sink.write(buffer, 0, count)
+                                    return count.toLong()
+                                }
+
+                                override fun timeout(): Timeout = Timeout.NONE
+                                override fun close() = Unit
+                            },
+                            path,
+                            mode,
+                            modifiedEpochMillis,
+                        )
+                    }
+
+                    override fun close() = sync.close()
+                }
+            }
+
             override fun close() = kadb.close()
         }
     }
@@ -161,6 +255,7 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
         const val CONNECT_TIMEOUT_MS = 10_000
         const val MAX_SHELL_OUTPUT_BYTES = 1024 * 1024
         const val STREAM_CHUNK_BYTES = 16_384L
+        const val SYNC_TRANSFER_CHUNK_BYTES = 64 * 1024
     }
 
     private fun normalizedStreamReadFailure(error: Throwable): Throwable {
@@ -176,6 +271,40 @@ internal class KadbProtocolClientFactory(context: Context) : AdbProtocolClientFa
                 ))
         return if (isCommandEof) ProtocolCommandStreamException() else error
     }
+
+    private fun AdbSyncDirEntry.toProtocolEntry() = ProtocolRemoteEntry(
+        name = name,
+        mode = mode,
+        size = size,
+        modifiedEpochSeconds = mtimeSec,
+        deviceId = null,
+        inode = null,
+    )
+
+    private fun AdbSyncDirEntryV2.toProtocolEntry() = ProtocolRemoteEntry(
+        name = name,
+        mode = mode,
+        size = size,
+        modifiedEpochSeconds = mtimeSec,
+        deviceId = dev,
+        inode = ino,
+    )
+
+    private fun AdbSyncStat.toProtocolStat() = ProtocolRemoteStat(
+        mode = mode,
+        size = size,
+        modifiedEpochSeconds = mtimeSec,
+        deviceId = null,
+        inode = null,
+    )
+
+    private fun AdbSyncStatV2.toProtocolStat() = ProtocolRemoteStat(
+        mode = mode,
+        size = size,
+        modifiedEpochSeconds = mtimeSec,
+        deviceId = dev,
+        inode = ino,
+    )
 
     private class BoundedByteTail(private val limit: Int) {
         private var data = ByteArray(0)
