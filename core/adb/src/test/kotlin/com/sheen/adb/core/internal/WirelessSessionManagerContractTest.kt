@@ -18,7 +18,6 @@ import com.sheen.adb.core.WirelessServiceObservation
 import com.sheen.adb.core.WirelessServiceStatus
 import com.sheen.adb.core.WirelessServiceType
 import java.util.concurrent.CopyOnWriteArrayList
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -173,6 +172,7 @@ class WirelessSessionManagerContractTest {
             assertEquals(source.closeCalls.get(), 1)
             assertEquals(sourceFactory.sources.size, 1)
             manager.close()
+            assertEquals(source.closeCalls.get(), 1)
         }
     }
 
@@ -294,7 +294,6 @@ class WirelessSessionManagerContractTest {
         var request: WirelessDiscoverySourceRequest? = null
             private set
         val closeCalls = AtomicInteger(0)
-        private val closed = AtomicBoolean(false)
 
         override fun start(request: WirelessDiscoverySourceRequest): WirelessDiscoverySourceStartResult {
             this.request = request
@@ -310,7 +309,7 @@ class WirelessSessionManagerContractTest {
         }
 
         override fun close() {
-            if (closed.compareAndSet(false, true)) closeCalls.incrementAndGet()
+            closeCalls.incrementAndGet()
         }
     }
 
