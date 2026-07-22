@@ -86,6 +86,8 @@
   - **验收**: T017 通过；使用注入的加密安全随机源生成规定材料，只匹配仍有效且 instance 完全相同的 pairing service，结束后 QR payload/password/bitmap 引用失效，成功只表示已授权而未自动连接。
 - [ ] T019 [P] [US1] 先写 Kadb 与 manager QR 集成失败测试，覆盖任意长度 QR password、六位码共用 client path、超时/取消映射、`CharArray` 清零和已有 Session 不被替换于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/QrPairingSessionManagerTest.kt`
   - **验收**: 目标测试在现有 Kadb/manager 接线下失败；测试 fake 记录调用类别但不保留 secret 原文。
+- [ ] T020A [US1] 建立 manager QR 公共契约与已有 Session 冲突错误于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbModels.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbSessionManager.kt`
+  - **验收**: T019 从缺少公共入口的编译失败推进为行为失败；入口仅接受项目自有 `PairingSecret`/`PairingMethod`，默认兼容实现拒绝并清理 secret，结构化冲突不含端点或 secret，既有 manager fake 无需新增实现即可编译。
 - [ ] T020 [US1] 接入 QR/配对码共用 Kadb client path 于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/KadbProtocolClientFactory.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt`
   - **验收**: T019、既有配对码测试和 manager 回归通过；QR password 不被错误限制为六位，所有结束路径清零，配对不会创建第二个活动 Session。
 - [ ] T021 [P] [US1] 先写 QR matrix encoder 失败测试，覆盖 UTF-8 payload、固定 quiet zone/纠错配置、正方形矩阵、确定性输出和不提供 decode/camera API 于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/QrMatrixEncoderTest.kt`
@@ -301,7 +303,7 @@ flowchart TD
 ### Within-task TDD dependencies
 
 - T005 → T006；T007 → T008；T009 → T010；T011 → T012；T013 → T014 → T014A → T015 → T016。
-- US1：T017 → T018 → T019/T020；T021 → T022；T023 → T024 → T025 → T026；T027 → T028。
+- US1：T017 → T018 → T019 → T020A → T020；T021 → T022；T023 → T024 → T025 → T026；T027 → T028。
 - US2：T029 → T030；T031 → T032；T033 → T034；T035 → T036；T037 → T038 → T039。
 - US3：T040 → T041；T042 → T043 → T044 → T045；T046 → T047。
 - US4：T048 → T049；T050 → T051 → T052 → T053；T054 → T055；T056 → T057。
@@ -346,7 +348,7 @@ flowchart TD
 
 ```text
 并行启动 T017（QR coordinator 测试）、T021（QR encoder 测试）、T023（配对 reducer 测试）。
-各测试确认预期失败后，T018、T022、T024 可分别在 core/feature 的不同文件上并行；manager 接线 T020 等待 T018/T019。
+各测试确认预期失败后，T018、T022、T024 可分别在 core/feature 的不同文件上并行；manager 接线先由 T020A 建立公共契约，再由 T020 完成协议实现，二者均等待 T018/T019。
 ```
 
 ### US2

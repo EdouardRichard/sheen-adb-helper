@@ -123,6 +123,7 @@ feature/logcat/
 - API 30–32 使用 legacy discover/resolve 加临时 `MulticastLock`；API 33+ 绑定当前 `Network`；API 34+ 使用多地址回调。每次发现有 generation token，停止后丢弃迟到回调并释放监听器/锁。
 - manager 接线分为两个独立实施边界：先在 `AdbModels.kt` 与 `AdbSessionManager.kt` 定义 `AdbOperationStage.DISCOVERY`、不含平台/端点原文的结构化发现错误、项目自有 discovery source/coordinator 契约与状态流；再仅在 `DefaultAdbSessionManager.kt` 实现唯一活动发现、generation/session guard、并发拒绝、超时/取消终态和 `close()` 清理。这样 Android NSD 类型不会泄漏到公开 API，并保持每个实施任务最多修改两个文件。
 - Android NSD 装配也分为两个实施边界：`AdbManagerProvider.kt` 与 `AndroidNsdDiscoveryAdapter.kt` 负责 application Context 单例装配和 source 生命周期；随后由独立任务仅修改 `NsdDiscoveryPolicy.kt` 与 `AndroidNsdDiscoveryAdapter.kt`，为 discovery 已启动后的异步 resolve 权限拒绝增加内部 failure 分支、锁外单次终态通知与确定性资源释放，避免 `SecurityException` 逃出平台 callback 或退化为 timeout。该拆分保持每任务最多两个文件。
+- QR manager 接线拆为公共契约与协议实现两个边界：先仅在 `AdbModels.kt` 与 `AdbSessionManager.kt` 增加使用 `PairingSecret`/`PairingMethod` 的项目自有 QR 配对入口、已有 Session 冲突错误以及默认拒绝并清理 secret 的兼容实现；再仅修改 `KadbProtocolClientFactory.kt` 与 `DefaultAdbSessionManager.kt`，让 QR 与六位码复用一个 Kadb client path。manager 在已有 Session 时必须保留该 Session 并返回结构化冲突，配对成功只回到未连接状态，不创建或替换 Session。该拆分保持每个实施任务最多修改两个文件，并使现有 fake manager 可在公共契约扩展后继续编译。
 
 ### 2. 本机通知与短时前台服务
 
