@@ -9,6 +9,8 @@ kadb = "2.1.1"
 testng = "7.11.0"
 dataStore = "1.2.0"
 okio = "3.17.0"
+zxingCore = "3.5.4"
+apkParser = "2.6.10"
 
 [libraries]
 androidx-activity-compose = { module = "androidx.activity:activity-compose", version.ref = "activityCompose" }
@@ -25,6 +27,8 @@ kadb = { module = "com.flyfishxu:kadb", version.ref = "kadb" }
 testng = { module = "org.testng:testng", version.ref = "testng" }
 androidx-datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "dataStore" }
 okio = { module = "com.squareup.okio:okio", version.ref = "okio" }
+zxingCore = { module = "com.google.zxing:core", version.ref = "zxingCore" }
+apkParser = { module = "net.dongliu:apk-parser", version.ref = "apkParser" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
