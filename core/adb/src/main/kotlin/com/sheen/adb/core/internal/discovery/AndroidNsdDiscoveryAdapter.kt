@@ -122,6 +122,7 @@ private class AndroidNsdWirelessDiscoverySource(
 
     private fun NsdDiscoveryFailure.toSourceFailure(): WirelessDiscoverySourceFailure = when (this) {
         NsdDiscoveryFailure.NETWORK_UNAVAILABLE -> WirelessDiscoverySourceFailure.NETWORK_UNAVAILABLE
+        NsdDiscoveryFailure.PERMISSION_UNAVAILABLE -> WirelessDiscoverySourceFailure.PERMISSION_UNAVAILABLE
         NsdDiscoveryFailure.PLATFORM_RESOLVE_FAILED -> WirelessDiscoverySourceFailure.RESOLUTION_FAILED
         NsdDiscoveryFailure.PLATFORM_DISCOVERY_FAILED,
         NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED,
@@ -195,7 +196,7 @@ class AndroidNsdDiscoveryAdapter(
     private fun discoveryCallbacks(session: ActiveDiscovery, serviceType: String): NsdDiscoveryCallbacks =
         object : NsdDiscoveryCallbacks {
             override fun onServiceFound(service: NsdServiceRef) {
-                var shouldNotifyFailure = false
+                var failureToNotify: NsdDiscoveryFailure? = null
                 synchronized(monitor) {
                     if (!isActive(session) || service.serviceType != serviceType) return@synchronized
                     try {
@@ -204,13 +205,15 @@ class AndroidNsdDiscoveryAdapter(
                         throw error
                     } catch (error: InterruptedException) {
                         throw error
-                    } catch (error: SecurityException) {
-                        throw error
+                    } catch (_: SecurityException) {
+                        val failure = NsdDiscoveryFailure.PERMISSION_UNAVAILABLE
+                        if (failLocked(session, failure)) failureToNotify = failure
                     } catch (_: Exception) {
-                        shouldNotifyFailure = failLocked(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+                        val failure = NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED
+                        if (failLocked(session, failure)) failureToNotify = failure
                     }
                 }
-                if (shouldNotifyFailure) notifyFailure(NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+                failureToNotify?.let(::notifyFailure)
             }
 
             override fun onDiscoveryFailure(failure: NsdPlatformFailure) {
@@ -225,7 +228,7 @@ class AndroidNsdDiscoveryAdapter(
     private fun resolveCallbacks(session: ActiveDiscovery): NsdResolveCallbacks = object : NsdResolveCallbacks {
         override fun onResolved(service: NsdResolvedService) {
             var event: WirelessDiscoveryEvent? = null
-            var shouldNotifyFailure = false
+            var failureToNotify: NsdDiscoveryFailure? = null
             synchronized(monitor) {
                 if (!isActive(session)) return@synchronized
                 try {
@@ -245,14 +248,16 @@ class AndroidNsdDiscoveryAdapter(
                     throw error
                 } catch (error: InterruptedException) {
                     throw error
-                } catch (error: SecurityException) {
-                    throw error
+                } catch (_: SecurityException) {
+                    val failure = NsdDiscoveryFailure.PERMISSION_UNAVAILABLE
+                    if (failLocked(session, failure)) failureToNotify = failure
                 } catch (_: Exception) {
-                    shouldNotifyFailure = failLocked(session, NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+                    val failure = NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED
+                    if (failLocked(session, failure)) failureToNotify = failure
                 }
             }
             event?.let(::notifyEvent)
-            if (shouldNotifyFailure) notifyFailure(NsdDiscoveryFailure.PLATFORM_OPERATION_FAILED)
+            failureToNotify?.let(::notifyFailure)
         }
 
         override fun onResolveFailure(failure: NsdPlatformFailure) {
