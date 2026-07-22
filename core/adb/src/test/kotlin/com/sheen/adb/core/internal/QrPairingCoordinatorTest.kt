@@ -43,13 +43,18 @@ class QrPairingCoordinatorTest {
 
             val differentMaterial = differentHarness.start(attemptId("different-entropy"))
             assertFalse(
-                differentHarness.serviceInstance(differentMaterial) == serviceInstance &&
-                    differentHarness.passwordValue(differentMaterial) == password,
-                "Changing the injected entropy bytes must change generated pairing material",
+                differentHarness.serviceInstance(differentMaterial) == serviceInstance,
+                "Changing the injected entropy bytes must change the service instance",
+            )
+            assertFalse(
+                differentHarness.passwordValue(differentMaterial) == password,
+                "Changing the injected entropy bytes must change the password",
             )
 
+            val closePassword = coordinator.materialPassword(material)
             coordinator.close()
             assertNull(coordinator.payload(material))
+            assertCleared(closePassword)
         } finally {
             coordinator.close()
             duplicateHarness.close()
@@ -121,6 +126,7 @@ class QrPairingCoordinatorTest {
         val attemptId = attemptId("expired")
         try {
             val material = coordinator.start(attemptId)
+            val password = coordinator.materialPassword(material)
             val service = observation(
                 "late",
                 WirelessServiceType.PAIRING,
@@ -133,6 +139,7 @@ class QrPairingCoordinatorTest {
             assertNull(coordinator.match(attemptId, service))
             assertEquals(coordinator.state(attemptId), PairingAttemptPhase.EXPIRED)
             assertNull(coordinator.payload(material))
+            assertCleared(password)
         } finally {
             coordinator.close()
         }
@@ -146,11 +153,13 @@ class QrPairingCoordinatorTest {
             val first = coordinator.start(firstId)
             val firstService = coordinator.serviceInstance(first)
             val firstPasswordValue = coordinator.passwordValue(first)
+            val firstPassword = coordinator.materialPassword(first)
 
             assertTrue(coordinator.complete(firstId, PairingAttemptPhase.CANCELLED))
             assertFalse(coordinator.complete(firstId, PairingAttemptPhase.SUCCEEDED))
             assertEquals(coordinator.state(firstId), PairingAttemptPhase.CANCELLED)
             assertNull(coordinator.payload(first))
+            assertCleared(firstPassword)
 
             val secondId = attemptId("second-result")
             val second = coordinator.start(secondId)
@@ -233,6 +242,9 @@ class QrPairingCoordinatorTest {
 
         fun matchPassword(match: Any): CharArray =
             (property(match, "getSecret") as PairingSecret).withChars { it }
+
+        fun materialPassword(material: Any): CharArray =
+            (property(material, "getPairingSecret") as PairingSecret).withChars { it }
 
         fun matchObservationId(match: Any): WirelessObservationId =
             property(match, "getObservationId") as WirelessObservationId
