@@ -57,7 +57,7 @@
   - **验收**: T011 与全部既有 redactor 测试通过；输出只含 stage/outcome/technicalCode 等安全字段，不含 QR、端点、service name、包名或原始异常正文。
 - [ ] T013 先写 manager 无线发现契约失败测试，覆盖 generation/session 归属、取消、超时、source 启动同步拒绝与异步失败的结构化错误、并发发现拒绝和关闭清理于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/WirelessSessionManagerContractTest.kt`
   - **验收**: 目标测试因 `AdbSessionManager` 无无线实现或实现不完整而失败；同步 `Rejected` 与异步 failure 均映射安全错误、无悬挂且 source 只关闭一次；测试使用 fake adapter，不打开 Socket/NSD。
-- [ ] T014 扩展项目自有无线发现结果、结构化错误与 manager 契约于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbModels.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbSessionManager.kt`
+- [X] T014 扩展项目自有无线发现结果、结构化错误与 manager 契约于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbModels.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbSessionManager.kt`
   - **验收**: T013 从“契约缺失”推进到仅因默认 manager 未实现而失败；新增 `AdbOperationStage.DISCOVERY`、不含端点/平台异常原文的结构化发现错误及项目自有 discovery source/coordinator 契约，公开 API 不暴露 `NsdManager`、`NsdServiceInfo`、Kadb、Socket 或原始命令。
 - [ ] T014A 将 discovery coordinator 接入默认 manager 于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt`
   - **验收**: T013 及既有 manager 测试通过；同一时间只允许一个活动发现，所有结果带 generation/session guard，取消、超时、Session 变化、并发拒绝和 `close()` 均产生确定终态并清理 source。
