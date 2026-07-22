@@ -43,36 +43,110 @@ class DiagnosticRedactorTest {
     }
 
     @Test
-    fun `redacts wireless pairing discovery and application values from diagnostic context`() {
+    fun `redacts a complete wireless pairing QR payload`() {
         val serviceInstance = "synthetic-adb-pairing-A7"
         val qrPassword = "syntheticQrPass9"
         val qrPayload = "WIFI:T:ADB;S:$serviceInstance;P:$qrPassword;;"
-        val ipv4Endpoint = "192.0.2.44:37123"
-        val unbracketedScopedIpv6Endpoint = "fe80::7%synthetic0:37124"
-        val bracketedScopedIpv6Endpoint = "[fe80::8%synthetic1]:37125"
-        val packageName = "com.example.syntheticdiagnostics"
-        val raw = listOf(
-            "qrPayload=$qrPayload",
-            "qrPassword=$qrPassword",
-            "serviceType=_adb-tls-pairing._tcp serviceName=$serviceInstance",
-            "endpoint=$ipv4Endpoint",
-            "endpoint=$unbracketedScopedIpv6Endpoint",
-            "endpoint=$bracketedScopedIpv6Endpoint",
-            "packageName=$packageName application=$packageName",
-            "exception=IllegalStateException: pairing failed for $qrPayload",
-            "message=discovery failed for $serviceInstance at $unbracketedScopedIpv6Endpoint",
-            "context=$qrPassword $bracketedScopedIpv6Endpoint $packageName",
-        ).joinToString("; ")
-
-        val redacted = DiagnosticRedactor.redact(raw)
+        val redacted = DiagnosticRedactor.redact("qrPayload=$qrPayload")
 
         assertFalse(redacted.contains(qrPayload))
+    }
+
+    @Test
+    fun `redacts an explicit arbitrary length QR password`() {
+        val qrPassword = "syntheticQrPass9"
+        val redacted = DiagnosticRedactor.redact("qrPassword=$qrPassword")
+
         assertFalse(redacted.contains(qrPassword))
+    }
+
+    @Test
+    fun `redacts NSD service instance while retaining the safe service type`() {
+        val serviceInstance = "synthetic-adb-pairing-A7"
+        val redacted = DiagnosticRedactor.redact(
+            "serviceType=_adb-tls-pairing._tcp; serviceName=$serviceInstance",
+        )
+
+        assertTrue(redacted.contains("_adb-tls-pairing._tcp"))
         assertFalse(redacted.contains(serviceInstance))
-        assertFalse(redacted.contains(ipv4Endpoint))
-        assertFalse(redacted.contains(unbracketedScopedIpv6Endpoint))
-        assertFalse(redacted.contains(bracketedScopedIpv6Endpoint))
+    }
+
+    @Test
+    fun `redacts an IPv4 endpoint address and port`() {
+        val address = "192.0.2.44"
+        val endpoint = "$address:37123"
+        val redacted = DiagnosticRedactor.redact("endpoint=$endpoint")
+
+        assertFalse(redacted.contains(address))
+        assertFalse(redacted.contains(endpoint))
+    }
+
+    @Test
+    fun `redacts an unbracketed scoped IPv6 endpoint address and port`() {
+        val address = "fe80::7%synthetic0"
+        val endpoint = "$address:37124"
+        val redacted = DiagnosticRedactor.redact("endpoint=$endpoint")
+
+        assertFalse(redacted.contains(address))
+        assertFalse(redacted.contains(endpoint))
+    }
+
+    @Test
+    fun `redacts a bracketed scoped IPv6 endpoint address and port`() {
+        val address = "fe80::8%synthetic1"
+        val endpoint = "[$address]:37125"
+        val redacted = DiagnosticRedactor.redact("endpoint=$endpoint")
+
+        assertFalse(redacted.contains(address))
+        assertFalse(redacted.contains(endpoint))
+    }
+
+    @Test
+    fun `redacts an explicit package name field`() {
+        val packageName = "com.example.syntheticdiagnostics"
+        val redacted = DiagnosticRedactor.redact("packageName=$packageName; stage=DISCOVERY")
+
         assertFalse(redacted.contains(packageName))
+    }
+
+    @Test
+    fun `redacts a standalone application package field`() {
+        val packageName = "com.example.syntheticdiagnostics"
+        val redacted = DiagnosticRedactor.redact("application=$packageName; stage=DISCOVERY")
+
+        assertFalse(redacted.contains(packageName))
+    }
+
+    @Test
+    fun `redacts a bare package value in diagnostic context`() {
+        val packageName = "com.example.syntheticdiagnostics"
+        val redacted = DiagnosticRedactor.redact("selection failed for $packageName")
+
+        assertFalse(redacted.contains(packageName))
+    }
+
+    @Test
+    fun `redacts a raw exception field body`() {
+        val rawExceptionBody = "exceptionBodyMarkerA7"
+        val redacted = DiagnosticRedactor.redact("exception=$rawExceptionBody")
+
+        assertFalse(redacted.contains(rawExceptionBody))
+    }
+
+    @Test
+    fun `redacts a raw message field body`() {
+        val rawMessageBody = "messageBodyMarkerB8"
+        val redacted = DiagnosticRedactor.redact("message=$rawMessageBody")
+
+        assertFalse(redacted.contains(rawMessageBody))
+    }
+
+    @Test
+    fun `redacts a raw context field body`() {
+        val rawContextBody = "contextBodyMarkerC9"
+        val redacted = DiagnosticRedactor.redact("context=$rawContextBody")
+
+        assertFalse(redacted.contains(rawContextBody))
     }
 
     @Test
@@ -99,14 +173,27 @@ class DiagnosticRedactorTest {
             ),
         )
 
-        assertEquals(
-            fields,
-            mapOf(
-                "stage" to "FILE_TRANSFER",
-                "outcome" to "FAILED",
-                "technicalCode" to "SESSION_INVALID",
-                "count" to "3",
-            ),
-        )
+        assertEquals(fields.keys, setOf("stage", "outcome", "technicalCode", "count"))
+        assertEquals(fields["stage"], "FILE_TRANSFER")
+        assertEquals(fields["outcome"], "FAILED")
+        assertEquals(fields["technicalCode"], "SESSION_INVALID")
+        assertEquals(fields["count"], "3")
+        listOf(
+            "remotePath",
+            "safUri",
+            "packageName",
+            "shellOutput",
+            "logcat",
+            "qrPayload",
+            "qrPassword",
+            "serviceName",
+            "endpoint",
+            "application",
+            "exception",
+            "message",
+            "context",
+        ).forEach { unsafeKey ->
+            assertFalse(fields.containsKey(unsafeKey))
+        }
     }
 }
