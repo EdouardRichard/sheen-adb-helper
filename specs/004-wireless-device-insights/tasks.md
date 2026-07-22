@@ -45,7 +45,7 @@
   - **验收**: T005 全部通过；只接受 `_adb-tls-pairing._tcp`/`_adb-tls-connect._tcp`，未知 pairing/connect 关系保持独立，旧 generation 结果不可进入当前状态。
 - [X] T007 [P] 先写 NSD 策略/适配器失败测试，覆盖 API 30–32 MulticastLock、API 33+ 当前 Network、API 34+ 多地址、10 秒截止、stop 资源释放和禁止 `_adb._tcp` 于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/NsdDiscoveryAdapterTest.kt`
   - **验收**: 目标测试因策略/适配器尚未实现而失败；测试以 fake platform callback 验证，不访问真实网络。
-- [ ] T008 实现 API 分支策略与 Android NSD 平台适配于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/discovery/NsdDiscoveryPolicy.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/discovery/AndroidNsdDiscoveryAdapter.kt`
+- [X] T008 实现 API 分支策略与 Android NSD 平台适配于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/discovery/NsdDiscoveryPolicy.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/discovery/AndroidNsdDiscoveryAdapter.kt`
   - **验收**: T007 通过；停止、取消、网络变化和异常均注销 callback、取消 resolve、释放 MulticastLock，且代码中不存在子网枚举或端口探测循环。
 - [ ] T009 [P] 先写配对生命周期失败测试，覆盖 QR/六位码状态、六位 ASCII 数字、过期/取消/失败终态、secret 清零、attempt token 和旧提交拒绝于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/PairingLifecycleTest.kt`
   - **验收**: 目标测试因模型/状态机缺失而失败；fixture 只使用合成凭据且断言终态内存不再暴露原值。
