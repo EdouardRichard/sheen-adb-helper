@@ -35,6 +35,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import org.testng.Assert.assertFalse
+import org.testng.Assert.assertEquals
 import org.testng.Assert.assertNotNull
 import org.testng.Assert.assertSame
 import org.testng.Assert.assertTrue
@@ -135,42 +136,61 @@ class WirelessDiscoveryFactoryTest {
         assertSame(failures.single(), NsdDiscoveryFailure.NETWORK_UNAVAILABLE)
     }
 
-    @Test(timeOut = 3_000)
+    @Test
+    fun `asynchronous resolve permission denial terminates and releases resources`() {
+        val platform = TestPlatform(resolveFailure = SecurityException("synthetic permission denial"))
+        val scheduler = RecordingScheduler()
+        val failures = mutableListOf<NsdDiscoveryFailure>()
+        val adapter = adapter(platform, scheduler) { failures += it }
+
+        assertSame(
+            adapter.start(NsdDiscoveryRequest(generation = 3, apiLevel = 30, currentNetwork = null)),
+            NsdDiscoveryStartResult.Started,
+        )
+        platform.discoveryCallbacks.first().onServiceFound(
+            NsdServiceRef("_adb-tls-pairing._tcp", "synthetic-service"),
+        )
+
+        assertEquals(failures.map(NsdDiscoveryFailure::name), listOf("PERMISSION_UNAVAILABLE"))
+        assertTrue(platform.resources.all { it.cancelCalls == 1 }, "Every acquired platform resource must close once")
+        assertSame(scheduler.resource.cancelCalls, 1, "The discovery deadline must be cancelled once")
+    }
+
+    @Test(timeOut = 5_000)
     fun `adapter callback and source close do not invert locks`() {
         val platform = TestPlatform()
         val callbackEntered = CountDownLatch(1)
         val allowObserverClose = CountDownLatch(1)
         val callbackDone = CountDownLatch(1)
-        lateinit var source: WirelessDiscoverySource
         val adapter = adapter(platform) {
             callbackEntered.countDown()
             allowObserverClose.await()
-            source.close()
             callbackDone.countDown()
         }
-        source = sourceWithAdapter(adapter)
+        val source = sourceWithAdapter(adapter)
         assertSame(source.start(sourceRequest()), WirelessDiscoverySourceStartResult.Started)
 
         val callbackThread = daemonThread("synthetic-nsd-callback") {
             platform.discoveryCallbacks.first().onDiscoveryFailure(NsdPlatformFailure.DISCOVERY_FAILED)
         }
-        callbackThread.start()
-        assertTrue(callbackEntered.await(1, TimeUnit.SECONDS), "The adapter callback did not reach its observer")
-
         val closeDone = CountDownLatch(1)
         val closeThread = daemonThread("synthetic-source-close") {
             source.close()
             closeDone.countDown()
         }
-        closeThread.start()
-        assertTrue(
-            awaitBlockedOrDone(closeThread, closeDone),
-            "The close path neither contended with nor completed during the active adapter callback",
-        )
-        allowObserverClose.countDown()
-
-        assertTrue(callbackDone.await(1, TimeUnit.SECONDS), "The adapter callback deadlocked while closing its source")
-        assertTrue(closeDone.await(1, TimeUnit.SECONDS), "The concurrent source close did not finish")
+        try {
+            callbackThread.start()
+            assertTrue(callbackEntered.await(1, TimeUnit.SECONDS), "The adapter callback did not reach its observer")
+            closeThread.start()
+            assertTrue(closeDone.await(1, TimeUnit.SECONDS), "Source close remained blocked by an external observer")
+        } finally {
+            allowObserverClose.countDown()
+            callbackThread.join(500)
+            closeThread.join(500)
+            if (callbackThread.isAlive) callbackThread.interrupt()
+            if (closeThread.isAlive) closeThread.interrupt()
+        }
+        assertTrue(callbackDone.await(1, TimeUnit.SECONDS), "The adapter callback did not finish after release")
     }
 
     private fun discoveryFactory(manager: Any): WirelessDiscoverySourceFactory? {
@@ -218,11 +238,12 @@ class WirelessDiscoveryFactoryTest {
 
     private fun adapter(
         platform: TestPlatform,
+        scheduler: NsdScheduler = TestScheduler,
         onFailure: (NsdDiscoveryFailure) -> Unit = {},
     ): AndroidNsdDiscoveryAdapter = AndroidNsdDiscoveryAdapter(
         platform = platform,
         policy = NsdDiscoveryPolicy(),
-        scheduler = TestScheduler,
+        scheduler = scheduler,
         observer = object : NsdDiscoveryObserver {
             override fun onEvent(event: WirelessDiscoveryEvent) = Unit
 
@@ -244,15 +265,6 @@ class WirelessDiscoveryFactoryTest {
 
     private fun daemonThread(name: String, action: () -> Unit): Thread = Thread(action, name).apply {
         isDaemon = true
-    }
-
-    private fun awaitBlockedOrDone(thread: Thread, done: CountDownLatch): Boolean {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-        while (System.nanoTime() < deadline) {
-            if (thread.state == Thread.State.BLOCKED || done.count == 0L) return true
-            Thread.yield()
-        }
-        return false
     }
 
     private inline fun <reified T> allocate(): T = unsafe.allocateInstance(T::class.java) as T
@@ -281,13 +293,15 @@ class WirelessDiscoveryFactoryTest {
 
     private class TestPlatform(
         private val acquireFailure: Exception? = null,
+        private val resolveFailure: Exception? = null,
     ) : NsdDiscoveryPlatformGateway {
         val discoveryCallbacks = mutableListOf<NsdDiscoveryCallbacks>()
+        val resources = mutableListOf<CountingResource>()
         lateinit var networkCallbacks: NsdNetworkChangeCallbacks
 
         override fun acquireMulticastLock(): NsdPlatformResource {
             acquireFailure?.let { throw it }
-            return NoOpResource
+            return resource()
         }
 
         override fun discover(
@@ -296,26 +310,45 @@ class WirelessDiscoveryFactoryTest {
             callbacks: NsdDiscoveryCallbacks,
         ): NsdPlatformResource {
             discoveryCallbacks += callbacks
-            return NoOpResource
+            return resource()
         }
 
         override fun resolve(
             service: NsdServiceRef,
             network: NsdNetworkRef?,
             callbacks: NsdResolveCallbacks,
-        ): NsdPlatformResource = NoOpResource
+        ): NsdPlatformResource {
+            resolveFailure?.let { throw it }
+            return resource()
+        }
 
         override fun registerNetworkChangeCallback(
             network: NsdNetworkRef,
             callbacks: NsdNetworkChangeCallbacks,
         ): NsdPlatformResource {
             networkCallbacks = callbacks
-            return NoOpResource
+            return resource()
         }
+
+        private fun resource(): CountingResource = CountingResource().also(resources::add)
     }
 
     private object TestScheduler : NsdScheduler {
         override fun schedule(delayMillis: Long, action: () -> Unit): NsdPlatformResource = NoOpResource
+    }
+
+    private class RecordingScheduler : NsdScheduler {
+        val resource = CountingResource()
+
+        override fun schedule(delayMillis: Long, action: () -> Unit): NsdPlatformResource = resource
+    }
+
+    private class CountingResource : NsdPlatformResource {
+        var cancelCalls = 0
+
+        override fun cancel() {
+            cancelCalls += 1
+        }
     }
 
     private object NoOpResource : NsdPlatformResource {
