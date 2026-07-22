@@ -71,6 +71,7 @@ internal class PairingLifecycle(
             secret.withChars { chars -> action.pair(PairingMethod.QR, chars) }
             terminal(PairingAttemptPhase.SUCCEEDED, null)
         } catch (error: CancellationException) {
+            terminal(PairingAttemptPhase.CANCELLED, PairingFailure.CANCELLED)
             throw error
         } catch (_: Exception) {
             terminal(PairingAttemptPhase.FAILED, PairingFailure.ACTION_FAILED)
@@ -95,6 +96,7 @@ internal class PairingLifecycle(
                 action.pair(PairingMethod.SIX_DIGIT_CODE, code)
                 terminal(PairingAttemptPhase.SUCCEEDED, null)
             } catch (error: CancellationException) {
+                terminal(PairingAttemptPhase.CANCELLED, PairingFailure.CANCELLED)
                 throw error
             } catch (_: Exception) {
                 terminal(PairingAttemptPhase.FAILED, PairingFailure.ACTION_FAILED)
