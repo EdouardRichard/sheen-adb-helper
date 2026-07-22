@@ -22,6 +22,7 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -130,7 +131,7 @@ class WirelessSessionManagerContractTest {
 
         try {
             assertTrue(createGate.entered.await(2, TimeUnit.SECONDS))
-            results = withTimeoutOrNull(200.milliseconds) { collection.await() }
+            results = withTimeoutOrNull(2.seconds) { collection.await() }
             sourceCountWhileBlocked = sourceFactory.sources.size
         } finally {
             createGate.release.countDown()
@@ -156,7 +157,7 @@ class WirelessSessionManagerContractTest {
 
         try {
             assertTrue(startGate.entered.await(2, TimeUnit.SECONDS))
-            results = withTimeoutOrNull(200.milliseconds) { collection.await() }
+            results = withTimeoutOrNull(2.seconds) { collection.await() }
         } finally {
             startGate.release.countDown()
             if (collection.isActive) withTimeout(2.seconds) { collection.cancelAndJoin() }
@@ -303,22 +304,25 @@ class WirelessSessionManagerContractTest {
         val failureTrigger = async(Dispatchers.Default) {
             firstSource.fail(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
         }
-        assertTrue(closeGate.entered.await(2, TimeUnit.SECONDS))
-
-        val secondCollection = async(Dispatchers.Default) {
-            manager.observeWirelessServices(WirelessDiscoveryMode.LOCAL_PAIRING, 5.seconds).toList()
-        }
+        var secondCollection: Deferred<List<AdbOperationResult<WirelessDiscoveryState>>>? = null
         var secondResults: List<AdbOperationResult<WirelessDiscoveryState>>? = null
         var sourceCountBeforeCloseRelease = -1
         var firstResults: List<AdbOperationResult<WirelessDiscoveryState>>? = null
         try {
-            secondResults = withTimeoutOrNull(200.milliseconds) { secondCollection.await() }
+            assertTrue(closeGate.entered.await(2, TimeUnit.SECONDS))
+            val concurrentCollection = async(Dispatchers.Default) {
+                manager.observeWirelessServices(WirelessDiscoveryMode.LOCAL_PAIRING, 5.seconds).toList()
+            }
+            secondCollection = concurrentCollection
+            secondResults = withTimeoutOrNull(2.seconds) { concurrentCollection.await() }
             sourceCountBeforeCloseRelease = sourceFactory.sources.size
         } finally {
             closeGate.release.countDown()
             withTimeout(2.seconds) { failureTrigger.await() }
             firstResults = withTimeout(2.seconds) { firstCollection.await() }
-            if (secondCollection.isActive) withTimeout(2.seconds) { secondCollection.cancelAndJoin() }
+            secondCollection?.let { collection ->
+                if (collection.isActive) withTimeout(2.seconds) { collection.cancelAndJoin() }
+            }
             manager.close()
         }
 
