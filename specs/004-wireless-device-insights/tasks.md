@@ -94,9 +94,9 @@
   - **验收**: 目标测试因 encoder 缺失而失败；测试不把真实 QR 图像写入磁盘或 golden 文件。
 - [X] T022 [US1] 实现隔离 ZXing 类型的 QR 编码器于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/QrMatrixEncoder.kt`
   - **验收**: T021 通过；公开 Feature 状态不暴露 ZXing 类型，不含扫码/相机入口，释放 pairing material 后不缓存旧矩阵。
-- [ ] T023 [P] [US1] 先写配对 reducer 失败测试，覆盖 QR/配对码选择、准备/等待/成功/失败/取消/过期、不支持回退、六位码立即清除和 Session 替换确认于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducerTest.kt`
+- [X] T023 [P] [US1] 先写配对 reducer 失败测试，覆盖 QR/配对码选择、准备/等待/成功/失败/取消/过期、不支持回退、六位码立即清除和 Session 替换确认于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducerTest.kt`
   - **验收**: 目标测试因 reducer/model 缺失而失败；每个规格状态均有独立断言，已有 Session 未确认时不得产生 connect effect。
-- [ ] T024 [US1] 实现设备配对 UI 状态与 reducer 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingModels.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducer.kt`
+- [X] T024 [US1] 实现设备配对 UI 状态与 reducer 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingModels.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducer.kt`
   - **验收**: T023 通过；状态不可保存 QR/secret 到 SavedState，错误区分 unsupported/expired/invalid/cancelled，code 提交 effect 使用可清零字符容器。
 - [ ] T025 [US1] 先写 DevicesViewModel 配对流失败测试，覆盖 manager flow 收集、generation 丢弃、页面离开清理、重试和用户确认断开旧 Session 于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingViewModelTest.kt`
   - **验收**: 目标测试因 ViewModel 未接入新 reducer/manager 而失败；fake manager/repository 不使用真实端点或包名。
