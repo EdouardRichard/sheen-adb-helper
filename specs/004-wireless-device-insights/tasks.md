@@ -110,7 +110,7 @@
   - **验收**: `kotlinx-coroutines-test` 与现有 Coroutines 版本一致且仅位于 test scope；dependency/compile 检查通过，运行时依赖、Manifest、权限和持久化均无变化。
 - [X] T025 [US1] 先写 DevicesViewModel 配对流失败测试，覆盖 manager flow 收集、generation 丢弃、页面离开清理、重试和用户确认断开旧 Session 于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingViewModelTest.kt`
   - **验收**: 目标测试因 ViewModel 未接入新 reducer/manager 而失败；fake manager/repository 不使用真实端点或包名。
-- [ ] T026 [US1] 将 QR 与配对码事件接入 ViewModel 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt`
+- [X] T026 [US1] 将 QR 与配对码事件接入 ViewModel 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt`
   - **验收**: T025 与既有设备逻辑测试通过；取消、离页、断开、超时和 onCleared 均使旧 generation 无效并清除 pairing material，手动配对码入口仍可用。
 - [ ] T027 [US1] 先写配对展示策略失败测试，覆盖两种方式选择、QR 指引/隐私状态、配对码 fallback、所有终态文案和单 Session 确认对话框于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingPresentationTest.kt`
   - **验收**: 目标测试因 presentation mapping 缺失而失败；文案明确“由被控端系统扫描”，不提示主控端相机。
