@@ -54,7 +54,11 @@ import com.sheen.adb.core.WirelessDiscoverySourceObserver
 import com.sheen.adb.core.WirelessDiscoverySourceRequest
 import com.sheen.adb.core.WirelessDiscoverySourceStartResult
 import com.sheen.adb.core.WirelessDiscoveryState
+import com.sheen.adb.core.WirelessDiscoveryTarget
 import com.sheen.adb.core.WirelessServiceObservation
+import com.sheen.adb.core.WirelessServiceStatus
+import com.sheen.adb.core.WirelessServiceType
+import com.sheen.adb.core.VerifiedWirelessDeviceId
 import com.sheen.adb.core.internal.discovery.WirelessDiscoveryReducer
 import com.sheen.adb.core.internal.pairing.MonotonicClock
 import com.sheen.adb.core.internal.pairing.LocalPairingCoordinator
@@ -62,6 +66,7 @@ import com.sheen.adb.core.internal.pairing.LocalPairingNotificationPolicy
 import com.sheen.adb.core.internal.pairing.QrPairingCoordinator
 import java.io.Closeable
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -106,6 +111,9 @@ internal class DefaultAdbSessionManager(
     private val transferNoProgressTimeout: Duration = 30.seconds,
     private val transferCancellationGrace: Duration = 3.seconds,
     private val wirelessDiscoverySourceFactory: WirelessDiscoverySourceFactory? = null,
+    private val lanDiscoveryWindow: Duration = 10.seconds,
+    private val pairingIdentityFingerprint: (AdbEndpoint) -> ByteArray? = { null },
+    private val connectedIdentityFingerprint: (AdbProtocolClient) -> ByteArray? = { null },
     private val qrPairingCoordinator: QrPairingCoordinator = QrPairingCoordinator(
         clock = MonotonicClock { System.nanoTime() / 1_000_000L },
         secureRandom = SecureRandom(),
@@ -116,6 +124,11 @@ internal class DefaultAdbSessionManager(
         val id: String,
         val endpoint: AdbEndpoint,
         val client: AdbProtocolClient,
+    )
+
+    private data class LanPairingAssociation(
+        val observation: WirelessServiceObservation,
+        val verifiedDeviceId: VerifiedWirelessDeviceId?,
     )
 
     private data class ActiveExclusiveOperation(
@@ -142,6 +155,7 @@ internal class DefaultAdbSessionManager(
     private class ActiveWirelessDiscovery(
         val generation: Long,
         val ownerSessionId: String?,
+        val mode: WirelessDiscoveryMode,
     ) {
         val signals = Channel<WirelessDiscoverySignal>(Channel.UNLIMITED)
         val terminalCompletion = CompletableDeferred<AdbError>()
@@ -239,6 +253,9 @@ internal class DefaultAdbSessionManager(
     private var activeQrAttemptId: PairingAttemptId? = null
     private var activeExclusiveOperation: ActiveExclusiveOperation? = null
     private var activeWirelessDiscovery: ActiveWirelessDiscovery? = null
+    private var latestLanDiscoveryState: WirelessDiscoveryState? = null
+    private val lanPairingAssociations = linkedMapOf<PairingAttemptId, LanPairingAssociation>()
+    private val wirelessIdentitySalt = ByteArray(32).also(SecureRandom()::nextBytes)
     private var applicationSnapshot: ApplicationSnapshot? = null
     private val mutableState = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected())
     override val connectionState: StateFlow<AdbConnectionState> = mutableState.asStateFlow()
@@ -323,7 +340,7 @@ internal class DefaultAdbSessionManager(
         mode: WirelessDiscoveryMode,
         timeout: Duration,
     ): Flow<AdbOperationResult<WirelessDiscoveryState>> = flow {
-        val discovery = claimWirelessDiscovery()
+        val discovery = claimWirelessDiscovery(mode)
         if (discovery == null) {
             val error = if (closed.get()) AdbError.DiscoveryManagerClosed else AdbError.DiscoveryConflict
             emit(operationFailure(error, null, null))
@@ -332,10 +349,16 @@ internal class DefaultAdbSessionManager(
 
         var state = WirelessDiscoveryState(generation = discovery.generation)
         val reducer = WirelessDiscoveryReducer()
+        if (mode == WirelessDiscoveryMode.LAN_FOREGROUND) updateLatestLanDiscoveryState(state)
         var pendingSourceCancellation: CancellationException? = null
         try {
             try {
-                withTimeout(timeout) {
+                val effectiveTimeout = if (mode == WirelessDiscoveryMode.LAN_FOREGROUND) {
+                    minOf(timeout, lanDiscoveryWindow)
+                } else {
+                    timeout
+                }
+                withTimeout(effectiveTimeout) {
                     val factory = wirelessDiscoverySourceFactory
                     if (discovery.isTerminal()) {
                         discovery.markSourceUnavailable()
@@ -433,6 +456,9 @@ internal class DefaultAdbSessionManager(
                         when (signal) {
                             is WirelessDiscoverySignal.Event -> {
                                 state = reducer.reduce(state, signal.value)
+                                if (mode == WirelessDiscoveryMode.LAN_FOREGROUND) {
+                                    updateLatestLanDiscoveryState(state)
+                                }
                                 emit(AdbOperationResult.Success(state))
                             }
 
@@ -467,6 +493,88 @@ internal class DefaultAdbSessionManager(
                 "ADB_DISCOVERY_SOURCE_CLOSED",
                 null,
             )
+        }
+    }
+
+    override suspend fun pairDiscoveredService(
+        target: WirelessDiscoveryTarget,
+        attemptId: PairingAttemptId,
+        secret: PairingSecret,
+        timeout: Duration,
+    ): AdbOperationResult<WirelessDiscoveryState> {
+        val selection = currentLanSelection(target, WirelessServiceType.PAIRING)
+        if (selection == null || synchronized(wirelessDiscoveryLock) { attemptId in lanPairingAssociations }) {
+            secret.clear()
+            return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        }
+        val endpoint = selection.toPairingEndpoint()
+        if (endpoint == null) {
+            secret.clear()
+            return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        }
+        return when (
+            val result = pairWithSecret(
+                pairingEndpoint = endpoint,
+                pairingSecret = secret,
+                method = PairingMethod.SIX_DIGIT_CODE,
+                timeout = timeout,
+            )
+        ) {
+            is AdbOperationResult.Success -> {
+                val verifiedDeviceId = verifiedIdentity(
+                    runCatching { pairingIdentityFingerprint(endpoint) }.getOrNull(),
+                )
+                synchronized(wirelessDiscoveryLock) {
+                    lanPairingAssociations[attemptId] = LanPairingAssociation(selection, verifiedDeviceId)
+                    trimLanPairingAssociations()
+                }
+                AdbOperationResult.Success(
+                    updateLanIdentityState(selection, verifiedDeviceId),
+                )
+            }
+            is AdbOperationResult.Failure -> result
+            AdbOperationResult.Cancelled -> AdbOperationResult.Cancelled
+        }
+    }
+
+    override suspend fun connectDiscoveredService(
+        target: WirelessDiscoveryTarget,
+        expectedPairingAttemptId: PairingAttemptId?,
+        timeout: Duration,
+    ): AdbOperationResult<WirelessDiscoveryState> {
+        val selection = currentLanSelection(target, WirelessServiceType.CONNECT)
+            ?: return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        if (active != null) {
+            return operationFailure(AdbError.PairingSessionConflict, null, null)
+        }
+        val endpoint = selection.toPairingEndpoint()
+            ?: return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        val pairingAssociation = expectedPairingAttemptId?.let { attemptId ->
+            synchronized(wirelessDiscoveryLock) { lanPairingAssociations[attemptId] }
+        }
+        return when (val result = connect(endpoint, timeout)) {
+            is AdbOperationResult.Success -> {
+                val connectedIdentity = active?.client?.let { client ->
+                    verifiedIdentity(runCatching { connectedIdentityFingerprint(client) }.getOrNull())
+                }
+                var updated = latestLanStateOr(target.generation)
+                if (pairingAssociation != null) {
+                    updated = WirelessDiscoveryReducer().withVerifiedIdentity(
+                        state = updated,
+                        observation = pairingAssociation.observation,
+                        verifiedDeviceId = pairingAssociation.verifiedDeviceId,
+                    )
+                }
+                updated = WirelessDiscoveryReducer().withVerifiedIdentity(
+                    state = updated,
+                    observation = selection,
+                    verifiedDeviceId = connectedIdentity,
+                )
+                updateLatestLanDiscoveryState(updated)
+                AdbOperationResult.Success(updated)
+            }
+            is AdbOperationResult.Failure -> result
+            AdbOperationResult.Cancelled -> AdbOperationResult.Cancelled
         }
     }
 
@@ -1881,13 +1989,84 @@ internal class DefaultAdbSessionManager(
         }
     }
 
-    private suspend fun claimWirelessDiscovery(): ActiveWirelessDiscovery? = mutex.withLock {
+    private suspend fun claimWirelessDiscovery(mode: WirelessDiscoveryMode): ActiveWirelessDiscovery? = mutex.withLock {
         synchronized(wirelessDiscoveryLock) {
             if (closed.get() || activeWirelessDiscovery != null) return@synchronized null
             ActiveWirelessDiscovery(
                 generation = wirelessDiscoveryGeneration.incrementAndGet(),
                 ownerSessionId = active?.id,
+                mode = mode,
             ).also { activeWirelessDiscovery = it }
+        }
+    }
+
+    private fun currentLanSelection(
+        target: WirelessDiscoveryTarget,
+        expectedType: WirelessServiceType,
+    ): WirelessServiceObservation? = synchronized(wirelessDiscoveryLock) {
+        val discovery = activeWirelessDiscovery
+        if (discovery == null || discovery.mode != WirelessDiscoveryMode.LAN_FOREGROUND ||
+            discovery.generation != target.generation || discovery.isTerminal()
+        ) {
+            return@synchronized null
+        }
+        latestLanDiscoveryState
+            ?.takeIf { it.generation == target.generation }
+            ?.services
+            ?.singleOrNull {
+                it.observationId == target.observationId &&
+                    it.serviceType == expectedType &&
+                    it.status == WirelessServiceStatus.RESOLVED &&
+                    it.addresses.isNotEmpty()
+            }
+    }
+
+    private fun updateLatestLanDiscoveryState(state: WirelessDiscoveryState) {
+        synchronized(wirelessDiscoveryLock) {
+            val current = latestLanDiscoveryState
+            if (current == null || state.generation >= current.generation) latestLanDiscoveryState = state
+        }
+    }
+
+    private fun latestLanStateOr(generation: Long): WirelessDiscoveryState =
+        synchronized(wirelessDiscoveryLock) {
+            latestLanDiscoveryState?.takeIf { it.generation == generation }
+                ?: WirelessDiscoveryState(generation)
+        }
+
+    private fun updateLanIdentityState(
+        observation: WirelessServiceObservation,
+        verifiedDeviceId: VerifiedWirelessDeviceId?,
+    ): WirelessDiscoveryState {
+        val current = latestLanStateOr(
+            synchronized(wirelessDiscoveryLock) {
+                latestLanDiscoveryState?.generation ?: wirelessDiscoveryGeneration.get()
+            },
+        )
+        return WirelessDiscoveryReducer().withVerifiedIdentity(current, observation, verifiedDeviceId).also {
+            updateLatestLanDiscoveryState(it)
+        }
+    }
+
+    private fun verifiedIdentity(fingerprint: ByteArray?): VerifiedWirelessDeviceId? {
+        if (fingerprint == null || fingerprint.isEmpty()) {
+            fingerprint?.fill(0)
+            return null
+        }
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update(wirelessIdentitySalt)
+            val opaque = digest.digest(fingerprint).joinToString("") { byte -> "%02x".format(byte) }
+            VerifiedWirelessDeviceId(opaque)
+        } finally {
+            fingerprint.fill(0)
+        }
+    }
+
+    private fun trimLanPairingAssociations() {
+        while (lanPairingAssociations.size > MAX_LAN_PAIRING_ASSOCIATIONS) {
+            val oldest = lanPairingAssociations.entries.firstOrNull()?.key ?: return
+            lanPairingAssociations.remove(oldest)
         }
     }
 
@@ -2206,6 +2385,7 @@ internal class DefaultAdbSessionManager(
         const val MAX_AUTO_RENAME_ATTEMPTS = 1_000
         const val LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS = 5_000L
         const val LOCAL_PAIRING_WINDOW_MILLIS = 120_000L
+        const val MAX_LAN_PAIRING_ASSOCIATIONS = 16
         val QR_TERMINAL_PHASES = setOf(
             PairingAttemptPhase.SUCCEEDED,
             PairingAttemptPhase.CANCELLED,
