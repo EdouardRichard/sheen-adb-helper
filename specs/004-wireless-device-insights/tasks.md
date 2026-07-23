@@ -139,7 +139,7 @@
   - **验收**: T031 从缺少公共 controller API 推进为 coordinator 行为失败；公共类型不暴露 Android、internal、Kadb、Socket、原始端点或 secret，默认实现返回 `UNSUPPORTED`，既有 fake manager 无需修改即可编译。
 - [X] T032 [US2] 实现本机配对窗口 coordinator 于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/pairing/LocalPairingCoordinator.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt`
   - **验收**: T031 与既有 manager 测试通过；唯一 manager 通过 T032A 公共 controller 暴露窗口，窗口不超过 2 分钟，所有终态在可测试的 3 秒预算内停止 discovery 并清理，且不启动 LAN/file/logcat 任务。
-- [ ] T033 [P] [US2] 先写 Android 平台桥失败测试，覆盖 Manifest 组件/权限、5 秒前台、API 34+ `onTimeout`、锁屏 action-free、动态 `ACTION_USER_PRESENT` 注册/注销、显式一次性 mutable PendingIntent、API 31+ `Notification.Action.Builder.setAuthenticationRequired(true)` 及接收端复检于 `app/src/test/kotlin/com/sheen/adbhelper/localpairing/LocalPairingPlatformContractTest.kt`
+- [X] T033 [P] [US2] 先写 Android 平台桥失败测试，覆盖 Manifest 组件/权限、5 秒前台、API 34+ `onTimeout`、锁屏 action-free、动态 `ACTION_USER_PRESENT` 注册/注销、显式一次性 mutable PendingIntent、API 31+ `Notification.Action.Builder.setAuthenticationRequired(true)` 及接收端复检于 `app/src/test/kotlin/com/sheen/adbhelper/localpairing/LocalPairingPlatformContractTest.kt`
   - **验收**: 目标测试在 Service/Manifest 尚未实现时按行为断言失败；测试使用 fake Keyguard/notification facade，不依赖真实通知栏或 Activity 引用。
 - [ ] T034 [US2] 声明通知/前台服务权限与唯一非导出 shortService，并实现 Android Service/RemoteInput/解锁事件适配于 `app/src/main/AndroidManifest.xml` 和 `app/src/main/kotlin/com/sheen/adbhelper/localpairing/LocalPairingForegroundService.kt`
   - **验收**: T033 通过；merged Manifest 在 T002 两项 NSD 权限之外仅新增 `POST_NOTIFICATIONS`、`FOREGROUND_SERVICE` 和一个 `exported=false`、`shortService` 组件；Service 为 `START_NOT_STICKY`，只观察 core coordinator，窗口结束后注销 receiver、撤销通知并停止自身。
