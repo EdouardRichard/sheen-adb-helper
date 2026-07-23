@@ -254,6 +254,34 @@ class DevicesPairingReducerTest {
     }
 
     @Test
+    fun `every local terminal state closes its window and is stable across a later page leave`() {
+        val active = reduce(event = DevicesPairingEvent.EnterLocalMode).state
+        val terminalEvents = listOf(
+            DevicesPairingEvent.Succeeded,
+            DevicesPairingEvent.Failed,
+            DevicesPairingEvent.Cancelled,
+            DevicesPairingEvent.Expired,
+            DevicesPairingEvent.Unsupported,
+        )
+
+        terminalEvents.forEach { event ->
+            val terminal = reduce(active, event)
+
+            assertFalse(terminal.state.localWindowActive)
+            assertEquals(terminal.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.STOPPED)
+            assertEquals(terminal.state.localNotificationState, LocalPairingNotificationState.RESULT)
+            assertFalse(terminal.state.requiresLocalTargetSelection)
+
+            val afterLeave = reduce(
+                terminal.state,
+                DevicesPairingEvent.LocalPageLeft(openingWirelessSettings = false),
+            )
+            assertEquals(afterLeave.state, terminal.state)
+            assertTrue(afterLeave.effects.isEmpty())
+        }
+    }
+
+    @Test
     fun `pairing state is not a SavedState compatible secret container`() {
         val interfaces = DevicesPairingState::class.java.interfaces.map { it.name }
         val fieldNames = DevicesPairingState::class.java.declaredFields.map { it.name.lowercase() }
