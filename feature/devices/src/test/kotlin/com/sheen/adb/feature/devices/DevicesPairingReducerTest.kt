@@ -2,6 +2,8 @@ package com.sheen.adb.feature.devices
 
 import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
+import com.sheen.adb.core.LocalPairingDiscoveryStatus
+import com.sheen.adb.core.LocalPairingNotificationState
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertNull
@@ -138,6 +140,117 @@ class DevicesPairingReducerTest {
             PairingMethod.QR,
         )
         assertFalse(confirmed.effects.any { it.javaClass.simpleName == "Connect" })
+    }
+
+    @Test
+    fun `entering local mode defaults to code starts discovery and requests first notification authorization`() {
+        val entered = reduce(event = DevicesPairingEvent.EnterLocalMode)
+
+        assertTrue(entered.state.isLocalMode)
+        assertEquals(entered.state.method, PairingMethod.SIX_DIGIT_CODE)
+        assertEquals(entered.state.phase, PairingAttemptPhase.WAITING_FOR_CODE)
+        assertEquals(entered.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+        assertTrue(entered.state.applicationInputAvailable)
+        assertTrue(entered.state.localWindowActive)
+        assertEquals(
+            entered.effects.map { it::class.java.simpleName }.toSet(),
+            setOf("StartLocalWindow", "RequestNotificationPermission"),
+        )
+    }
+
+    @Test
+    fun `local discovery preserves found not found ambiguous and unsupported states`() {
+        val local = reduce(event = DevicesPairingEvent.EnterLocalMode).state
+
+        val found = reduce(local, DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.FOUND))
+        assertEquals(found.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.FOUND)
+        assertFalse(found.state.requiresLocalTargetSelection)
+
+        val notFound = reduce(found.state, DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.NOT_FOUND))
+        assertEquals(notFound.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.NOT_FOUND)
+
+        val ambiguous = reduce(
+            notFound.state,
+            DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.AMBIGUOUS),
+        )
+        assertTrue(ambiguous.state.requiresLocalTargetSelection)
+        assertTrue(ambiguous.state.applicationInputAvailable)
+
+        val unsupported = reduce(
+            ambiguous.state,
+            DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.UNSUPPORTED),
+        )
+        assertEquals(unsupported.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.UNSUPPORTED)
+        assertTrue(unsupported.state.applicationInputAvailable)
+    }
+
+    @Test
+    fun `locked waiting input ready and unavailable notifications never remove application input`() {
+        val local = reduce(event = DevicesPairingEvent.EnterLocalMode).state
+        val locked = reduce(
+            local,
+            DevicesPairingEvent.LocalNotificationChanged(LocalPairingNotificationState.PRIVATE_LOCKED),
+        )
+        assertEquals(locked.state.localNotificationState, LocalPairingNotificationState.PRIVATE_LOCKED)
+        assertTrue(locked.state.applicationInputAvailable)
+
+        val ready = reduce(
+            locked.state,
+            DevicesPairingEvent.LocalNotificationChanged(LocalPairingNotificationState.INPUT_READY),
+        )
+        assertEquals(ready.state.localNotificationState, LocalPairingNotificationState.INPUT_READY)
+        assertTrue(ready.state.applicationInputAvailable)
+
+        val unavailable = reduce(
+            ready.state,
+            DevicesPairingEvent.LocalNotificationChanged(
+                state = LocalPairingNotificationState.INPUT_UNAVAILABLE,
+                suggestNativeNotificationStyle = true,
+            ),
+        )
+        assertEquals(unavailable.state.localNotificationState, LocalPairingNotificationState.INPUT_UNAVAILABLE)
+        assertTrue(unavailable.state.applicationInputAvailable)
+        assertTrue(unavailable.state.suggestNativeNotificationStyle)
+    }
+
+    @Test
+    fun `notification authorization is requested only on first explicit local entry and retry stays in app`() {
+        val entered = reduce(event = DevicesPairingEvent.EnterLocalMode)
+        val denied = reduce(entered.state, DevicesPairingEvent.NotificationPermissionResult(granted = false))
+        assertTrue(denied.state.notificationPermissionRequested)
+        assertEquals(denied.state.localNotificationState, LocalPairingNotificationState.INPUT_UNAVAILABLE)
+        assertTrue(denied.state.applicationInputAvailable)
+
+        val retry = reduce(denied.state, DevicesPairingEvent.RetryLocalMode)
+        assertEquals(retry.effects.count { it is DevicesPairingEffect.StartLocalWindow }, 1)
+        assertFalse(retry.effects.any { it is DevicesPairingEffect.RequestNotificationPermission })
+        assertEquals(retry.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+    }
+
+    @Test
+    fun `page leave keeps only an active window opened for system wireless settings`() {
+        val active = reduce(event = DevicesPairingEvent.EnterLocalMode).state
+
+        val toSettings = reduce(
+            active,
+            DevicesPairingEvent.LocalPageLeft(openingWirelessSettings = true),
+        )
+        assertTrue(toSettings.effects.single() is DevicesPairingEffect.KeepLocalWindow)
+        assertTrue(toSettings.state.localWindowActive)
+
+        val ordinaryLeave = reduce(
+            active,
+            DevicesPairingEvent.LocalPageLeft(openingWirelessSettings = false),
+        )
+        assertTrue(ordinaryLeave.effects.single() is DevicesPairingEffect.StopLocalWindow)
+        assertFalse(ordinaryLeave.state.localWindowActive)
+        assertEquals(ordinaryLeave.state.phase, PairingAttemptPhase.CANCELLED)
+
+        val inactive = reduce(
+            active.copy(localWindowActive = false),
+            DevicesPairingEvent.LocalPageLeft(openingWirelessSettings = true),
+        )
+        assertTrue(inactive.effects.single() is DevicesPairingEffect.StopLocalWindow)
     }
 
     @Test
