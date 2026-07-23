@@ -8,6 +8,7 @@ import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
+import com.sheen.adb.core.PairingSecret
 import com.sheen.adb.core.QrPairingMaterial
 import com.sheen.adb.core.WirelessDiscoveryMode
 import com.sheen.adb.core.WirelessDiscoveryState
@@ -306,9 +307,9 @@ class DevicesPairingViewModelTest {
                     activeMaterials.remove(attemptId)?.invalidate()
                     AdbOperationResult.Success(Unit)
                 }
-                "pair" -> {
+                "pairWithSecret" -> {
                     codePairCalls++
-                    (args!![1] as CharArray).fill('\u0000')
+                    (args!![1] as PairingSecret).clear()
                     AdbOperationResult.Success(Unit)
                 }
                 "connect" -> {
