@@ -20,6 +20,11 @@ import com.sheen.adb.core.ExclusiveAdbOperationLease
 import com.sheen.adb.core.FileTransferProgress
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLine
+import com.sheen.adb.core.LocalPairingController
+import com.sheen.adb.core.LocalPairingNotificationCapability
+import com.sheen.adb.core.LocalPairingNotificationDecision
+import com.sheen.adb.core.LocalPairingWindow
+import com.sheen.adb.core.LocalPairingWindowId
 import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
@@ -52,6 +57,8 @@ import com.sheen.adb.core.WirelessDiscoveryState
 import com.sheen.adb.core.WirelessServiceObservation
 import com.sheen.adb.core.internal.discovery.WirelessDiscoveryReducer
 import com.sheen.adb.core.internal.pairing.MonotonicClock
+import com.sheen.adb.core.internal.pairing.LocalPairingCoordinator
+import com.sheen.adb.core.internal.pairing.LocalPairingNotificationPolicy
 import com.sheen.adb.core.internal.pairing.QrPairingCoordinator
 import java.io.Closeable
 import java.security.SecureRandom
@@ -63,9 +70,13 @@ import java.io.InputStream
 import java.io.OutputStream
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -73,7 +84,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -94,6 +110,7 @@ internal class DefaultAdbSessionManager(
         clock = MonotonicClock { System.nanoTime() / 1_000_000L },
         secureRandom = SecureRandom(),
     ),
+    private val localPairingClock: MonotonicClock = MonotonicClock { System.nanoTime() / 1_000_000L },
 ) : AdbSessionManager, Closeable {
     private data class ActiveSession(
         val id: String,
@@ -227,6 +244,49 @@ internal class DefaultAdbSessionManager(
     override val connectionState: StateFlow<AdbConnectionState> = mutableState.asStateFlow()
     private val mutableDiagnosticEvents = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
     override val diagnosticEvents: StateFlow<List<AdbDiagnosticEvent>> = mutableDiagnosticEvents.asStateFlow()
+    private val localPairingScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+    private val localPairingDiscoveryLock = Any()
+    private var localPairingDiscoveryJob: Job? = null
+    private val localPairingCoordinator = LocalPairingCoordinator(
+        clock = localPairingClock,
+        notificationPolicy = LocalPairingNotificationPolicy(),
+        pairObservation = ::pairLocalPairingObservation,
+        stopDiscovery = ::stopLocalPairingDiscovery,
+        startGuard = {
+            when {
+                closed.get() -> AdbError.PairingUnsupported
+                active != null -> AdbError.PairingSessionConflict
+                else -> null
+            }
+        },
+    )
+    override val localPairingController: LocalPairingController = object : LocalPairingController {
+        override val state get() = localPairingCoordinator.state
+
+        override fun start(
+            attemptId: PairingAttemptId,
+            windowId: LocalPairingWindowId,
+        ): AdbOperationResult<LocalPairingWindow> = localPairingCoordinator.start(attemptId, windowId).also {
+            if (it is AdbOperationResult.Success) startLocalPairingDiscovery()
+        }
+
+        override fun updateNotification(
+            deviceUnlocked: Boolean,
+            capability: LocalPairingNotificationCapability,
+        ): LocalPairingNotificationDecision =
+            localPairingCoordinator.updateNotification(deviceUnlocked, capability)
+
+        override suspend fun submit(
+            windowId: LocalPairingWindowId,
+            secret: PairingSecret,
+        ): AdbOperationResult<Unit> = localPairingCoordinator.submit(windowId, secret)
+
+        override fun cancel(windowId: LocalPairingWindowId): AdbOperationResult<Unit> =
+            localPairingCoordinator.cancel(windowId)
+
+        override fun onSystemTimeout(windowId: LocalPairingWindowId): AdbOperationResult<Unit> =
+            localPairingCoordinator.onSystemTimeout(windowId)
+    }
 
     override suspend fun acquireExclusiveOperation(
         kind: AdbExclusiveOperationKind,
@@ -950,6 +1010,7 @@ internal class DefaultAdbSessionManager(
     override suspend fun connect(endpoint: AdbEndpoint, timeout: Duration): AdbOperationResult<Unit> =
         mutex.withLock {
             if (closed.get()) return@withLock failure(AdbError.Unknown(AdbOperationStage.CONNECT), endpoint, null)
+            localPairingCoordinator.onSessionChanged()
             cancelActiveQrPairing()
             terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
             runInterruptible(ioDispatcher) { closeActiveIfPresent() }
@@ -1078,6 +1139,81 @@ internal class DefaultAdbSessionManager(
         } finally {
             pairingSecret.clear()
         }
+    }
+
+    private fun startLocalPairingDiscovery() {
+        val previous = synchronized(localPairingDiscoveryLock) { localPairingDiscoveryJob }
+        lateinit var job: Job
+        job = localPairingScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                previous?.cancelAndJoin()
+                coroutineScope {
+                    launch {
+                        delay(LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS)
+                        localPairingCoordinator.onClockAdvanced()
+                    }
+                    launch {
+                        delay(LOCAL_PAIRING_WINDOW_MILLIS)
+                        localPairingCoordinator.onClockAdvanced()
+                    }
+                    launch {
+                        observeWirelessServices(
+                            mode = WirelessDiscoveryMode.LOCAL_PAIRING,
+                            timeout = 120.seconds,
+                        ).collect { result ->
+                            when (result) {
+                                is AdbOperationResult.Success -> {
+                                    localPairingCoordinator.onDiscoveryState(result.value)
+                                }
+                                is AdbOperationResult.Failure -> when (result.error) {
+                                    AdbError.DiscoveryTimeout -> localPairingCoordinator.onClockAdvanced()
+                                    AdbError.DiscoveryPermissionUnavailable,
+                                    AdbError.DiscoveryNetworkUnavailable,
+                                    AdbError.DiscoveryPlatformFailure,
+                                    -> localPairingCoordinator.onDiscoveryUnsupported()
+                                    AdbError.DiscoverySessionChanged -> localPairingCoordinator.onSessionChanged()
+                                    else -> localPairingCoordinator.onDiscoveryFailed()
+                                }
+                                AdbOperationResult.Cancelled -> {
+                                    localPairingCoordinator.state.value.window?.windowId?.let {
+                                        localPairingCoordinator.cancel(it)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (_: CancellationException) {
+                // Coordinator terminal paths own the public result; cancellation only releases discovery resources.
+            } finally {
+                synchronized(localPairingDiscoveryLock) {
+                    if (localPairingDiscoveryJob === job) localPairingDiscoveryJob = null
+                }
+            }
+        }
+        synchronized(localPairingDiscoveryLock) { localPairingDiscoveryJob = job }
+        job.start()
+    }
+
+    private fun stopLocalPairingDiscovery() {
+        synchronized(localPairingDiscoveryLock) { localPairingDiscoveryJob }?.cancel()
+    }
+
+    private suspend fun pairLocalPairingObservation(
+        observation: WirelessServiceObservation,
+        secret: PairingSecret,
+    ): AdbOperationResult<Unit> {
+        stopLocalPairingDiscovery()
+        val endpoint = observation.toPairingEndpoint()
+        if (endpoint == null) {
+            secret.clear()
+            return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        }
+        return pairWithSecret(
+            pairingEndpoint = endpoint,
+            pairingSecret = secret,
+            method = PairingMethod.SIX_DIGIT_CODE,
+        )
     }
 
     override suspend fun createQrPairingAttempt(
@@ -1841,6 +1977,7 @@ internal class DefaultAdbSessionManager(
     }
 
     override suspend fun disconnect(timeout: Duration): AdbOperationResult<Unit> = mutex.withLock {
+        localPairingCoordinator.onSessionChanged()
         terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
         val sessionToClose = active
         appendDiagnostic(AdbOperationStage.DISCONNECT, AdbDiagnosticOutcome.STARTED, "ADB_DISCONNECT_STARTED", sessionToClose?.endpoint)
@@ -1874,6 +2011,7 @@ internal class DefaultAdbSessionManager(
     }
 
     override suspend fun clearHostIdentity(timeout: Duration): AdbOperationResult<Unit> = mutex.withLock {
+        localPairingCoordinator.onSessionChanged()
         terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
         return@withLock try {
             withTimeout(timeout) {
@@ -1903,6 +2041,8 @@ internal class DefaultAdbSessionManager(
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            localPairingCoordinator.close()
+            localPairingScope.cancel()
             qrPairingCoordinator.close()
             activeQrAttemptId = null
             terminateActiveWirelessDiscovery(AdbError.DiscoveryManagerClosed)
@@ -2064,6 +2204,8 @@ internal class DefaultAdbSessionManager(
         val FILE_PREPARE_TIMEOUT = 5.seconds
         const val DEFAULT_REMOTE_FILE_MODE = 0x81A4
         const val MAX_AUTO_RENAME_ATTEMPTS = 1_000
+        const val LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS = 5_000L
+        const val LOCAL_PAIRING_WINDOW_MILLIS = 120_000L
         val QR_TERMINAL_PHASES = setOf(
             PairingAttemptPhase.SUCCEEDED,
             PairingAttemptPhase.CANCELLED,
