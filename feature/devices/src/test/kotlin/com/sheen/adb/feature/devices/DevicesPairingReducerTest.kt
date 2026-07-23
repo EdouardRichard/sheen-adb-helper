@@ -37,6 +37,8 @@ class DevicesPairingReducerTest {
 
         val entered = reduce(started.state, DevicesPairingEvent.CodeChanged("12a34-56"))
         assertEquals(entered.state.codeInput, "123456")
+        assertFalse(entered.state.toString().contains("123456"))
+        assertFalse(DevicesPairingEvent.CodeChanged("123456").toString().contains("123456"))
         val submitted = reduce(entered.state, DevicesPairingEvent.SubmitCode)
 
         assertEquals(submitted.state.codeInput, "")
@@ -74,6 +76,7 @@ class DevicesPairingReducerTest {
 
         val success = reduce(pairing, DevicesPairingEvent.Succeeded)
         assertTerminal(success.state, PairingAttemptPhase.SUCCEEDED, null)
+        assertEquals(reduce(success.state, DevicesPairingEvent.Failed).state, success.state)
 
         val failure = reduce(pairing, DevicesPairingEvent.Failed)
         assertTerminal(failure.state, PairingAttemptPhase.FAILED, DevicesPairingFailure.EXPLICIT_FAILURE)
@@ -103,6 +106,15 @@ class DevicesPairingReducerTest {
         assertEquals(fallback.state.phase, PairingAttemptPhase.WAITING_FOR_CODE)
         assertNull(fallback.state.failure)
         assertEquals((fallback.effects.single() as DevicesPairingEffect.Begin).method, PairingMethod.SIX_DIGIT_CODE)
+
+        val activeFallback = reduce(
+            unsupported.state.copy(hasActiveSession = true),
+            DevicesPairingEvent.UseCodeFallback,
+        )
+        assertEquals(activeFallback.state.method, PairingMethod.SIX_DIGIT_CODE)
+        assertEquals(activeFallback.state.phase, PairingAttemptPhase.IDLE)
+        assertTrue(activeFallback.state.awaitingSessionReplacementConfirmation)
+        assertTrue(activeFallback.effects.isEmpty())
     }
 
     @Test
