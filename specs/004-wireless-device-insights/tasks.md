@@ -178,7 +178,7 @@
   - **验收**: T040 从缺失 API 转为 manager 策略失败；默认实现对配对清除 secret 并结构化拒绝，Feature 无需也不能拼接发现 endpoint，既有 fake manager 继续编译。
 - [X] T041 [US3] 完成 LAN discovery 生命周期、端点重新确认与 attempt 两端已验证 Session 身份回填于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/discovery/WirelessDiscoveryReducer.kt`
   - **验收**: T040、T005、T013 和全部既有 manager 测试通过；离页/后台/取消后 3 秒内停止，过期端点结构化失败，同一 attempt 的 pairing/connect observation 仅在已验证公钥指纹相同后合并，opaque identity 不进入日志/持久化且不自动替换 Session。
-- [ ] T042 [P] [US3] 先写设备发现 reducer 失败测试，覆盖 scanning/content/empty/error/cancelled、可靠合并、未知关系标记、lost/port-changed、手动回退和选择确认于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryReducerTest.kt`
+- [X] T042 [P] [US3] 先写设备发现 reducer 失败测试，覆盖 scanning/content/empty/error/cancelled、可靠合并、未知关系标记、lost/port-changed、手动回退和选择确认于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryReducerTest.kt`
   - **验收**: 目标测试因 discovery model/reducer 缺失而失败；同名/IP 相同不构成 verified merge。
 - [ ] T043 [US3] 实现设备发现 UI 模型与 reducer 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryModels.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryReducer.kt`
   - **验收**: T042 通过；每个条目显示 pairing/connect 角色、脱敏端点、可达性和未知关联提示，不保存真实结果到档案。
