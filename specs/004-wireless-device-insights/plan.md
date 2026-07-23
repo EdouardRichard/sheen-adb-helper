@@ -143,6 +143,7 @@ feature/logcat/
 - 第一阶段继续由 `listApplications` 快速返回包名和管理状态；第二阶段 `observeApplicationMetadata(expectedSessionId)` 逐步补齐展示名与图标，UI 立即显示包名占位并标示 loading/unavailable/too-large/parse-failed 等降级。
 - `:core:adb` 先以 `pm list packages -3 -U --user <id>` 获取包名与 UID，再以受控 `pm path --user <id> <package>` 输出获得基础 APK 路径。路径只在核心层按既有命令转义策略使用，禁止 UI 拼接 Shell。APK 字节通过既有 `ProtocolSyncStream.receive` 读取到有界内存 sink；读取前后校验 32 MiB 上限，支持取消、超时、Session guard，并在完成或失败后关闭 Sync stream、释放字节，不调用面向 SAF 的公开下载流程且不落盘。单包顺序解析、总耗时 10 秒、单图标编码上限 1 MiB、全局图标 LRU 上限 16 MiB。
 - `apk-parser` 隐藏在项目自有接口之后，只接收受限内存字节；解析完成即释放原始 APK 字节。T001 的静态供应链门禁通过后才可隔离接线；恶意 ZIP 测试和 API 30 Android 运行时 smoke test 是 US4 完成门禁，在两者实际通过前 US4 保持 BLOCKED。任一失败即回到 Plan 选择替代实现，不能把包名占位或整项 `UNSUPPORTED` 计为 FR023–FR025/SC008 完成。
+- metadata reader 的取消夹具必须让被取消协程运行在独立测试 dispatcher；不得在 `runBlocking` 所在线程同步等待尚未启动的子协程。该夹具修正作为独立测试任务执行，不并入只允许修改两个生产文件的 reader/loader 实现任务。
 - 搜索使用本地规范化后的 `packageName OR displayName`；元数据到达时重新计算，名称缺失时包名搜索始终可用。同名应用始终显示包名。
 
 ### 4. Logcat 与进程分析
