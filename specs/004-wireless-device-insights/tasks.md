@@ -133,7 +133,7 @@
   - **验收**: 目标测试因项目自有策略缺失而失败；断言锁屏前既不能输入也不能提交，输出只含平台无关决策且不含 code/endpoint/device identity。
 - [X] T030 [US2] 实现平台无关的本机通知决策与窗口值对象于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/pairing/LocalPairingNotificationPolicy.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/PairingModels.kt`
   - **验收**: T029 通过；只有 unlocked + valid token + live endpoint + before deadline 才产生 input-ready 决策，拒绝路径明确指向应用内输入和原生通知样式建议，不引用 Android 通知类型。
-- [ ] T031 [P] [US2] 先写核心本机窗口 coordinator 失败测试，覆盖默认配对码、5 秒状态、2 分钟硬截止、service lost、Session change、通知提交与应用内提交共用路径于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/LocalPairingCoordinatorTest.kt`
+- [X] T031 [P] [US2] 先写核心本机窗口 coordinator 失败测试，覆盖默认配对码、5 秒状态、2 分钟硬截止、service lost、Session change、通知提交与应用内提交共用路径于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/LocalPairingCoordinatorTest.kt`
   - **验收**: 目标测试因 coordinator 缺失而失败；使用 fake monotonic clock/manager，不真实等待，结束后无活动 discovery、token 或 secret。
 - [ ] T032A [US2] 扩展 manager-owned 本机配对 controller 公共契约与默认兼容实现于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbSessionManager.kt`
   - **验收**: T031 从缺少公共 controller API 推进为 coordinator 行为失败；公共类型不暴露 Android、internal、Kadb、Socket、原始端点或 secret，默认实现返回 `UNSUPPORTED`，既有 fake manager 无需修改即可编译。
