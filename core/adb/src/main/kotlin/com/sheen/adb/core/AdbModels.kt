@@ -483,6 +483,23 @@ enum class RemoteApplicationEnabledState {
     UNKNOWN,
 }
 
+data class AndroidUidIdentity(
+    val userId: Int,
+    val appId: Int,
+) {
+    companion object {
+        private const val PER_USER_RANGE = 100_000
+
+        fun fromRawUid(rawUid: Int?): AndroidUidIdentity? {
+            val verified = rawUid?.takeIf { it >= 0 } ?: return null
+            return AndroidUidIdentity(
+                userId = verified / PER_USER_RANGE,
+                appId = verified % PER_USER_RANGE,
+            )
+        }
+    }
+}
+
 enum class ApplicationField {
     VERSION_CODE,
     VERSION_NAME,
@@ -497,7 +514,11 @@ data class RemoteApplication(
     val versionName: String? = null,
     val installerPackage: String? = null,
     val isSystem: Boolean,
-)
+    val androidUid: Int? = null,
+) {
+    val uidIdentity: AndroidUidIdentity?
+        get() = AndroidUidIdentity.fromRawUid(androidUid)
+}
 
 data class ApplicationSnapshot(
     val sessionId: String,

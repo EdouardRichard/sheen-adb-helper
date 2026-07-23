@@ -5,7 +5,7 @@ internal object ApplicationCommands {
     const val CURRENT_USER_FALLBACK = "cmd activity get-current-user"
 
     fun listThirdParty(userId: Int, fallback: Boolean = false): String =
-        "${if (fallback) "cmd package" else "pm"} list packages -3 --user $userId"
+        "${if (fallback) "cmd package" else "pm"} list packages -3 -U --user $userId"
 
     fun listDisabledThirdParty(userId: Int, fallback: Boolean = false): String =
         "${if (fallback) "cmd package" else "pm"} list packages -3 -d --user $userId"
@@ -18,7 +18,10 @@ internal object ApplicationCommands {
 }
 
 internal sealed interface PackageNamesParse {
-    data class Success(val names: LinkedHashSet<String>) : PackageNamesParse
+    data class Success(
+        val names: LinkedHashSet<String>,
+        val uidsByPackage: Map<String, Int?>,
+    ) : PackageNamesParse
     data object Empty : PackageNamesParse
     data object Malformed : PackageNamesParse
     data object CapacityExceeded : PackageNamesParse
@@ -43,21 +46,37 @@ internal object ApplicationParsers {
 
     fun packageNames(text: String): PackageNamesParse {
         val names = linkedSetOf<String>()
+        val uids = linkedMapOf<String, Int?>()
+        val conflictingUids = mutableSetOf<String>()
         var sawContent = false
         for (rawLine in text.lineSequence()) {
             val line = rawLine.trim()
             if (line.isEmpty()) continue
             sawContent = true
             if (!line.startsWith("package:")) return PackageNamesParse.Malformed
-            val packageName = line.removePrefix("package:").trim()
+            val packageAndUid = line.removePrefix("package:").trim()
+            val packageName = packageAndUid.substringBefore(UID_MARKER).trim()
             if (!isValidPackageName(packageName)) return PackageNamesParse.Malformed
+            val uid = packageAndUid.substringAfter(UID_MARKER, missingDelimiterValue = "")
+                .trim()
+                .takeIf(String::isNotEmpty)
+                ?.toIntOrNull()
+                ?.takeIf { it >= 0 }
+            if (packageName in uids) {
+                val previous = uids[packageName]
+                if (previous != null && uid != null && previous != uid) conflictingUids += packageName
+                if (previous == null && packageName !in conflictingUids) uids[packageName] = uid
+            } else {
+                uids[packageName] = uid
+            }
+            if (packageName in conflictingUids) uids[packageName] = null
             names += packageName
             if (names.size > MAX_APPLICATIONS) return PackageNamesParse.CapacityExceeded
         }
         return when {
             !sawContent -> PackageNamesParse.Empty
             names.isEmpty() -> PackageNamesParse.Malformed
-            else -> PackageNamesParse.Success(names)
+            else -> PackageNamesParse.Success(names, uids.toMap())
         }
     }
 
@@ -80,6 +99,8 @@ internal object ApplicationParsers {
             ApplicationCommandRejection.POLICY
         }
     }
+
+    private const val UID_MARKER = " uid:"
 }
 
 internal enum class ApplicationCommandRejection {
