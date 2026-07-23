@@ -3,6 +3,7 @@ package com.sheen.adb.feature.apps
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.ApplicationField
+import com.sheen.adb.core.ApplicationMetadataStatus
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
 import org.testng.Assert.assertEquals
@@ -21,6 +22,65 @@ class AppsPolicyTest {
         assertEquals(state.visibleApplications.map { it.packageName }, listOf("com.Example.enabled"))
         assertEquals(state.copy(query = "", filter = AppsFilter.ENABLED).visibleApplications.size, 1)
         assertEquals(state.copy(query = "", filter = AppsFilter.DISABLED).visibleApplications.single().packageName, "org.sample.disabled")
+    }
+
+    @Test
+    fun `search matches display name or package with stable visible characters and intersects enabled filter`() {
+        val applications = listOf(
+            app("com.Example.reader_2"),
+            app("org.sample.disabled_3", RemoteApplicationEnabledState.DISABLED),
+            app("net.example.numeric4"),
+        )
+        val state = connectedState().copy(
+            applications = applications,
+            metadataByPackage = mapOf(
+                "com.Example.reader_2" to metadata("中文阅读器"),
+                "org.sample.disabled_3" to metadata("Reader Pro"),
+                "net.example.numeric4" to metadata("Reader Pro"),
+            ),
+        )
+
+        assertEquals(state.copy(query = "中文").visibleApplications.map { it.packageName }, listOf("com.Example.reader_2"))
+        assertEquals(
+            state.copy(query = "READER PRO").visibleApplications.map { it.packageName },
+            listOf("org.sample.disabled_3", "net.example.numeric4"),
+        )
+        assertEquals(
+            state.copy(query = "sample.disabled_3").visibleApplications.map { it.packageName },
+            listOf("org.sample.disabled_3"),
+        )
+        assertEquals(
+            state.copy(query = "reader", filter = AppsFilter.DISABLED).visibleApplications.map { it.packageName },
+            listOf("org.sample.disabled_3"),
+        )
+        assertEquals(state.copy(query = "numeric4").visibleApplications.single().packageName, "net.example.numeric4")
+    }
+
+    @Test
+    fun `same display names remain distinct by package and unavailable metadata keeps package placeholder`() {
+        val first = app("com.example.first")
+        val second = app("com.example.second")
+        val fallback = app("com.example.fallback")
+        val state = connectedState().copy(
+            applications = listOf(first, second, fallback),
+            metadataByPackage = mapOf(
+                first.packageName to metadata("同名应用"),
+                second.packageName to metadata("同名应用"),
+                fallback.packageName to AppsApplicationMetadata(
+                    displayName = null,
+                    icon = null,
+                    status = ApplicationMetadataStatus.UNAVAILABLE,
+                ),
+            ),
+            query = "同名",
+        )
+
+        assertEquals(state.visibleApplications.map { it.packageName }, listOf(first.packageName, second.packageName))
+        assertEquals(
+            state.copy(query = "fallback").visibleApplications.single().packageName,
+            fallback.packageName,
+        )
+        assertEquals(state.metadataByPackage[fallback.packageName]?.status, ApplicationMetadataStatus.UNAVAILABLE)
     }
 
     @Test
@@ -55,6 +115,7 @@ class AppsPolicyTest {
     fun `session switch clears snapshot confirmation filters errors and notices`() {
         val dirty = connectedState().copy(
             applications = listOf(app("com.example.client")),
+            metadataByPackage = mapOf("com.example.client" to metadata("客户端")),
             userId = 0,
             query = "client",
             filter = AppsFilter.DISABLED,
@@ -66,6 +127,7 @@ class AppsPolicyTest {
         )
         val switched = AppsPolicy.changedSession(dirty, true, "two", "新设备", false)
         assertTrue(switched.applications.isEmpty())
+        assertTrue(switched.metadataByPackage.isEmpty())
         assertEquals(switched.query, "")
         assertEquals(switched.filter, AppsFilter.ALL)
         assertNull(switched.pendingConfirmation)
@@ -88,4 +150,10 @@ class AppsPolicyTest {
 
     private fun app(name: String, state: RemoteApplicationEnabledState = RemoteApplicationEnabledState.ENABLED) =
         RemoteApplication(name, userId = 0, enabledState = state, isSystem = false)
+
+    private fun metadata(name: String) = AppsApplicationMetadata(
+        displayName = name,
+        icon = null,
+        status = ApplicationMetadataStatus.AVAILABLE,
+    )
 }
