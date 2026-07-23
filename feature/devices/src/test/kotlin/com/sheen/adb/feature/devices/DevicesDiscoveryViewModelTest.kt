@@ -5,6 +5,14 @@ import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
+import com.sheen.adb.core.AdbError
+import com.sheen.adb.core.LocalPairingController
+import com.sheen.adb.core.LocalPairingControllerState
+import com.sheen.adb.core.LocalPairingNotificationCapability
+import com.sheen.adb.core.LocalPairingNotificationDecision
+import com.sheen.adb.core.LocalPairingNotificationState
+import com.sheen.adb.core.LocalPairingWindow
+import com.sheen.adb.core.LocalPairingWindowId
 import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingSecret
 import com.sheen.adb.core.WirelessAddress
@@ -230,6 +238,7 @@ class DevicesDiscoveryViewModelTest {
     ) {
         private val connection = MutableStateFlow(initialConnectionState)
         private val diagnostics = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
+        private val localController = UnsupportedLocalController()
         private val discoveries = ArrayDeque<MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>>>()
         val discoveryRequests = mutableListOf<Pair<WirelessDiscoveryMode, Duration>>()
         val pairTargets = mutableListOf<WirelessDiscoveryTarget>()
@@ -245,8 +254,9 @@ class DevicesDiscoveryViewModelTest {
             when (method.name.substringBefore('-')) {
                 "getConnectionState" -> connection
                 "getDiagnosticEvents" -> diagnostics
+                "getLocalPairingController" -> localController
                 "observeWirelessServices" -> {
-                    discoveryRequests += (args!![0] as WirelessDiscoveryMode) to (args[1] as Duration)
+                    discoveryRequests += (args!![0] as WirelessDiscoveryMode) to 10.seconds
                     discoveries.removeFirst()
                 }
                 "pairDiscoveredService" -> {
@@ -279,5 +289,40 @@ class DevicesDiscoveryViewModelTest {
 
         fun enqueueDiscovery(): MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>> =
             MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>>(extraBufferCapacity = 4).also(discoveries::add)
+    }
+
+    private class UnsupportedLocalController : LocalPairingController {
+        override val state = MutableStateFlow(LocalPairingControllerState())
+
+        override fun start(
+            attemptId: PairingAttemptId,
+            windowId: LocalPairingWindowId,
+        ): AdbOperationResult<LocalPairingWindow> = AdbOperationResult.Failure(AdbError.PairingUnsupported)
+
+        override fun updateNotification(
+            deviceUnlocked: Boolean,
+            capability: LocalPairingNotificationCapability,
+        ): LocalPairingNotificationDecision = LocalPairingNotificationDecision(
+            state = LocalPairingNotificationState.INPUT_UNAVAILABLE,
+            inputActionAvailable = false,
+            submitAllowed = false,
+            actionWindowId = null,
+            applicationInputAvailable = true,
+            suggestNativeNotificationStyle = false,
+        )
+
+        override suspend fun submit(
+            windowId: LocalPairingWindowId,
+            secret: PairingSecret,
+        ): AdbOperationResult<Unit> {
+            secret.clear()
+            return AdbOperationResult.Failure(AdbError.PairingUnsupported)
+        }
+
+        override fun cancel(windowId: LocalPairingWindowId): AdbOperationResult<Unit> =
+            AdbOperationResult.Failure(AdbError.PairingUnsupported)
+
+        override fun onSystemTimeout(windowId: LocalPairingWindowId): AdbOperationResult<Unit> =
+            AdbOperationResult.Failure(AdbError.PairingUnsupported)
     }
 }
