@@ -37,6 +37,107 @@ interface QrPairingMaterial {
     val payload: String?
 }
 
+class LocalPairingWindowId private constructor(
+    private val token: String,
+) {
+    override fun equals(other: Any?): Boolean = other is LocalPairingWindowId && token == other.token
+
+    override fun hashCode(): Int = token.hashCode()
+
+    override fun toString(): String = "LocalPairingWindowId(redacted)"
+
+    companion object {
+        fun of(token: String): LocalPairingWindowId {
+            require(token.isNotBlank()) { "Local pairing window ID must not be blank." }
+            return LocalPairingWindowId(token)
+        }
+    }
+}
+
+enum class LocalPairingNotificationState {
+    HIDDEN,
+    PRIVATE_LOCKED,
+    INPUT_READY,
+    INPUT_UNAVAILABLE,
+    RESULT,
+}
+
+enum class LocalPairingNotificationCapability {
+    AVAILABLE,
+    PERMISSION_DENIED,
+    NOTIFICATIONS_DISABLED,
+    INLINE_INPUT_UNAVAILABLE,
+}
+
+enum class LocalPairingStopReason {
+    SUCCEEDED,
+    CANCELLED,
+    SERVICE_LOST,
+    SESSION_CHANGED,
+    DEADLINE_REACHED,
+    SYSTEM_TIMEOUT,
+    FAILED,
+}
+
+enum class LocalPairingSubmissionRejection {
+    TOKEN_MISMATCH,
+    EXPIRED,
+    DEVICE_LOCKED,
+    SERVICE_UNAVAILABLE,
+    INVALID_CODE,
+    WINDOW_STOPPED,
+}
+
+data class LocalPairingWindow(
+    val windowId: LocalPairingWindowId,
+    val attemptId: PairingAttemptId,
+    val method: PairingMethod = PairingMethod.SIX_DIGIT_CODE,
+    val startedAtMillis: Long,
+    val deadlineMillis: Long,
+    val notificationState: LocalPairingNotificationState = LocalPairingNotificationState.HIDDEN,
+    val hasLivePairingService: Boolean = false,
+    val stopReason: LocalPairingStopReason? = null,
+) {
+    init {
+        require(method == PairingMethod.SIX_DIGIT_CODE) { "Local pairing must use the six digit code method." }
+        require(startedAtMillis >= 0L && deadlineMillis >= 0L) {
+            "Local pairing monotonic times must not be negative."
+        }
+        require(deadlineMillis >= startedAtMillis) { "Local pairing deadline must not precede its start." }
+        require(deadlineMillis - startedAtMillis <= MAX_LOCAL_PAIRING_WINDOW_MILLIS) {
+            "Local pairing window must not exceed two minutes."
+        }
+    }
+
+    override fun toString(): String =
+        "LocalPairingWindow(windowId=$windowId, attemptId=$attemptId, method=$method, " +
+            "startedAtMillis=$startedAtMillis, deadlineMillis=$deadlineMillis, " +
+            "notificationState=$notificationState, hasLivePairingService=$hasLivePairingService, " +
+            "stopReason=$stopReason)"
+}
+
+data class LocalPairingNotificationDecision(
+    val state: LocalPairingNotificationState,
+    val inputActionAvailable: Boolean,
+    val submitAllowed: Boolean,
+    val actionWindowId: LocalPairingWindowId?,
+    val applicationInputAvailable: Boolean,
+    val suggestNativeNotificationStyle: Boolean,
+    val stopReason: LocalPairingStopReason? = null,
+)
+
+sealed interface LocalPairingSubmissionDecision {
+    class Accepted(
+        val secret: PairingSecret,
+    ) : LocalPairingSubmissionDecision {
+        override fun toString(): String = "LocalPairingSubmissionDecision.Accepted(redacted)"
+    }
+
+    data class Rejected(
+        val reason: LocalPairingSubmissionRejection,
+    ) : LocalPairingSubmissionDecision
+}
+
 enum class PairingMethod {
     NONE,
     QR,
@@ -89,3 +190,5 @@ data class PairingCommandResult(
     val state: PairingAttemptState,
     val rejection: PairingCommandRejection? = null,
 )
+
+private const val MAX_LOCAL_PAIRING_WINDOW_MILLIS = 120_000L
