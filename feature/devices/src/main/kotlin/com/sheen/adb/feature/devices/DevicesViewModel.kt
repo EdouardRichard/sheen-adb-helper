@@ -6,19 +6,33 @@ import com.sheen.adb.core.AdbConnectionState
 import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbEndpointParser
+import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.EndpointParseResult
+import com.sheen.adb.core.PairingAttemptId
+import com.sheen.adb.core.PairingAttemptPhase
+import com.sheen.adb.core.PairingMethod
+import com.sheen.adb.core.QrPairingMaterial
+import com.sheen.adb.core.WirelessDiscoveryMode
+import com.sheen.adb.core.WirelessServiceStatus
+import com.sheen.adb.core.WirelessServiceType
 import com.sheen.adb.data.DeviceProfile
 import com.sheen.adb.data.DeviceProfileRepository
 import java.time.Clock
+import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.time.Duration.Companion.seconds
 
 data class DevicesUiState(
     val endpointInput: String = "",
@@ -41,14 +55,47 @@ class DevicesViewModel(
     private val repository: DeviceProfileRepository,
     private val clock: Clock = Clock.systemUTC(),
 ) : ViewModel() {
+    private var pairingReducer = DevicesPairingReducer()
+    private var qrEncoder = QrMatrixEncoder()
+    private var pairingAttemptIdFactory: () -> PairingAttemptId = {
+        PairingAttemptId.of(UUID.randomUUID().toString())
+    }
+
+    internal constructor(
+        manager: AdbSessionManager,
+        repository: DeviceProfileRepository,
+        clock: Clock,
+        pairingReducer: DevicesPairingReducer,
+        qrEncoder: QrMatrixEncoder,
+        pairingAttemptIdFactory: () -> PairingAttemptId,
+    ) : this(manager, repository, clock) {
+        this.pairingReducer = pairingReducer
+        this.qrEncoder = qrEncoder
+        this.pairingAttemptIdFactory = pairingAttemptIdFactory
+    }
+
     private val mutableState = MutableStateFlow(DevicesUiState())
     val state: StateFlow<DevicesUiState> = mutableState.asStateFlow()
+    private val mutablePairingState = MutableStateFlow(DevicesPairingState())
+    internal val pairingState: StateFlow<DevicesPairingState> = mutablePairingState.asStateFlow()
     private var operation: Job? = null
     private var operationGeneration = 0L
+    private var activeQrAttemptId: PairingAttemptId? = null
 
     init {
         viewModelScope.launch {
-            manager.connectionState.collect { connection -> mutableState.update { it.copy(connectionState = connection) } }
+            manager.connectionState.collect { connection ->
+                mutableState.update { it.copy(connectionState = connection) }
+                val pairingWasActive = activeQrAttemptId != null
+                reducePairing(
+                    DevicesPairingEvent.SessionAvailabilityChanged(
+                        hasActiveSession = connection is AdbConnectionState.Connected,
+                    ),
+                )
+                if (pairingWasActive && connection is AdbConnectionState.Connected) {
+                    cancelPairingOperation(markCancelled = true)
+                }
+            }
         }
         viewModelScope.launch {
             manager.diagnosticEvents.collect { events -> mutableState.update { it.copy(diagnosticEvents = events) } }
@@ -92,10 +139,7 @@ class DevicesViewModel(
     }
 
     fun cancelCurrentOperation() {
-        operationGeneration++
-        operation?.cancel()
-        operation = null
-        clearPairingCode()
+        cancelPairingOperation(markCancelled = hasNonTerminalPairing())
     }
 
     fun openPairing() {
@@ -106,51 +150,82 @@ class DevicesViewModel(
         mutableState.update {
             it.copy(showPairing = true, pairingEndpointInput = prefix, pairingCode = "", inputError = null, notice = null)
         }
+        selectPairingMethod(PairingMethod.SIX_DIGIT_CODE)
+        startSelectedPairing()
     }
 
-    fun closePairing() = mutableState.update {
-        it.copy(showPairing = false, pairingCode = "", inputError = null)
+    fun closePairing() {
+        onPairingPageLeft()
+        mutableState.update {
+            it.copy(showPairing = false, pairingCode = "", inputError = null)
+        }
     }
 
     fun updatePairingEndpoint(value: String) = mutableState.update {
         it.copy(pairingEndpointInput = value, inputError = null)
     }
 
-    fun updatePairingCode(value: String) = mutableState.update {
-        it.copy(pairingCode = value.filter(Char::isDigit).take(6), inputError = null)
+    fun updatePairingCode(value: String) {
+        val sanitized = value.filter { it in '0'..'9' }.take(SIX_DIGIT_CODE_LENGTH)
+        mutableState.update { it.copy(pairingCode = sanitized, inputError = null) }
+        reducePairing(DevicesPairingEvent.CodeChanged(sanitized))
     }
 
     fun pair() {
         val current = mutableState.value
         val endpoint = parse(current.pairingEndpointInput) ?: return
-        if (current.pairingCode.length != 6) {
+        if (current.pairingCode.length != SIX_DIGIT_CODE_LENGTH) {
             mutableState.update { it.copy(inputError = "配对码必须是 6 位数字") }
             return
         }
-        val code = current.pairingCode.toCharArray()
+        val reduction = reducePairing(DevicesPairingEvent.SubmitCode, handleEffects = false)
         clearPairingCode()
-        startOperation { _ ->
-            try {
-                when (manager.pair(endpoint, code)) {
-                    is AdbOperationResult.Success -> mutableState.update {
-                        it.copy(
-                            showPairing = false,
-                            pairingCode = "",
-                            notice = "配对成功。请填写无线调试主页面的调试端口后连接。",
-                        )
-                    }
-                    else -> clearPairingCode()
-                }
-            } finally {
-                code.fill('\u0000')
-                clearPairingCode()
-            }
+        val submit = reduction.effects.singleOrNull() as? DevicesPairingEffect.SubmitCode
+        if (submit == null) {
+            mutableState.update { it.copy(inputError = "配对码必须是 6 位数字") }
+            return
         }
+        startCodePairing(endpoint, submit)
     }
 
-    fun disconnect() = startOperation { _ ->
-        manager.disconnect()
-        mutableState.update { it.copy(pairingCode = "", showPairing = false, notice = "已断开连接") }
+    internal fun selectPairingMethod(method: PairingMethod) {
+        if (method != mutablePairingState.value.method && hasNonTerminalPairing()) {
+            cancelPairingOperation(markCancelled = false)
+        }
+        reducePairing(DevicesPairingEvent.SelectMethod(method))
+        mutableState.update { it.copy(pairingCode = "", inputError = null, notice = null) }
+    }
+
+    internal fun startSelectedPairing() {
+        reducePairing(DevicesPairingEvent.StartRequested)
+    }
+
+    internal fun retryPairing() {
+        val method = mutablePairingState.value.method
+        if (method == PairingMethod.NONE) return
+        cancelPairingOperation(markCancelled = false)
+        reducePairing(DevicesPairingEvent.SelectMethod(method), handleEffects = false)
+        reducePairing(DevicesPairingEvent.StartRequested)
+    }
+
+    internal fun onPairingPageLeft() {
+        cancelPairingOperation(markCancelled = hasNonTerminalPairing())
+    }
+
+    internal fun confirmPairingSessionReplacement() {
+        reducePairing(DevicesPairingEvent.ConfirmSessionReplacement)
+    }
+
+    internal fun dismissPairingSessionReplacement() {
+        reducePairing(DevicesPairingEvent.DismissSessionReplacement)
+    }
+
+    fun disconnect() {
+        cancelPairingOperation(markCancelled = hasNonTerminalPairing())
+        startOperation { _ ->
+            manager.disconnect()
+            mutableState.update { it.copy(pairingCode = "", showPairing = false, notice = "已断开连接") }
+        }
     }
 
     fun toggleDiagnostics() = mutableState.update { it.copy(showDiagnostics = !it.showDiagnostics) }
@@ -186,11 +261,230 @@ class DevicesViewModel(
         }
     }
 
-    private fun startOperation(block: suspend (Long) -> Unit) {
+    private fun startCodePairing(
+        endpoint: AdbEndpoint,
+        effect: DevicesPairingEffect.SubmitCode,
+    ) = startOperation { generation ->
+        try {
+            val result = manager.pairWithSecret(
+                pairingEndpoint = endpoint,
+                pairingSecret = effect.secret,
+                method = PairingMethod.SIX_DIGIT_CODE,
+            )
+            if (generation != operationGeneration) return@startOperation
+            when (result) {
+                is AdbOperationResult.Success -> {
+                    reducePairing(DevicesPairingEvent.Succeeded, handleEffects = false)
+                    mutableState.update {
+                        it.copy(
+                            showPairing = false,
+                            pairingCode = "",
+                            notice = "配对成功。请填写无线调试主页面的调试端口后连接。",
+                        )
+                    }
+                }
+                is AdbOperationResult.Failure -> reducePairing(
+                    terminalPairingEvent(result.error),
+                    handleEffects = false,
+                )
+                AdbOperationResult.Cancelled -> reducePairing(
+                    DevicesPairingEvent.Cancelled,
+                    handleEffects = false,
+                )
+            }
+        } finally {
+            effect.secret.clear()
+            clearPairingCode()
+        }
+    }
+
+    private fun reducePairing(
+        event: DevicesPairingEvent,
+        handleEffects: Boolean = true,
+    ): DevicesPairingReduction {
+        val reduction = pairingReducer.reduce(mutablePairingState.value, event)
+        mutablePairingState.value = reduction.state
+        if (handleEffects) reduction.effects.forEach(::handlePairingEffect)
+        return reduction
+    }
+
+    private fun handlePairingEffect(effect: DevicesPairingEffect) {
+        when (effect) {
+            is DevicesPairingEffect.Begin -> when (effect.method) {
+                PairingMethod.QR -> startOperation(::runQrPairing)
+                PairingMethod.SIX_DIGIT_CODE, PairingMethod.NONE -> Unit
+            }
+            is DevicesPairingEffect.DisconnectSessionAndBegin -> startOperation { generation ->
+                when (val result = manager.disconnect()) {
+                    is AdbOperationResult.Success -> {
+                        if (generation != operationGeneration) return@startOperation
+                        reducePairing(
+                            DevicesPairingEvent.SessionAvailabilityChanged(hasActiveSession = false),
+                            handleEffects = false,
+                        )
+                        if (effect.method == PairingMethod.QR) runQrPairing(generation)
+                    }
+                    is AdbOperationResult.Failure -> reducePairing(
+                        terminalPairingEvent(result.error),
+                        handleEffects = false,
+                    )
+                    AdbOperationResult.Cancelled -> reducePairing(
+                        DevicesPairingEvent.Cancelled,
+                        handleEffects = false,
+                    )
+                }
+            }
+            DevicesPairingEffect.CancelCurrent -> cancelPairingOperation(markCancelled = false)
+            is DevicesPairingEffect.SubmitCode -> effect.secret.clear()
+        }
+    }
+
+    private suspend fun runQrPairing(generation: Long) {
+        var attemptId: PairingAttemptId? = null
+        var material: QrPairingMaterial? = null
+        try {
+            if (generation != operationGeneration) return
+            attemptId = pairingAttemptIdFactory()
+            when (val created = manager.createQrPairingAttempt(attemptId)) {
+                is AdbOperationResult.Success -> material = created.value
+                is AdbOperationResult.Failure -> {
+                    if (generation == operationGeneration) {
+                        reducePairing(terminalPairingEvent(created.error), handleEffects = false)
+                    }
+                    return
+                }
+                AdbOperationResult.Cancelled -> {
+                    if (generation == operationGeneration) {
+                        reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
+                    }
+                    return
+                }
+            }
+            if (generation != operationGeneration) return
+            if (material.attemptId != attemptId) {
+                reducePairing(DevicesPairingEvent.Failed, handleEffects = false)
+                return
+            }
+            activeQrAttemptId = attemptId
+            val payload = material.payload
+            if (payload == null) {
+                reducePairing(DevicesPairingEvent.Expired, handleEffects = false)
+                return
+            }
+            val matrix = qrEncoder.encode(payload)
+            if (generation != operationGeneration || material.payload == null) return
+            reducePairing(DevicesPairingEvent.QrPrepared(matrix), handleEffects = false)
+
+            val submittedObservations = mutableSetOf<com.sheen.adb.core.WirelessObservationId>()
+            manager.observeWirelessServices(
+                mode = WirelessDiscoveryMode.LOCAL_PAIRING,
+                timeout = QR_PAIRING_TIMEOUT,
+            ).first { discoveryResult ->
+                if (generation != operationGeneration) throw CancellationException()
+                when (discoveryResult) {
+                    is AdbOperationResult.Success -> {
+                        var terminal = false
+                        discoveryResult.value.services
+                            .filter {
+                                it.serviceType == WirelessServiceType.PAIRING &&
+                                    it.status == WirelessServiceStatus.RESOLVED &&
+                                    submittedObservations.add(it.observationId)
+                            }
+                            .forEach { observation ->
+                                if (!terminal) {
+                                    terminal = handleQrObservationResult(
+                                        generation = generation,
+                                        material = material,
+                                        result = manager.pairQrObservation(attemptId, observation),
+                                    )
+                                }
+                            }
+                        terminal
+                    }
+                    is AdbOperationResult.Failure -> {
+                        reducePairing(terminalPairingEvent(discoveryResult.error), handleEffects = false)
+                        true
+                    }
+                    AdbOperationResult.Cancelled -> {
+                        reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
+                        true
+                    }
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            if (generation == operationGeneration) {
+                reducePairing(DevicesPairingEvent.Failed, handleEffects = false)
+            }
+        } finally {
+            if (attemptId != null && material?.payload != null) {
+                withContext(NonCancellable) { manager.cancelQrPairing(attemptId) }
+            }
+            if (activeQrAttemptId == attemptId) {
+                activeQrAttemptId = null
+            }
+        }
+    }
+
+    private fun handleQrObservationResult(
+        generation: Long,
+        material: QrPairingMaterial,
+        result: AdbOperationResult<Unit>,
+    ): Boolean {
+        if (generation != operationGeneration) return true
+        return when (result) {
+            is AdbOperationResult.Success -> {
+                reducePairing(DevicesPairingEvent.PairingStarted, handleEffects = false)
+                reducePairing(DevicesPairingEvent.Succeeded, handleEffects = false)
+                true
+            }
+            is AdbOperationResult.Failure -> {
+                if (material.payload != null) {
+                    false
+                } else {
+                    reducePairing(terminalPairingEvent(result.error), handleEffects = false)
+                    true
+                }
+            }
+            AdbOperationResult.Cancelled -> {
+                reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
+                true
+            }
+        }
+    }
+
+    private fun terminalPairingEvent(error: AdbError): DevicesPairingEvent = when (error) {
+        AdbError.DiscoveryTimeout, is AdbError.Timeout -> DevicesPairingEvent.Expired
+        AdbError.PairingUnsupported,
+        AdbError.DiscoveryPermissionUnavailable,
+        AdbError.DiscoveryPlatformFailure,
+        -> DevicesPairingEvent.Unsupported
+        else -> DevicesPairingEvent.Failed
+    }
+
+    private fun cancelPairingOperation(markCancelled: Boolean) {
+        if (markCancelled) reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
+        operationGeneration++
         operation?.cancel()
+        clearPairingCode()
+    }
+
+    private fun hasNonTerminalPairing(): Boolean {
+        val pairing = mutablePairingState.value
+        return pairing.method != PairingMethod.NONE &&
+            (pairing.phase !in TERMINAL_PAIRING_PHASES) &&
+            (pairing.phase != PairingAttemptPhase.IDLE || pairing.awaitingSessionReplacementConfirmation)
+    }
+
+    private fun startOperation(block: suspend (Long) -> Unit) {
+        val previous = operation
+        previous?.cancel()
         val generation = ++operationGeneration
         operation = viewModelScope.launch {
             try {
+                previous?.cancelAndJoin()
+                if (generation != operationGeneration) return@launch
                 block(generation)
             } finally {
                 if (generation == operationGeneration) operation = null
@@ -210,11 +504,20 @@ class DevicesViewModel(
     private fun clearPairingCode() = mutableState.update { it.copy(pairingCode = "") }
 
     override fun onCleared() {
-        operationGeneration++
-        operation?.cancel()
-        clearPairingCode()
+        cancelPairingOperation(markCancelled = hasNonTerminalPairing())
         super.onCleared()
     }
 
-    companion object { const val HOST_IDENTITY_REFERENCE = "android-keystore-host-v1" }
+    companion object {
+        const val HOST_IDENTITY_REFERENCE = "android-keystore-host-v1"
+        private const val SIX_DIGIT_CODE_LENGTH = 6
+        private val QR_PAIRING_TIMEOUT = 120.seconds
+        private val TERMINAL_PAIRING_PHASES = setOf(
+            PairingAttemptPhase.SUCCEEDED,
+            PairingAttemptPhase.CANCELLED,
+            PairingAttemptPhase.EXPIRED,
+            PairingAttemptPhase.FAILED,
+            PairingAttemptPhase.UNSUPPORTED,
+        )
+    }
 }
