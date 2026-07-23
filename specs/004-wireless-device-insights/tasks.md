@@ -275,7 +275,7 @@
 
 **Purpose**: 在所有目标故事完成后同步当前事实、权限、依赖与验证证据；不在此阶段补写未测试的新功能。
 
-- [ ] T070 [P] 更新无线配对、发现和单 Session 当前架构事实于 `docs/architecture/adb-session.md` 和 `docs/architecture/device-and-data.md`
+- [X] T070 [P] 更新无线配对、发现和单 Session 当前架构事实于 `docs/architecture/adb-session.md` 和 `docs/architecture/device-and-data.md`
   - **验收**: 文档只描述已由代码/测试证明的行为，链接到项目自有接口与 ADR 0007；未完成真机项明确标为待验，不把 Plan 当实现事实。
 - [ ] T071 [P] 更新应用元数据与基础诊断当前架构事实于 `docs/architecture/application-management.md` 和 `docs/architecture/diagnostics.md`
   - **验收**: 文档准确记录容量、Session、降级、筛选与关联边界，不声明高级诊断或持久化图标/日志。
