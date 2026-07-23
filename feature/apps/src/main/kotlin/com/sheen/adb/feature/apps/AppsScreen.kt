@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -24,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.contentDescription
@@ -76,7 +78,7 @@ fun AppsScreen(state: AppsUiState, actions: AppsViewModel) {
                         modifier = Modifier.semantics { contentDescription = "刷新当前用户第三方应用列表" },
                     ) { Text("刷新") }
                 }
-                Text("仅显示被控端当前 Android 用户的第三方包；包名是主显示名称，数据不会保存。")
+                Text("仅显示被控端当前 Android 用户的第三方应用；名称和图标只在当前连接中使用，不会保存。")
                 if (!state.isConnected) Text("请先连接设备")
                 if (state.isConnected && state.userId != null) {
                     Text("设备：${state.deviceDisplayName} · 当前用户：${state.userId}")
@@ -85,7 +87,7 @@ fun AppsScreen(state: AppsUiState, actions: AppsViewModel) {
                     value = state.query,
                     onValueChange = actions::updateQuery,
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("按包名搜索") },
+                    label = { Text("按应用名或包名搜索") },
                     singleLine = true,
                     enabled = !state.isBusy,
                 )
@@ -141,9 +143,26 @@ fun AppsScreen(state: AppsUiState, actions: AppsViewModel) {
 
 @Composable
 private fun ApplicationCard(application: RemoteApplication, state: AppsUiState, actions: AppsViewModel) {
+    val presentation = AppsPresentation.present(application, state.metadataByPackage[application.packageName])
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(application.packageName, style = MaterialTheme.typography.titleMedium)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ApplicationIconRenderer(
+                    icon = presentation.icon,
+                    contentDescription = "${presentation.primaryLabel} 的应用图标",
+                    modifier = Modifier.size(48.dp),
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(presentation.primaryLabel, style = MaterialTheme.typography.titleMedium)
+                    presentation.packageLabel?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                    presentation.metadataMessage?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
             Text("状态：${application.enabledState.displayName()}")
             application.versionName?.let { Text("版本名：$it") }
             application.versionCode?.let { Text("版本号：$it") }
