@@ -5,8 +5,18 @@ import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.DisconnectionReason
+import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.PairingSecret
+import com.sheen.adb.core.QrPairingMaterial
+import com.sheen.adb.core.WirelessAddress
+import com.sheen.adb.core.WirelessObservationId
+import com.sheen.adb.core.WirelessServiceObservation
+import com.sheen.adb.core.WirelessServiceStatus
+import com.sheen.adb.core.WirelessServiceType
+import com.sheen.adb.core.internal.pairing.MonotonicClock
+import com.sheen.adb.core.internal.pairing.QrPairingCoordinator
+import java.security.SecureRandom
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
@@ -111,6 +121,119 @@ class QrPairingSessionManagerTest {
         assertEquals(manager.connectionState.value, connected)
     }
 
+    @Test
+    fun `manager owns QR material and only exact resolved observation reaches pairing without connecting`() = runBlocking {
+        val factory = RecordingFactory()
+        val manager = qrManager(factory)
+        val attemptId = PairingAttemptId.of("manager-attempt-success")
+        val created = manager.createQrPairingAttempt(attemptId)
+        assertTrue(created is AdbOperationResult.Success<*>)
+        val material = (created as AdbOperationResult.Success<QrPairingMaterial>).value
+        val serviceName = serviceNameFrom(material)
+
+        val wrong = manager.pairQrObservation(
+            attemptId,
+            resolvedPairingObservation("different-synthetic-service"),
+        )
+        assertTrue(wrong is AdbOperationResult.Failure)
+        assertTrue(material.payload != null, "An unrelated observation must not consume the active material")
+        assertTrue(factory.calls.isEmpty())
+
+        val paired = manager.pairQrObservation(attemptId, resolvedPairingObservation(serviceName))
+
+        assertTrue(paired is AdbOperationResult.Success<*>)
+        assertTrue(factory.calls.single().shape == CredentialShape.QR_PASSWORD)
+        assertEquals(factory.calls.single().length, STANDARD_QR_PASSWORD_LENGTH)
+        assertEquals(factory.openCalls, 0, "QR authorization must not open an ADB Session")
+        assertEquals(manager.connectionState.value, AdbConnectionState.Disconnected())
+        assertEquals(material.payload, null, "The same public material reference must be invalidated at terminal state")
+    }
+
+    @Test
+    fun `cancelled and stale QR attempts cannot consume a replacement attempt`() = runBlocking {
+        val factory = RecordingFactory()
+        val manager = qrManager(factory)
+        val firstId = PairingAttemptId.of("manager-attempt-old")
+        val first = (
+            manager.createQrPairingAttempt(firstId) as AdbOperationResult.Success<QrPairingMaterial>
+        ).value
+        val firstService = serviceNameFrom(first)
+
+        assertTrue(manager.cancelQrPairing(firstId) is AdbOperationResult.Success<*>)
+        assertEquals(first.payload, null)
+        val replacementId = PairingAttemptId.of("manager-attempt-replacement")
+        val replacement = (
+            manager.createQrPairingAttempt(replacementId) as AdbOperationResult.Success<QrPairingMaterial>
+        ).value
+
+        val stale = manager.pairQrObservation(firstId, resolvedPairingObservation(firstService))
+
+        assertTrue(stale is AdbOperationResult.Failure)
+        assertTrue(factory.calls.isEmpty())
+        assertTrue(replacement.payload != null, "A stale attempt must not invalidate its replacement")
+        manager.close()
+        assertEquals(replacement.payload, null, "Manager close must invalidate retained QR material")
+    }
+
+    @Test
+    fun `QR deadline maps to timeout and invalidates material before protocol pairing`() = runBlocking {
+        val clock = MutableClock(1_000L)
+        val factory = RecordingFactory()
+        val manager = qrManager(factory, clock)
+        val attemptId = PairingAttemptId.of("manager-attempt-expired")
+        val material = (
+            manager.createQrPairingAttempt(attemptId) as AdbOperationResult.Success<QrPairingMaterial>
+        ).value
+        val serviceName = serviceNameFrom(material)
+        clock.nowMillis = material.deadlineMillis
+
+        val result = manager.pairQrObservation(attemptId, resolvedPairingObservation(serviceName))
+
+        assertTrue(result is AdbOperationResult.Failure)
+        assertTrue((result as AdbOperationResult.Failure).error is AdbError.Timeout)
+        assertEquals(material.payload, null)
+        assertTrue(factory.calls.isEmpty())
+    }
+
+    @Test
+    fun `active Session rejects QR attempt creation without replacing the Session`() = runBlocking {
+        val client = RecordingClient()
+        val factory = RecordingFactory(client = client)
+        val manager = qrManager(factory)
+        assertTrue(manager.connect(CONNECT_ENDPOINT) is AdbOperationResult.Success)
+        val connected = manager.connectionState.value as AdbConnectionState.Connected
+
+        val result = manager.createQrPairingAttempt(PairingAttemptId.of("manager-attempt-conflict"))
+
+        assertTrue(result is AdbOperationResult.Failure)
+        assertSame((result as AdbOperationResult.Failure).error, AdbError.PairingSessionConflict)
+        assertEquals(manager.connectionState.value, connected)
+        assertFalse(client.closed.get())
+        assertTrue(factory.calls.isEmpty())
+    }
+
+    private fun qrManager(
+        factory: RecordingFactory,
+        clock: MutableClock = MutableClock(1_000L),
+    ): DefaultAdbSessionManager = DefaultAdbSessionManager(
+        clientFactory = factory,
+        ioDispatcher = Dispatchers.Unconfined,
+        qrPairingCoordinator = QrPairingCoordinator(clock, SecureRandom()),
+    )
+
+    private fun serviceNameFrom(material: QrPairingMaterial): String =
+        checkNotNull(material.payload).substringAfter(";S:").substringBefore(";P:")
+
+    private fun resolvedPairingObservation(serviceName: String): WirelessServiceObservation = WirelessServiceObservation(
+        observationId = WirelessObservationId("synthetic-observation-${serviceName.hashCode()}"),
+        serviceType = WirelessServiceType.PAIRING,
+        serviceName = serviceName,
+        addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 10)),
+        port = 47111,
+        status = WirelessServiceStatus.RESOLVED,
+        lastSeenAt = 1_000L,
+    )
+
     private fun assertCleared(chars: CharArray) {
         assertTrue(chars.all { it == '\u0000' }, "Pairing characters must be cleared on every terminal path")
     }
@@ -151,7 +274,7 @@ class QrPairingSessionManagerTest {
                     pairingCode.size == SIX_DIGIT_CODE_LENGTH && pairingCode.all(Char::isDigit) -> {
                         CredentialShape.SIX_DIGIT_CODE
                     }
-                    pairingCode.size == QR_PASSWORD_LENGTH -> CredentialShape.QR_PASSWORD
+                    pairingCode.isNotEmpty() -> CredentialShape.QR_PASSWORD
                     else -> CredentialShape.OTHER
                 },
                 length = pairingCode.size,
@@ -182,8 +305,15 @@ class QrPairingSessionManagerTest {
         }
     }
 
+    private class MutableClock(
+        var nowMillis: Long,
+    ) : MonotonicClock {
+        override fun nowMillis(): Long = nowMillis
+    }
+
     private companion object {
         const val QR_PASSWORD_LENGTH = 19
+        const val STANDARD_QR_PASSWORD_LENGTH = 12
         const val SIX_DIGIT_CODE_LENGTH = 6
         val QR_ALPHABET = charArrayOf('A', 'b', '7', '-', '_')
         val QR_ENDPOINT = AdbEndpoint("qr-target.invalid", 47101)
