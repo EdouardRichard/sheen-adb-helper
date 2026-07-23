@@ -293,7 +293,7 @@
   - **验收**: SC002/SC003/SC005 分别给出成功次数、成功率、P95 与失败分类；覆盖 Android 11–16、至少两种 OEM 通知样式、锁屏到解锁无需重启窗口、IPv4/IPv6 和网络切换，真实端点/service name 均脱敏。
 - [X] T077 使用固定脚本组织至少 10 名首次用户各完成一次 QR 与一次配对码任务，并记录聚合可用性证据于 `docs/archive/releases/v0.04/usability.md`
   - **验收**: 记录样本数、无需主持人纠正且 2 分钟内完成的人数/比例和脱敏阻塞点；达到或未达到 SC012 均如实报告，不记录参与者身份、配对码或真实设备信息。
-- [ ] T078 在隔离网络用数据包捕获或 sentinel 监听执行 20 轮 LAN discovery，并记录无主动探测证据于 `docs/archive/releases/v0.04/network-observation.md`
+- [X] T078 在隔离网络用数据包捕获或 sentinel 监听执行 20 轮 LAN discovery，并记录无主动探测证据于 `docs/archive/releases/v0.04/network-observation.md`
   - **验收**: 明确区分 DNS-SD/mDNS 查询、已公布服务解析、用户选择后连接与禁止流量；只有证明未出现子网枚举或未公布主机/端口探测时 SC016 才通过，缺少捕获环境则标 `BLOCKED`。
 - [ ] T079 按 200 应用与诊断受控数据集执行应用/进程/Logcat 真机矩阵，并更新 `docs/archive/releases/v0.04/verification.md`
   - **验收**: 记录中英文/同名/缺失图标、名称与包名查询 1 秒内更新、PID 复用/共享 UID/多进程、10k/4MiB/100 条边界和 Session 切换；SC007–SC009、SC014、SC017 逐项追溯且无真实包名或 Logcat 入库。
