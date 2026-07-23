@@ -256,7 +256,7 @@
   - **验收**: T060、T062、现有 streamLogcat/listProcesses 与全部 core tests 通过；离页/停止/取消/断开/Session change 不交付旧记录，解析失败明确降级且 raw copy/export 语义保持。
 - [X] T064 [P] [US5] 先写进程筛选 Feature 失败测试，覆盖完整/部分 PID、进程名、应用、AND 语义、空/退出/不支持、UNKNOWN/MULTIPLE 和 Session 清理于 `feature/processes/src/test/kotlin/com/sheen/adb/feature/processes/ProcessesAnalysisPolicyTest.kt`
   - **验收**: 目标测试在现有 name/PID-only 实现上失败；只读快照不产生 kill/force-stop effect。
-- [ ] T065 [US5] 实现进程分析状态、筛选和 Compose 展示于 `feature/processes/src/main/kotlin/com/sheen/adb/feature/processes/ProcessesViewModel.kt` 和 `feature/processes/src/main/kotlin/com/sheen/adb/feature/processes/ProcessesScreen.kt`
+- [X] T065 [US5] 实现进程分析状态、筛选和 Compose 展示于 `feature/processes/src/main/kotlin/com/sheen/adb/feature/processes/ProcessesViewModel.kt` 和 `feature/processes/src/main/kotlin/com/sheen/adb/feature/processes/ProcessesScreen.kt`
   - **验收**: T064 与 `:feature:processes:testDebugUnitTest` 通过；结果区分 empty/exited/unsupported/cancelled/disconnected，筛选 1 秒内更新且没有进程控制入口。
 - [ ] T066 [P] [US5] 先写 Logcat window Feature 失败测试，覆盖结构化记录、全部筛选、AND、pause/resume/clear、10k/4MiB、100 可见、generation 和当前可见导出于 `feature/logcat/src/test/kotlin/com/sheen/adb/feature/logcat/LogcatAnalysisWindowTest.kt`
   - **验收**: 目标测试在现有 keyword-only window 上失败；导出断言只含当前可见匹配内容，未知关联不误归属。
