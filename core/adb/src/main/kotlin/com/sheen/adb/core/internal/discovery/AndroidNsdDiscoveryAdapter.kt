@@ -1,5 +1,6 @@
 package com.sheen.adb.core.internal.discovery
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.Network
@@ -407,6 +408,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
     private val networks = mutableMapOf<NsdNetworkRef, Network>()
     private val discoveredServices = mutableMapOf<NsdServiceRef, StoredService>()
 
+    @SuppressLint("MissingPermission") // The app manifest declares ACCESS_NETWORK_STATE; SecurityException is mapped by the source.
     fun currentNetwork(): NsdNetworkRef? =
         if (apiLevel < NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) null
         else connectivityManager.activeNetwork?.let { network ->
@@ -420,6 +422,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         MulticastLockResource(lock)
     }
 
+    @SuppressLint("NewApi") // apiLevel selects API 33 (T extension 3) or the legacy overload.
     override fun discover(
         serviceType: String,
         network: NsdNetworkRef?,
@@ -478,6 +481,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         }
     }
 
+    @SuppressLint("NewApi") // apiLevel selects API 33/34 extension-backed calls or legacy resolution.
     override fun resolve(
         service: NsdServiceRef,
         network: NsdNetworkRef?,
@@ -512,6 +516,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         }
     }
 
+    @SuppressLint("MissingPermission") // The app manifest declares ACCESS_NETWORK_STATE; failures remain structured.
     override fun registerNetworkChangeCallback(
         network: NsdNetworkRef,
         callbacks: NsdNetworkChangeCallbacks,
@@ -564,6 +569,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         null
     }
 
+    @SuppressLint("NewApi") // hostAddresses is read only on API 34 (T extension 7) and later.
     private fun NsdServiceInfo.toResolvedService(service: NsdServiceRef): NsdResolvedService? = try {
         val addresses = if (apiLevel >= NsdDiscoveryPolicy.ALL_ADDRESSES_API) hostAddresses else listOfNotNull(host)
         val translated = addresses.mapNotNull { address -> address.toWirelessAddress() }
