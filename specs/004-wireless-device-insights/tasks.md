@@ -149,8 +149,10 @@
   - **验收**: T035 通过；只持有 application Context，同一窗口只映射一个 core coordinator，进程结束不恢复旧窗口，通知权限拒绝不阻塞应用内流。
 - [ ] T037 [US2] 先扩充本机模式 Feature 失败测试，覆盖默认 code、local discovery 歧义、通知 waiting/input-unavailable、解锁后输入就绪、应用内重试、首次授权、OEM 建议和离页时仅活动 short-service 窗口例外于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducerTest.kt`
   - **验收**: 新用例在 US1 reducer 上失败；多个候选时要求用户选择，权限提示仅由用户主动进入本机模式触发，所有 effect 只调用项目自有 core/App bridge。
-- [ ] T038 [US2] 扩展本机模式状态与 ViewModel 协调于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingModels.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt`
-  - **验收**: T037 与 T025 通过；本机入口默认六位码，5 秒内产生 found/not-found/ambiguous/unsupported 状态，应用内输入始终存在且与通知共用 attemptId。
+- [ ] T038 [US2] 扩展本机模式状态、事件与 reducer 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingModels.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducer.kt`
+  - **验收**: T037 与既有 reducer 测试通过；本机入口默认六位码，found/not-found/ambiguous/unsupported、通知 waiting/input-unavailable、首次授权、OEM 建议和离页 short-service effect 均为项目自有状态。
+- [ ] T038A [US2] 将本机模式状态与公共 controller flow 接入 ViewModel 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt`
+  - **验收**: T037、T025 与既有 ViewModel 回归通过；5 秒内交付核心发现状态，应用内输入始终存在且通知/应用提交共用 attemptId，旧 window/generation 结果无效。
 - [ ] T039 [US2] 将平台 bridge、系统设置入口、通知授权结果和本机状态接入 UI 于 `app/src/main/kotlin/com/sheen/adbhelper/SheenApp.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt`
   - **验收**: T037、`:app:testDebugUnitTest` 与 `:feature:devices:testDebugUnitTest` 通过；通知拒绝/关闭/OEM 不兼容仍能从应用内提交，锁屏 UI/通知不泄漏敏感值，解锁后无需重启窗口即可继续输入，既有手动 localhost 入口保留。
 
@@ -316,7 +318,7 @@ flowchart TD
 
 - T005 → T006；T007 → T008；T009 → T010；T011 → T012；T013 → T014 → T014A → T015 → T016。
 - US1：T017 → T018 → T019 → T020A → T020；T021 → T022；T023 → T024 → T024A → T024B → T024C → T024D → T024E → T025 → T026；T027 → T028。
-- US2：T029 → T030；T031 → T032A → T032；T033 → T034；T035 → T036；T037 → T038 → T039。
+- US2：T029 → T030；T031 → T032A → T032；T033 → T034；T035 → T036；T037 → T038 → T038A → T039。
 - US3：T040 → T041；T042 → T043 → T044 → T045；T046 → T047。
 - US4：T048 → T049；T050 → T051 → T052 → T053；T054 → T055；T056 → T057。
 - US5：T058 → T059；T060 → T061 → T062 → T063；T064 → T065；T066 → T067；T068 → T069。
