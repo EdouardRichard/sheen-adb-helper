@@ -98,6 +98,21 @@ Debug merged Manifest 的权限恰为：
 
 Android 11–16、至少两种 OEM 样式、锁屏到解锁、IPv4/IPv6 和网络切换均为 `NOT_RUN`。SC002、SC003、SC005、SC015、SC018 不作通过判断；自动化只证明 deadline、token、锁屏决策、generation 和资源清理策略。
 
+### 4.3 T079 应用与诊断真机矩阵
+
+设备数为 0，且当前工作区没有可通过 ADB 授权访问的 200 应用受控数据集、PID 复用/共享 UID 进程夹具或设备端 10,000 行/4 MiB Logcat 压力源。仓库约束也禁止把真实包名或 Logcat 作为替代夹具提交。
+
+| 场景 | 计划样本 | 实际样本 | 状态 |
+|---|---:|---:|---|
+| 当前用户第三方应用 | 200 | 0 | NOT_RUN |
+| 中英文/同名/缺名/缺图标 | 受控集合 | 0 | NOT_RUN |
+| 名称/包名搜索 1 秒更新 | 受控查询 | 0 | NOT_RUN |
+| PID 复用/共享 UID/多进程/退出 | 受控进程集合 | 0 | NOT_RUN |
+| Logcat 10k/4MiB/100 条与组合筛选 | 受控日志集合 | 0 | NOT_RUN |
+| Session 切换与旧结果拒绝 | Android 11–16 | 0 | NOT_RUN |
+
+SC007–SC009、SC014、SC017 维持 `NOT_RUN`。JVM 自动化覆盖名称/包名搜索、APK/图标容量、UID 关联、PID 复用、结构化筛选与 buffer 淘汰，但不被记录为真机性能或兼容性通过。
+
 ## 5. T074 结论
 
 - 自动化与 Debug 构建：**PASS_WITH_WARNINGS**。
