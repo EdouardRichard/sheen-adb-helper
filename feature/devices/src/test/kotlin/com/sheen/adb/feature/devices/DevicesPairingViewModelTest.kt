@@ -5,6 +5,15 @@ import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
+import com.sheen.adb.core.LocalPairingController
+import com.sheen.adb.core.LocalPairingControllerState
+import com.sheen.adb.core.LocalPairingDiscoveryStatus
+import com.sheen.adb.core.LocalPairingNotificationDecision
+import com.sheen.adb.core.LocalPairingNotificationState
+import com.sheen.adb.core.LocalPairingNotificationCapability
+import com.sheen.adb.core.LocalPairingStopReason
+import com.sheen.adb.core.LocalPairingWindow
+import com.sheen.adb.core.LocalPairingWindowId
 import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
@@ -207,11 +216,130 @@ class DevicesPairingViewModelTest {
         }
     }
 
+    @Test
+    fun `local entry starts one controller window and maps its discovery and notification flow`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val viewModel = viewModel(
+                manager = manager,
+                attemptIds = listOf(PairingAttemptId.of("attempt-local")),
+                windowIds = listOf(LocalPairingWindowId.of("window-local")),
+            )
+            runCurrent()
+
+            viewModel.enterLocalPairingMode()
+            runCurrent()
+
+            assertEquals(manager.localController.startedWindows.size, 1)
+            assertEquals(viewModel.pairingState.value.localDiscoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+            assertEquals(viewModel.state.value.notificationPermissionRequestGeneration, 1L)
+
+            manager.localController.publish(
+                windowId = manager.localController.startedWindows.single().second,
+                discoveryStatus = LocalPairingDiscoveryStatus.AMBIGUOUS,
+                notificationDecision = notificationDecision(
+                    LocalPairingNotificationState.INPUT_UNAVAILABLE,
+                    suggestNativeStyle = true,
+                ),
+            )
+            runCurrent()
+
+            assertTrue(viewModel.pairingState.value.requiresLocalTargetSelection)
+            assertTrue(viewModel.pairingState.value.applicationInputAvailable)
+            assertEquals(
+                viewModel.pairingState.value.localNotificationState,
+                LocalPairingNotificationState.INPUT_UNAVAILABLE,
+            )
+            assertTrue(viewModel.pairingState.value.suggestNativeNotificationStyle)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `local retry invalidates the old window and application submit uses the replacement window`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val oldWindowId = LocalPairingWindowId.of("window-old")
+            val newWindowId = LocalPairingWindowId.of("window-new")
+            val manager = FakeManager()
+            val viewModel = viewModel(
+                manager = manager,
+                attemptIds = listOf(
+                    PairingAttemptId.of("attempt-old"),
+                    PairingAttemptId.of("attempt-new"),
+                ),
+                windowIds = listOf(oldWindowId, newWindowId),
+            )
+            runCurrent()
+
+            viewModel.enterLocalPairingMode()
+            viewModel.retryLocalPairingMode()
+            runCurrent()
+
+            manager.localController.publish(
+                windowId = oldWindowId,
+                discoveryStatus = LocalPairingDiscoveryStatus.NOT_FOUND,
+            )
+            runCurrent()
+            assertEquals(viewModel.pairingState.value.localDiscoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+
+            viewModel.updatePairingCode("0".repeat(6))
+            viewModel.submitLocalPairingCode()
+            advanceUntilIdle()
+
+            assertEquals(manager.localController.cancelledWindows, listOf(oldWindowId))
+            assertEquals(manager.localController.submittedWindows, listOf(newWindowId))
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.SUCCEEDED)
+            assertEquals(viewModel.pairingState.value.codeInput, "")
+            assertEquals(viewModel.state.value.pairingCode, "")
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `local notification permission request is one shot across an in app retry`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val viewModel = viewModel(
+                manager = manager,
+                attemptIds = listOf(
+                    PairingAttemptId.of("attempt-first"),
+                    PairingAttemptId.of("attempt-retry"),
+                ),
+                windowIds = listOf(
+                    LocalPairingWindowId.of("window-first"),
+                    LocalPairingWindowId.of("window-retry"),
+                ),
+            )
+            runCurrent()
+
+            viewModel.enterLocalPairingMode()
+            viewModel.onLocalNotificationPermissionResult(granted = false)
+            viewModel.retryLocalPairingMode()
+            runCurrent()
+
+            assertEquals(viewModel.state.value.notificationPermissionRequestGeneration, 1L)
+            assertEquals(
+                viewModel.pairingState.value.localNotificationState,
+                LocalPairingNotificationState.HIDDEN,
+            )
+            assertTrue(viewModel.pairingState.value.applicationInputAvailable)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun viewModel(
         manager: FakeManager,
         attemptIds: List<PairingAttemptId>,
+        windowIds: List<LocalPairingWindowId> = emptyList(),
     ): DevicesViewModel {
         val ids = ArrayDeque(attemptIds)
+        val localWindowIds = ArrayDeque(windowIds)
         return DevicesViewModel(
             manager = manager.instance,
             repository = fakeRepository(),
@@ -219,8 +347,21 @@ class DevicesPairingViewModelTest {
             pairingReducer = DevicesPairingReducer(),
             qrEncoder = QrMatrixEncoder(),
             pairingAttemptIdFactory = { ids.removeFirst() },
+            localPairingWindowIdFactory = { localWindowIds.removeFirst() },
         )
     }
+
+    private fun notificationDecision(
+        state: LocalPairingNotificationState,
+        suggestNativeStyle: Boolean = false,
+    ): LocalPairingNotificationDecision = LocalPairingNotificationDecision(
+        state = state,
+        inputActionAvailable = state == LocalPairingNotificationState.INPUT_READY,
+        submitAllowed = state == LocalPairingNotificationState.INPUT_READY,
+        actionWindowId = null,
+        applicationInputAvailable = true,
+        suggestNativeNotificationStyle = suggestNativeStyle,
+    )
 
     private fun discoveryState(
         generation: Long,
@@ -271,6 +412,7 @@ class DevicesPairingViewModelTest {
         var connectCalls = 0
         var disconnectCalls = 0
         var codePairCalls = 0
+        val localController = FakeLocalPairingController()
 
         private val queuedMaterials = ArrayDeque<FakeMaterial>()
         private val queuedDiscoveries = ArrayDeque<MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>>>()
@@ -283,6 +425,7 @@ class DevicesPairingViewModelTest {
             when (method.name.substringBefore('-')) {
                 "getConnectionState" -> connectionState
                 "getDiagnosticEvents" -> diagnostics
+                "getLocalPairingController" -> localController
                 "createQrPairingAttempt" -> {
                     val attemptId = args!![0] as PairingAttemptId
                     val material = queuedMaterials.removeFirst()
@@ -333,5 +476,85 @@ class DevicesPairingViewModelTest {
             queuedDiscoveries += discovery
             return discovery
         }
+    }
+
+    private class FakeLocalPairingController : LocalPairingController {
+        private val mutableState = MutableStateFlow(LocalPairingControllerState())
+        override val state = mutableState
+        val startedWindows = mutableListOf<Pair<PairingAttemptId, LocalPairingWindowId>>()
+        val cancelledWindows = mutableListOf<LocalPairingWindowId>()
+        val submittedWindows = mutableListOf<LocalPairingWindowId>()
+
+        override fun start(
+            attemptId: PairingAttemptId,
+            windowId: LocalPairingWindowId,
+        ): AdbOperationResult<LocalPairingWindow> {
+            startedWindows += attemptId to windowId
+            val window = window(windowId, attemptId)
+            mutableState.value = LocalPairingControllerState(
+                window = window,
+                discoveryStatus = LocalPairingDiscoveryStatus.SEARCHING,
+            )
+            return AdbOperationResult.Success(window)
+        }
+
+        override fun updateNotification(
+            deviceUnlocked: Boolean,
+            capability: LocalPairingNotificationCapability,
+        ): LocalPairingNotificationDecision = LocalPairingNotificationDecision(
+            state = LocalPairingNotificationState.INPUT_READY,
+            inputActionAvailable = true,
+            submitAllowed = true,
+            actionWindowId = mutableState.value.window?.windowId,
+            applicationInputAvailable = true,
+            suggestNativeNotificationStyle = false,
+        )
+
+        override suspend fun submit(
+            windowId: LocalPairingWindowId,
+            secret: PairingSecret,
+        ): AdbOperationResult<Unit> {
+            submittedWindows += windowId
+            secret.clear()
+            val active = mutableState.value.window
+            mutableState.value = LocalPairingControllerState(
+                window = active?.copy(hasLivePairingService = false, stopReason = LocalPairingStopReason.SUCCEEDED),
+                discoveryStatus = LocalPairingDiscoveryStatus.STOPPED,
+                stopReason = LocalPairingStopReason.SUCCEEDED,
+            )
+            return AdbOperationResult.Success(Unit)
+        }
+
+        override fun cancel(windowId: LocalPairingWindowId): AdbOperationResult<Unit> {
+            cancelledWindows += windowId
+            return AdbOperationResult.Success(Unit)
+        }
+
+        override fun onSystemTimeout(windowId: LocalPairingWindowId): AdbOperationResult<Unit> =
+            AdbOperationResult.Success(Unit)
+
+        fun publish(
+            windowId: LocalPairingWindowId,
+            discoveryStatus: LocalPairingDiscoveryStatus,
+            notificationDecision: LocalPairingNotificationDecision? = null,
+        ) {
+            val attemptId = startedWindows.first { it.second == windowId }.first
+            mutableState.value = LocalPairingControllerState(
+                window = window(windowId, attemptId),
+                discoveryStatus = discoveryStatus,
+                notificationDecision = notificationDecision,
+            )
+        }
+
+        private fun window(
+            windowId: LocalPairingWindowId,
+            attemptId: PairingAttemptId,
+        ): LocalPairingWindow = LocalPairingWindow(
+            windowId = windowId,
+            attemptId = attemptId,
+            startedAtMillis = 0L,
+            deadlineMillis = 120_000L,
+            hasLivePairingService = true,
+        )
     }
 }
