@@ -248,7 +248,7 @@
   - **验收**: T060 中命令、解析和 UID 归一化断言通过，既有应用管理测试同步保持当前用户第三方范围；UID 缺失显式保留 unknown，不记录包名上下文且不新增进程终止能力。
 - [X] T061A [US5] 将已解析应用 UID 接入当前 Session 应用快照，并同步新命令的 metadata manager 合成夹具于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt` 和 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/ApplicationMetadataSessionManagerTest.kt`
   - **验收**: T060 的 Session UID 断言、metadata flow 与既有 force-stop/enable/disable 回归通过；只绑定同次当前用户第三方应用查询，UID 缺失保持 null，Session 切换不复用旧 UID。
-- [ ] T062 [US5] 先写进程关联与 manager 诊断集成失败测试，覆盖 Android UID 归一化为 `(userId,appId)`、Session/snapshot generation、PID 复用、共享 UID、多用户、多进程、字段缺失、进程退出、VERIFIED/MULTIPLE/UNKNOWN、structured stream、停止/取消/断开/Session change 和旧结果拒绝于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/ProcessAssociationTest.kt` 和 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/DiagnosticsSessionManagerTest.kt`
+- [X] T062 [US5] 先写进程关联与 manager 诊断集成失败测试，覆盖 Android UID 归一化为 `(userId,appId)`、Session/snapshot generation、PID 复用、共享 UID、多用户、多进程、字段缺失、进程退出、VERIFIED/MULTIPLE/UNKNOWN、structured stream、停止/取消/断开/Session change 和旧结果拒绝于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/ProcessAssociationTest.kt` 和 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/DiagnosticsSessionManagerTest.kt`
   - **验收**: 目标测试因 association/manager 集成缺失而失败；任何共享 UID、多用户冲突或不确定关系均为 MULTIPLE/UNKNOWN，禁止按 PID/进程名前缀猜测，现有 raw copy/export 语义保持可验证。
 - [ ] T063 [US5] 实现项目自有诊断模型与可靠进程关联 resolver 于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbModels.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/diagnostics/ProcessAssociation.kt`
   - **验收**: T062 的纯关联测试通过；只有同 Session/代次且归一化 UID 唯一匹配时为 VERIFIED，共享 UID 为 MULTIPLE，缺失/跨用户/PID 复用/进程退出为 UNKNOWN，禁止名称前缀猜测。
