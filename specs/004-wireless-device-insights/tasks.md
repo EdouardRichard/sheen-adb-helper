@@ -279,7 +279,7 @@
   - **验收**: 文档只描述已由代码/测试证明的行为，链接到项目自有接口与 ADR 0007；未完成真机项明确标为待验，不把 Plan 当实现事实。
 - [X] T071 [P] 更新应用元数据与基础诊断当前架构事实于 `docs/architecture/application-management.md` 和 `docs/architecture/diagnostics.md`
   - **验收**: 文档准确记录容量、Session、降级、筛选与关联边界，不声明高级诊断或持久化图标/日志。
-- [ ] T072 同步最终 Manifest 状态和隐私说明于 `docs/权限矩阵.md` 和 `docs/privacy-policy.md`
+- [X] T072 同步最终 Manifest 状态和隐私说明于 `docs/权限矩阵.md` 和 `docs/privacy-policy.md`
   - **验收**: “待实现声明”只在 merged Manifest 证据通过后改为“已声明”；隐私说明覆盖本地 NSD、通知输入、应用元数据与诊断且不暗示上传。
 - [ ] T073 复核实际解析图、许可证/NOTICE、维护风险、体积和移除路径于 `docs/第三方依赖审查.md` 和 `docs/第三方依赖与许可证.md`
   - **验收**: 文档与 Gradle 实际解析结果一致；ZXing/apk-parser 与传递依赖无遗漏，`spake2-java` 阻断仍存在时明确保留发布 BLOCKED。
