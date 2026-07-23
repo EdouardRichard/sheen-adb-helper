@@ -145,7 +145,7 @@
   - **验收**: T033 通过；merged Manifest 在 T002 两项 NSD 权限之外仅新增 `POST_NOTIFICATIONS`、`FOREGROUND_SERVICE` 和一个 `exported=false`、`shortService` 组件；Service 为 `START_NOT_STICKY`，只观察 core coordinator，窗口结束后注销 receiver、撤销通知并停止自身。
 - [X] T035 [P] [US2] 先写 App 装配失败测试，覆盖 application Context、单 core coordinator、通知被清除、权限拒绝回调和进程重建不恢复旧窗口于 `app/src/test/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridgeTest.kt`
   - **验收**: 目标测试因 bridge/装配缺失而失败；测试证明 App 层只翻译平台事件，不复制 deadline/token/配对业务状态。
-- [ ] T036 [US2] 装配本机配对平台 bridge 与应用级生命周期于 `app/src/main/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridge.kt` 和 `app/src/main/kotlin/com/sheen/adbhelper/SheenApplication.kt`
+- [X] T036 [US2] 装配本机配对平台 bridge 与应用级生命周期于 `app/src/main/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridge.kt` 和 `app/src/main/kotlin/com/sheen/adbhelper/SheenApplication.kt`
   - **验收**: T035 通过；只持有 application Context，同一窗口只映射一个 core coordinator，进程结束不恢复旧窗口，通知权限拒绝不阻塞应用内流。
 - [ ] T037 [US2] 先扩充本机模式 Feature 失败测试，覆盖默认 code、local discovery 歧义、通知 waiting/input-unavailable、解锁后输入就绪、应用内重试、首次授权、OEM 建议和离页时仅活动 short-service 窗口例外于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingReducerTest.kt`
   - **验收**: 新用例在 US1 reducer 上失败；多个候选时要求用户选择，权限提示仅由用户主动进入本机模式触发，所有 effect 只调用项目自有 core/App bridge。
