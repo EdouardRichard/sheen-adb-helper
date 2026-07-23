@@ -27,4 +27,5 @@ dependencies {
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
     testImplementation(libs.testng)
+    testImplementation(libs.kotlinx.coroutines.test)
 }
