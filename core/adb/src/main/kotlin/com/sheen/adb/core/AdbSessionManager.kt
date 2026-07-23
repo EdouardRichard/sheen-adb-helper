@@ -74,6 +74,20 @@ interface AdbSessionManager : AutoCloseable {
         return AdbOperationResult.Failure(AdbError.PairingUnsupported)
     }
 
+    suspend fun createQrPairingAttempt(
+        attemptId: PairingAttemptId,
+    ): AdbOperationResult<QrPairingMaterial> = AdbOperationResult.Failure(AdbError.PairingUnsupported)
+
+    suspend fun pairQrObservation(
+        attemptId: PairingAttemptId,
+        observation: WirelessServiceObservation,
+        timeout: Duration = 30.seconds,
+    ): AdbOperationResult<Unit> = AdbOperationResult.Failure(AdbError.PairingUnsupported)
+
+    suspend fun cancelQrPairing(
+        attemptId: PairingAttemptId,
+    ): AdbOperationResult<Unit> = AdbOperationResult.Failure(AdbError.PairingUnsupported)
+
     suspend fun executeShell(
         command: String,
         timeout: Duration = 30.seconds,
