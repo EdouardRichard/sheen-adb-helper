@@ -215,7 +215,7 @@
   - **验收**: T050 通过；只接受 PackageManager 解析路径并复用内部 Sync adapter，逐包处理且总预算 10 秒，超限立即停止接收，所有路径关闭 stream；取消/Session change 后不交付旧 update并释放 APK bytes/icon cache。
 - [X] T052 [US4] 先写 manager metadata flow 失败测试，覆盖包列表先返回、逐项 update、`(sessionId,userId,packageName)` 归属、错误分类和既有应用操作不变于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/ApplicationMetadataSessionManagerTest.kt`
   - **验收**: 目标测试因 manager 尚无 metadata flow 而失败；既有 force-stop/enable/disable 测试仍保持绿色。
-- [ ] T053 [US4] 扩展应用展示模型与 manager metadata flow 于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbSessionManager.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt`
+- [X] T053 [US4] 扩展应用展示模型与 manager metadata flow 于 `core/adb/src/main/kotlin/com/sheen/adb/core/AdbSessionManager.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt`
   - **验收**: T052 与现有 `ApplicationSessionManagerTest` 通过；包名首帧可用，单包失败不隐藏其他条目，断开/取消/切换后 update 作废。
 - [ ] T054 [US4] 先扩充 Apps 策略失败测试，覆盖 displayName/packageName OR 搜索、大小写/中文/数字/点/下划线、enabled filter 交集、同名包区分、占位和 Session 清理于 `feature/apps/src/test/kotlin/com/sheen/adb/feature/apps/AppsPolicyTest.kt`
   - **验收**: 新用例在现有包名-only 实现上失败；搜索预期不依赖元数据尚未加载的猜测名称。
