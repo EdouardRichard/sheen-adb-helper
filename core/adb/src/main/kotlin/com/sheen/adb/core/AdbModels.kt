@@ -477,6 +477,79 @@ data class ProcessSnapshot(
     val degradedReason: String? = null,
 )
 
+enum class ProcessAssociationUnknownReason {
+    MISSING_UID,
+    INVALID_UID,
+    NO_MATCH,
+    SESSION_MISMATCH,
+    GENERATION_MISMATCH,
+    PROCESS_EXITED,
+}
+
+sealed interface ProcessApplicationAssociation {
+    data class Verified(val packageName: String) : ProcessApplicationAssociation
+    data class Multiple(val packageNames: Set<String>) : ProcessApplicationAssociation
+    data class Unknown(val reason: ProcessAssociationUnknownReason) : ProcessApplicationAssociation
+}
+
+enum class ProcessAnalysisCapability {
+    UID,
+    STATE,
+    RESIDENT_MEMORY,
+    APPLICATION_ASSOCIATION,
+}
+
+data class ProcessAnalysisEntry(
+    val snapshotGeneration: Long,
+    val process: DeviceProcess,
+    val applicationAssociation: ProcessApplicationAssociation,
+    val unavailableCapabilities: Set<ProcessAnalysisCapability> = emptySet(),
+)
+
+data class ProcessAnalysisSnapshot(
+    val sessionId: String,
+    val generation: Long,
+    val entries: List<ProcessAnalysisEntry>,
+    val degradedReason: String? = null,
+)
+
+data class ProcessRecordAssociation(
+    val processName: String?,
+    val applicationAssociation: ProcessApplicationAssociation,
+)
+
+enum class StructuredLogcatKind { PARSED, UNPARSED, STDERR }
+
+enum class StructuredLogcatLevel { VERBOSE, DEBUG, INFO, WARN, ERROR, FATAL, ASSERT }
+
+data class StructuredLogcatTimestamp(
+    val month: Int,
+    val day: Int,
+    val hour: Int,
+    val minute: Int,
+    val second: Int,
+    val millisecond: Int,
+)
+
+data class StructuredLogcatRecord(
+    val sessionId: String,
+    val snapshotGeneration: Long,
+    val sequence: Long,
+    val rawText: String,
+    val kind: StructuredLogcatKind,
+    val timestamp: StructuredLogcatTimestamp? = null,
+    val uid: Int? = null,
+    val pid: Int? = null,
+    val tid: Int? = null,
+    val level: StructuredLogcatLevel? = null,
+    val tag: String? = null,
+    val message: String? = null,
+    val processName: String? = null,
+    val applicationAssociation: ProcessApplicationAssociation = ProcessApplicationAssociation.Unknown(
+        ProcessAssociationUnknownReason.NO_MATCH,
+    ),
+)
+
 enum class RemoteApplicationEnabledState {
     ENABLED,
     DISABLED,
