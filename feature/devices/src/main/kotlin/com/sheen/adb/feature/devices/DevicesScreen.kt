@@ -60,25 +60,35 @@ fun DevicesRoute(
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val pairingState by viewModel.pairingState.collectAsStateWithLifecycle()
+    val discoveryState by viewModel.discoveryState.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var openingWirelessDebuggingSettings by remember { mutableStateOf(false) }
     DisposableEffect(lifecycle) {
+        viewModel.onDiscoveryForeground()
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> openingWirelessDebuggingSettings = false
-                Lifecycle.Event.ON_STOP -> if (!openingWirelessDebuggingSettings) viewModel.closePairing()
+                Lifecycle.Event.ON_START -> {
+                    openingWirelessDebuggingSettings = false
+                    viewModel.onDiscoveryForeground()
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    viewModel.onDiscoveryBackground()
+                    if (!openingWirelessDebuggingSettings) viewModel.closePairing()
+                }
                 else -> Unit
             }
         }
         lifecycle.addObserver(observer)
         onDispose {
             lifecycle.removeObserver(observer)
+            viewModel.onDiscoveryBackground()
             if (!openingWirelessDebuggingSettings) viewModel.closePairing()
         }
     }
     DevicesScreen(
         state = state,
         pairingState = pairingState,
+        discoveryState = discoveryState,
         actions = viewModel,
         onOpenWirelessDebuggingSettings = {
             openingWirelessDebuggingSettings = true
@@ -93,6 +103,7 @@ internal fun DevicesScreen(
     state: DevicesUiState,
     pairingState: DevicesPairingState,
     actions: DevicesViewModel,
+    discoveryState: DevicesDiscoveryState = DevicesDiscoveryState(),
     onOpenWirelessDebuggingSettings: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -137,6 +148,7 @@ internal fun DevicesScreen(
         if (state.connectionState is AdbConnectionState.Connected) {
             OutlinedButton(onClick = actions::disconnect) { Text("断开连接") }
         }
+        DevicesDiscoveryPanel(discoveryState, actions)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = actions::enterLocalPairingMode) { Text("本机无线配对") }
             OutlinedButton(onClick = actions::prefillLocalhost) { Text("手动填写本机调试端口") }
@@ -161,6 +173,19 @@ internal fun DevicesScreen(
             },
             dismissButton = {
                 TextButton(onClick = actions::dismissPairingSessionReplacement) { Text("保留当前连接") }
+            },
+        )
+    }
+    if (state.awaitingDiscoverySessionReplacement) {
+        AlertDialog(
+            onDismissRequest = actions::dismissDiscoverySessionReplacement,
+            title = { Text("断开当前设备并连接发现目标？") },
+            text = { Text("发现结果不会自动替换当前 ADB Session。确认后先断开当前设备，再重新验证并连接所选服务。") },
+            confirmButton = {
+                TextButton(onClick = actions::confirmDiscoverySessionReplacement) { Text("断开并连接") }
+            },
+            dismissButton = {
+                TextButton(onClick = actions::dismissDiscoverySessionReplacement) { Text("保留当前连接") }
             },
         )
     }
