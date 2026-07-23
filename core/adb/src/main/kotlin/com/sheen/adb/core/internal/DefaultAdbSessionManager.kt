@@ -20,9 +20,12 @@ import com.sheen.adb.core.ExclusiveAdbOperationLease
 import com.sheen.adb.core.FileTransferProgress
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLine
+import com.sheen.adb.core.PairingAttemptId
+import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.PairingSecret
 import com.sheen.adb.core.ProcessSnapshot
+import com.sheen.adb.core.QrPairingMaterial
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
 import com.sheen.adb.core.RemoteDirectorySnapshot
@@ -36,6 +39,7 @@ import com.sheen.adb.core.RemoteUploadCommitReceipt
 import com.sheen.adb.core.RemoteUploadPlan
 import com.sheen.adb.core.ShellResult
 import com.sheen.adb.core.ShellOutputMode
+import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryEvent
 import com.sheen.adb.core.WirelessDiscoveryMode
 import com.sheen.adb.core.WirelessDiscoverySource
@@ -45,8 +49,12 @@ import com.sheen.adb.core.WirelessDiscoverySourceObserver
 import com.sheen.adb.core.WirelessDiscoverySourceRequest
 import com.sheen.adb.core.WirelessDiscoverySourceStartResult
 import com.sheen.adb.core.WirelessDiscoveryState
+import com.sheen.adb.core.WirelessServiceObservation
 import com.sheen.adb.core.internal.discovery.WirelessDiscoveryReducer
+import com.sheen.adb.core.internal.pairing.MonotonicClock
+import com.sheen.adb.core.internal.pairing.QrPairingCoordinator
 import java.io.Closeable
+import java.security.SecureRandom
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -82,6 +90,10 @@ internal class DefaultAdbSessionManager(
     private val transferNoProgressTimeout: Duration = 30.seconds,
     private val transferCancellationGrace: Duration = 3.seconds,
     private val wirelessDiscoverySourceFactory: WirelessDiscoverySourceFactory? = null,
+    private val qrPairingCoordinator: QrPairingCoordinator = QrPairingCoordinator(
+        clock = MonotonicClock { System.nanoTime() / 1_000_000L },
+        secureRandom = SecureRandom(),
+    ),
 ) : AdbSessionManager, Closeable {
     private data class ActiveSession(
         val id: String,
@@ -206,6 +218,8 @@ internal class DefaultAdbSessionManager(
     private val wirelessDiscoveryGeneration = AtomicLong(0)
     @Volatile
     private var active: ActiveSession? = null
+    @Volatile
+    private var activeQrAttemptId: PairingAttemptId? = null
     private var activeExclusiveOperation: ActiveExclusiveOperation? = null
     private var activeWirelessDiscovery: ActiveWirelessDiscovery? = null
     private var applicationSnapshot: ApplicationSnapshot? = null
@@ -936,6 +950,7 @@ internal class DefaultAdbSessionManager(
     override suspend fun connect(endpoint: AdbEndpoint, timeout: Duration): AdbOperationResult<Unit> =
         mutex.withLock {
             if (closed.get()) return@withLock failure(AdbError.Unknown(AdbOperationStage.CONNECT), endpoint, null)
+            cancelActiveQrPairing()
             terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
             runInterruptible(ioDispatcher) { closeActiveIfPresent() }
             appendDiagnostic(AdbOperationStage.CONNECT, AdbDiagnosticOutcome.STARTED, "ADB_CONNECT_STARTED", endpoint)
@@ -1033,6 +1048,7 @@ internal class DefaultAdbSessionManager(
             pairingSecret.clear()
             return@withLock operationFailure(AdbError.PairingUnsupported, pairingEndpoint, null)
         }
+        if (method != PairingMethod.QR) cancelActiveQrPairing()
         terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
         appendDiagnostic(AdbOperationStage.PAIR, AdbDiagnosticOutcome.STARTED, "ADB_PAIR_STARTED", pairingEndpoint)
         mutableState.value = AdbConnectionState.Pairing(pairingEndpoint)
@@ -1062,6 +1078,140 @@ internal class DefaultAdbSessionManager(
         } finally {
             pairingSecret.clear()
         }
+    }
+
+    override suspend fun createQrPairingAttempt(
+        attemptId: PairingAttemptId,
+    ): AdbOperationResult<QrPairingMaterial> = mutex.withLock {
+        if (closed.get()) {
+            return@withLock operationFailure(AdbError.Unknown(AdbOperationStage.PAIR), null, null)
+        }
+        if (active != null) {
+            return@withLock operationFailure(AdbError.PairingSessionConflict, null, null)
+        }
+        return@withLock try {
+            AdbOperationResult.Success(qrPairingCoordinator.start(attemptId)).also {
+                activeQrAttemptId = attemptId
+            }
+        } catch (error: IllegalStateException) {
+            operationFailure(AdbError.DeviceRejected(AdbOperationStage.PAIR), null, error)
+        } catch (error: IllegalArgumentException) {
+            operationFailure(AdbError.DeviceRejected(AdbOperationStage.PAIR), null, error)
+        } catch (error: Throwable) {
+            operationFailure(AdbExceptionMapper.map(error, AdbOperationStage.PAIR), null, error)
+        }
+    }
+
+    override suspend fun pairQrObservation(
+        attemptId: PairingAttemptId,
+        observation: WirelessServiceObservation,
+        timeout: Duration,
+    ): AdbOperationResult<Unit> {
+        if (closed.get()) {
+            return operationFailure(AdbError.Unknown(AdbOperationStage.PAIR), null, null)
+        }
+        val match = qrPairingCoordinator.match(attemptId, observation)
+            ?: return operationFailure(qrMatchFailure(attemptId), null, null)
+        val endpoint = observation.toPairingEndpoint()
+        if (endpoint == null) {
+            qrPairingCoordinator.complete(attemptId, PairingAttemptPhase.FAILED)
+            return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        }
+        return try {
+            val result = pairWithSecret(
+                pairingEndpoint = endpoint,
+                pairingSecret = match.secret,
+                method = PairingMethod.QR,
+                timeout = timeout,
+            )
+            val terminal = when (result) {
+                is AdbOperationResult.Success -> PairingAttemptPhase.SUCCEEDED
+                is AdbOperationResult.Failure -> PairingAttemptPhase.FAILED
+                AdbOperationResult.Cancelled -> PairingAttemptPhase.CANCELLED
+            }
+            val finalResult = if (qrPairingCoordinator.complete(attemptId, terminal)) {
+                result
+            } else {
+                qrResultAfterCompetingTerminal(attemptId, result)
+            }
+            clearActiveQrAttempt(attemptId)
+            finalResult
+        } catch (error: CancellationException) {
+            qrPairingCoordinator.complete(attemptId, PairingAttemptPhase.CANCELLED)
+            clearActiveQrAttempt(attemptId)
+            throw error
+        } catch (error: Throwable) {
+            qrPairingCoordinator.complete(attemptId, PairingAttemptPhase.FAILED)
+            clearActiveQrAttempt(attemptId)
+            throw error
+        }
+    }
+
+    override suspend fun cancelQrPairing(
+        attemptId: PairingAttemptId,
+    ): AdbOperationResult<Unit> {
+        if (closed.get()) {
+            return operationFailure(AdbError.Unknown(AdbOperationStage.PAIR), null, null)
+        }
+        if (qrPairingCoordinator.complete(attemptId, PairingAttemptPhase.CANCELLED)) {
+            clearActiveQrAttempt(attemptId)
+            return AdbOperationResult.Success(Unit)
+        }
+        return operationFailure(qrMatchFailure(attemptId), null, null)
+    }
+
+    private fun qrMatchFailure(attemptId: PairingAttemptId): AdbError {
+        val phase = qrPairingCoordinator.state(attemptId)
+        if (phase in QR_TERMINAL_PHASES) clearActiveQrAttempt(attemptId)
+        return if (phase == PairingAttemptPhase.EXPIRED) {
+            AdbError.Timeout(AdbOperationStage.PAIR)
+        } else {
+            AdbError.DeviceRejected(AdbOperationStage.PAIR)
+        }
+    }
+
+    private fun cancelActiveQrPairing() {
+        val attemptId = activeQrAttemptId ?: return
+        qrPairingCoordinator.complete(attemptId, PairingAttemptPhase.CANCELLED)
+        clearActiveQrAttempt(attemptId)
+    }
+
+    private fun clearActiveQrAttempt(attemptId: PairingAttemptId) {
+        if (activeQrAttemptId == attemptId) activeQrAttemptId = null
+    }
+
+    private fun qrResultAfterCompetingTerminal(
+        attemptId: PairingAttemptId,
+        protocolResult: AdbOperationResult<Unit>,
+    ): AdbOperationResult<Unit> = when (qrPairingCoordinator.state(attemptId)) {
+        PairingAttemptPhase.SUCCEEDED -> AdbOperationResult.Success(Unit)
+        PairingAttemptPhase.CANCELLED -> AdbOperationResult.Cancelled
+        PairingAttemptPhase.EXPIRED -> AdbOperationResult.Failure(AdbError.Timeout(AdbOperationStage.PAIR))
+        PairingAttemptPhase.FAILED,
+        PairingAttemptPhase.UNSUPPORTED,
+        -> if (protocolResult is AdbOperationResult.Failure) {
+            protocolResult
+        } else {
+            AdbOperationResult.Failure(AdbError.DeviceRejected(AdbOperationStage.PAIR))
+        }
+        else -> AdbOperationResult.Cancelled
+    }
+
+    private fun WirelessServiceObservation.toPairingEndpoint(): AdbEndpoint? {
+        val address = addresses.firstOrNull() ?: return null
+        val host = when (address) {
+            is WirelessAddress.Ipv4 -> listOf(
+                address.firstOctet,
+                address.secondOctet,
+                address.thirdOctet,
+                address.fourthOctet,
+            ).joinToString(".")
+            is WirelessAddress.Ipv6 -> buildString {
+                append(address.segments.joinToString(":") { it.toString(16) })
+                address.scopeId?.let { append('%').append(it) }
+            }
+        }
+        return runCatching { AdbEndpoint(host, port) }.getOrNull()
     }
 
     override suspend fun executeShell(command: String, timeout: Duration): AdbOperationResult<ShellResult> =
@@ -1753,6 +1903,8 @@ internal class DefaultAdbSessionManager(
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            qrPairingCoordinator.close()
+            activeQrAttemptId = null
             terminateActiveWirelessDiscovery(AdbError.DiscoveryManagerClosed)
             val session = active
             active = null
@@ -1912,5 +2064,12 @@ internal class DefaultAdbSessionManager(
         val FILE_PREPARE_TIMEOUT = 5.seconds
         const val DEFAULT_REMOTE_FILE_MODE = 0x81A4
         const val MAX_AUTO_RENAME_ATTEMPTS = 1_000
+        val QR_TERMINAL_PHASES = setOf(
+            PairingAttemptPhase.SUCCEEDED,
+            PairingAttemptPhase.CANCELLED,
+            PairingAttemptPhase.EXPIRED,
+            PairingAttemptPhase.FAILED,
+            PairingAttemptPhase.UNSUPPORTED,
+        )
     }
 }
