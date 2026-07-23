@@ -75,6 +75,17 @@ Debug merged Manifest 的权限恰为：
 | T078：20 轮隔离网络流量观察 | NOT_RUN | 需要 packet capture 或 sentinel 环境 |
 | T079：200 应用与诊断真机矩阵 | NOT_RUN | 需要受控应用/进程/Logcat 数据集 |
 
+### 4.1 T075 配对固定协议
+
+执行前环境检查：Android SDK `adb` 可用，但已授权连接设备数为 0，且没有 Android emulator 进程。当前环境不能覆盖 Android 11、13、16，也不能让被控端系统 scanner 扫描控制端 QR。
+
+| 协议 | 计划次数 | 实际次数 | 成功次数 | 成功率 | P95 | 30 秒超时 | 状态 |
+|---|---:|---:|---:|---|---|---:|---|
+| QR 配对 | 20 | 0 | 0 | N/A | N/A | 0 | NOT_RUN |
+| 六位配对码 | 20 | 0 | 0 | N/A | N/A | 0 | NOT_RUN |
+
+脱敏失败分类只有 `ENVIRONMENT_NO_DEVICE`；它不是功能失败样本，不进入成功率分母。SC001、SC004、SC010、SC011、SC013 维持 `NOT_RUN`，不得由 QR/Kadb 单元测试替代。
+
 ## 5. T074 结论
 
 - 自动化与 Debug 构建：**PASS_WITH_WARNINGS**。

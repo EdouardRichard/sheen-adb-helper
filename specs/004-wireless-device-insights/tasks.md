@@ -287,7 +287,7 @@
   - **验收**: 只对已有 App Manifest 权限、API 33/34 分支与结构化 `SecurityException` 降级覆盖的平台调用添加窄范围说明/抑制；不新增权限或 baseline，core discovery tests 与 `:core:adb:lintDebug` 通过。
 - [X] T074 按 `specs/004-wireless-device-insights/quickstart.md` 运行全量单元测试、lint、Debug assemble、merged Manifest 与断链/敏感值扫描，并记录实际输出于 `docs/archive/releases/v0.04/verification.md`
   - **验收**: 设置 `JAVA_HOME=C:\Users\Richard\.gradle\sheen-jdk21` 后命令结果、失败项和未运行项均逐项记录；不得把自动化通过写成真机通过。
-- [ ] T075 按固定协议执行 40 次配对成功率验证（QR/配对码各 20 次，至少覆盖 Android 11、13、16）并记录于 `docs/archive/releases/v0.04/verification.md`
+- [X] T075 按固定协议执行 40 次配对成功率验证（QR/配对码各 20 次，至少覆盖 Android 11、13、16）并记录于 `docs/archive/releases/v0.04/verification.md`
   - **验收**: 从用户点击到明确结果统一计时，分别给出成功次数、成功率、P95、30 秒超时和脱敏失败分类；SC001、SC004、SC010、SC011、SC013 可追溯，未执行项保持 `NOT_RUN`。
 - [ ] T076 按固定协议执行 20 次本机启动、20 次通知到达及 20 轮各 15 服务 LAN 发现，并记录于 `docs/archive/releases/v0.04/verification.md`
   - **验收**: SC002/SC003/SC005 分别给出成功次数、成功率、P95 与失败分类；覆盖 Android 11–16、至少两种 OEM 通知样式、锁屏到解锁无需重启窗口、IPv4/IPv6 和网络切换，真实端点/service name 均脱敏。
