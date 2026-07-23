@@ -108,7 +108,7 @@
   - **验收**: T024A、T017、T019 和全部 core manager 回归通过；只有当前 attempt 的精确 resolved pairing observation 可触发 Kadb，所有终态/close 清理 material，成功只授权且保持无连接状态，已有 Session 保持不变。
 - [X] T024E [US1] 为 JVM ViewModel coroutine 测试登记同版本 test-only dispatcher 依赖于 `gradle/libs.versions.toml` 和 `feature/devices/build.gradle.kts`
   - **验收**: `kotlinx-coroutines-test` 与现有 Coroutines 版本一致且仅位于 test scope；dependency/compile 检查通过，运行时依赖、Manifest、权限和持久化均无变化。
-- [ ] T025 [US1] 先写 DevicesViewModel 配对流失败测试，覆盖 manager flow 收集、generation 丢弃、页面离开清理、重试和用户确认断开旧 Session 于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingViewModelTest.kt`
+- [X] T025 [US1] 先写 DevicesViewModel 配对流失败测试，覆盖 manager flow 收集、generation 丢弃、页面离开清理、重试和用户确认断开旧 Session 于 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingViewModelTest.kt`
   - **验收**: 目标测试因 ViewModel 未接入新 reducer/manager 而失败；fake manager/repository 不使用真实端点或包名。
 - [ ] T026 [US1] 将 QR 与配对码事件接入 ViewModel 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt`
   - **验收**: T025 与既有设备逻辑测试通过；取消、离页、断开、超时和 onCleared 均使旧 generation 无效并清除 pairing material，手动配对码入口仍可用。
