@@ -153,7 +153,7 @@
   - **验收**: T037 与既有 reducer 测试通过；本机入口默认六位码，found/not-found/ambiguous/unsupported、通知 waiting/input-unavailable、首次授权、OEM 建议和离页 short-service effect 均为项目自有状态。
 - [X] T038A [US2] 将本机模式状态与公共 controller flow 接入 ViewModel 于 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt`
   - **验收**: T037、T025 与既有 ViewModel 回归通过；5 秒内交付核心发现状态，应用内输入始终存在且通知/应用提交共用 attemptId，旧 window/generation 结果无效。
-- [ ] T039A [US2] 扩充 bridge 测试并使 App bridge 幂等同步既有 controller window 的 short-service 生命周期于 `app/src/test/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridgeTest.kt` 和 `app/src/main/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridge.kt`
+- [X] T039A [US2] 扩充 bridge 测试并使 App bridge 幂等同步既有 controller window 的 short-service 生命周期于 `app/src/test/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridgeTest.kt` 和 `app/src/main/kotlin/com/sheen/adbhelper/localpairing/LocalPairingAppBridge.kt`
   - **验收**: 测试先因同步 API 缺失失败再转绿；既有活动 window 只启动一次 service，终态/无 window 只停止一次，不重复创建 controller window，进程重建不恢复旧窗口。
 - [ ] T039 [US2] 将平台 bridge、系统设置入口、通知授权结果和本机状态接入 UI 于 `app/src/main/kotlin/com/sheen/adbhelper/SheenApp.kt` 和 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt`
   - **验收**: T037、`:app:testDebugUnitTest` 与 `:feature:devices:testDebugUnitTest` 通过；通知拒绝/关闭/OEM 不兼容仍能从应用内提交，锁屏 UI/通知不泄漏敏感值，解锁后无需重启窗口即可继续输入，既有手动 localhost 入口保留。
