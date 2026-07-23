@@ -14,9 +14,6 @@ import com.sheen.adb.core.WirelessObservationId
 import com.sheen.adb.core.WirelessServiceObservation
 import com.sheen.adb.core.WirelessServiceStatus
 import com.sheen.adb.core.WirelessServiceType
-import com.sheen.adb.core.internal.pairing.MonotonicClock
-import com.sheen.adb.core.internal.pairing.QrPairingCoordinator
-import java.security.SecureRandom
 import java.util.concurrent.CancellationException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
@@ -176,23 +173,25 @@ class QrPairingSessionManagerTest {
     }
 
     @Test
-    fun `QR deadline maps to timeout and invalidates material before protocol pairing`() = runBlocking {
-        val clock = MutableClock(1_000L)
-        val factory = RecordingFactory()
-        val manager = qrManager(factory, clock)
-        val attemptId = PairingAttemptId.of("manager-attempt-expired")
+    fun `QR protocol timeout invalidates material and returns a structured timeout`() = runBlocking {
+        val factory = RecordingFactory(pairBehavior = PairBehavior.WAIT_FOREVER)
+        val manager = qrManager(factory)
+        val attemptId = PairingAttemptId.of("manager-attempt-timeout")
         val material = (
             manager.createQrPairingAttempt(attemptId) as AdbOperationResult.Success<QrPairingMaterial>
         ).value
         val serviceName = serviceNameFrom(material)
-        clock.nowMillis = material.deadlineMillis
 
-        val result = manager.pairQrObservation(attemptId, resolvedPairingObservation(serviceName))
+        val result = manager.pairQrObservation(
+            attemptId,
+            resolvedPairingObservation(serviceName),
+            timeout = 25.milliseconds,
+        )
 
         assertTrue(result is AdbOperationResult.Failure)
         assertTrue((result as AdbOperationResult.Failure).error is AdbError.Timeout)
         assertEquals(material.payload, null)
-        assertTrue(factory.calls.isEmpty())
+        assertEquals(factory.calls.single().length, STANDARD_QR_PASSWORD_LENGTH)
     }
 
     @Test
@@ -212,13 +211,9 @@ class QrPairingSessionManagerTest {
         assertTrue(factory.calls.isEmpty())
     }
 
-    private fun qrManager(
-        factory: RecordingFactory,
-        clock: MutableClock = MutableClock(1_000L),
-    ): DefaultAdbSessionManager = DefaultAdbSessionManager(
+    private fun qrManager(factory: RecordingFactory): DefaultAdbSessionManager = DefaultAdbSessionManager(
         clientFactory = factory,
         ioDispatcher = Dispatchers.Unconfined,
-        qrPairingCoordinator = QrPairingCoordinator(clock, SecureRandom()),
     )
 
     private fun serviceNameFrom(material: QrPairingMaterial): String =
@@ -303,12 +298,6 @@ class QrPairingSessionManagerTest {
         override fun close() {
             closed.set(true)
         }
-    }
-
-    private class MutableClock(
-        var nowMillis: Long,
-    ) : MonotonicClock {
-        override fun nowMillis(): Long = nowMillis
     }
 
     private companion object {
