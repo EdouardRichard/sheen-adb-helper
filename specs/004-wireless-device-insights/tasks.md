@@ -238,7 +238,7 @@
 
 ### Tests first
 
-- [ ] T058 [P] [US5] 先写 Logcat parser/filter 失败测试，覆盖 threadtime 字段、UNPARSED/STDERR、level/tag/keyword/PID/process/app、非空条件 AND、10k/4MiB 淘汰和最新 100 条于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/LogcatAnalysisTest.kt`
+- [X] T058 [P] [US5] 先写 Logcat parser/filter 失败测试，覆盖 threadtime 字段、UNPARSED/STDERR、level/tag/keyword/PID/process/app、非空条件 AND、10k/4MiB 淘汰和最新 100 条于 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/LogcatAnalysisTest.kt`
   - **验收**: 目标测试因 parser/filter 缺失而失败；合成日志不含真实应用/设备信息，未知格式保留 raw text 且不伪造 PID/level/tag。
 - [ ] T059 [US5] 实现 structured Logcat parser 与组合 filter 于 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/diagnostics/StructuredLogcatParser.kt` 和 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/diagnostics/DiagnosticFilter.kt`
   - **验收**: T058 通过；所有启用条件取交集，UNKNOWN/MULTIPLE association 不作为唯一应用命中，过滤不扩大原始缓冲。
