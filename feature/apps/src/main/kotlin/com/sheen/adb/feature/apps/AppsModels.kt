@@ -2,8 +2,6 @@ package com.sheen.adb.feature.apps
 
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.ApplicationField
-import com.sheen.adb.core.ApplicationIconPayload
-import com.sheen.adb.core.ApplicationMetadataStatus
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
 
@@ -33,12 +31,6 @@ data class AppsOperationNotice(
     val outcomeUnknown: Boolean = false,
 )
 
-data class AppsApplicationMetadata(
-    val displayName: String? = null,
-    val icon: ApplicationIconPayload? = null,
-    val status: ApplicationMetadataStatus = ApplicationMetadataStatus.PENDING,
-)
-
 data class AppsUiState(
     val isConnected: Boolean = false,
     val sessionId: String? = null,
@@ -48,7 +40,7 @@ data class AppsUiState(
     val activeOperation: AppsOperation? = null,
     val activePackageName: String? = null,
     val applications: List<RemoteApplication> = emptyList(),
-    val metadataByPackage: Map<String, AppsApplicationMetadata> = emptyMap(),
+    val displayNameByPackage: Map<String, String?> = emptyMap(),
     val query: String = "",
     val filter: AppsFilter = AppsFilter.ALL,
     val degradedReason: String? = null,
@@ -62,7 +54,7 @@ data class AppsUiState(
         get() {
             val needle = query.trim()
             return applications.filter { application ->
-                val displayName = metadataByPackage[application.packageName]?.displayName
+                val displayName = displayNameByPackage[application.packageName]
                 (needle.isEmpty() ||
                     application.packageName.contains(needle, ignoreCase = true) ||
                     displayName?.contains(needle, ignoreCase = true) == true) && when (filter) {

@@ -88,6 +88,25 @@ class WirelessDiscoveryFactoryTest {
     }
 
     @Test
+    fun `factory forwards local pairing mode to a live source without shortening its window`() {
+        val source = sourceWithAdapter(adapter(TestPlatform()))
+
+        try {
+            assertSame(
+                source.start(
+                    WirelessDiscoverySourceRequest(
+                        generation = 22,
+                        mode = WirelessDiscoveryMode.LOCAL_PAIRING,
+                    ),
+                ),
+                WirelessDiscoverySourceStartResult.Started,
+            )
+        } finally {
+            source.close()
+        }
+    }
+
+    @Test
     fun `source preserves cancellation interruption and permission failures`() {
         val cancellation = CancellationException("synthetic cancellation")
         assertSame(

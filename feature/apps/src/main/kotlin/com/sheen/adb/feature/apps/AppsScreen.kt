@@ -143,24 +143,18 @@ fun AppsScreen(state: AppsUiState, actions: AppsViewModel) {
 
 @Composable
 private fun ApplicationCard(application: RemoteApplication, state: AppsUiState, actions: AppsViewModel) {
-    val presentation = AppsPresentation.present(application, state.metadataByPackage[application.packageName])
+    val displayName = state.displayNameByPackage[application.packageName]
+        ?.takeIf { it.isNotBlank() }
+        ?: "无法解析应用名"
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                ApplicationIconRenderer(
-                    icon = presentation.icon,
-                    contentDescription = "${presentation.primaryLabel} 的应用图标",
-                    modifier = Modifier.size(48.dp),
-                )
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(presentation.primaryLabel, style = MaterialTheme.typography.titleMedium)
-                    presentation.packageLabel?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-                    presentation.metadataMessage?.let {
-                        Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    Text(displayName, style = MaterialTheme.typography.titleMedium)
+                    Text(application.packageName, style = MaterialTheme.typography.bodySmall)
                 }
             }
             Text("状态：${application.enabledState.displayName()}")

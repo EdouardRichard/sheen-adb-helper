@@ -12,6 +12,7 @@ import android.os.Handler
 import android.os.Looper
 import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryEvent
+import com.sheen.adb.core.WirelessDiscoveryMode
 import com.sheen.adb.core.WirelessDiscoverySource
 import com.sheen.adb.core.WirelessDiscoverySourceFactory
 import com.sheen.adb.core.WirelessDiscoverySourceFailure
@@ -83,6 +84,7 @@ private class AndroidNsdWirelessDiscoverySource(
                     generation = request.generation,
                     apiLevel = Build.VERSION.SDK_INT,
                     currentNetwork = platform.currentNetwork(),
+                    mode = request.mode,
                 ),
             ).toSourceResult()
         } catch (error: CancellationException) {
@@ -164,7 +166,14 @@ class AndroidNsdDiscoveryAdapter(
                 if (!isActive(session)) return rejectedTerminal(session)
             }
             session.track(
-                scheduler.schedule(NsdDiscoveryPolicy.DEFAULT_LAN_DISCOVERY_CUTOFF_MILLIS) {
+                scheduler.schedule(
+                    when (request.mode) {
+                        WirelessDiscoveryMode.LAN_FOREGROUND ->
+                            NsdDiscoveryPolicy.DEFAULT_LAN_DISCOVERY_CUTOFF_MILLIS
+                        WirelessDiscoveryMode.LOCAL_PAIRING ->
+                            NsdDiscoveryPolicy.DEFAULT_LOCAL_PAIRING_CUTOFF_MILLIS
+                    },
+                ) {
                     synchronized(monitor) { if (isActive(session)) end(session) }
                 },
             )

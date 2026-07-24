@@ -7,6 +7,36 @@ import org.testng.annotations.Test
 
 class AdbCapabilityParsersTest {
     @Test
+    fun `process counter parser keeps start time and cpu ticks while skipping malformed rows`() {
+        val sample = """
+            total 4500
+            101 900 100 30
+            bad row
+            102 901 x 20
+        """.trimIndent()
+        val counters = AdbCapabilityParsers.processCounters(
+            sample,
+        )
+
+        assertEquals(AdbCapabilityParsers.totalCpuTicks(sample), 4500L)
+        assertEquals(counters[101]?.startTimeTicks, 900L)
+        assertEquals(counters[101]?.cpuTicks, 130L)
+        assertEquals(counters.size, 1)
+    }
+
+    @Test
+    fun `compact pss parser returns kib and does not substitute rss or invalid values`() {
+        val pss = AdbCapabilityParsers.compactPss(
+            """
+                101 1536
+                102 unavailable
+                rss 9999
+            """.trimIndent(),
+        )
+
+        assertEquals(pss, mapOf(101 to 1536L))
+    }
+    @Test
     fun `parses overview fields and leaves unavailable data null`() {
         val overview = AdbCapabilityParsers.overview(
             propertiesText = """

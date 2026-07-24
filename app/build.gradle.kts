@@ -70,6 +70,7 @@ dependencies {
     implementation(project(":feature:apps"))
     implementation(project(":feature:files"))
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.core)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.kotlinx.coroutines.android)

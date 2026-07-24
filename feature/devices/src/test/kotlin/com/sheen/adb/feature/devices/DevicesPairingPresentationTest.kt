@@ -47,7 +47,7 @@ internal class DevicesPairingPresentationTest {
 
         assertTrue(presentation.showCodeInputs)
         assertTrue(presentation.submitCodeEnabled.not())
-        assertTrue(presentation.guidance.contains("被控端显示的 6 位配对码"))
+        assertTrue(presentation.guidance.contains("\u8bf7\u5f00\u542f\u65e0\u7ebf\u8c03\u8bd5\u3002"))
 
         val ready = DevicesPairingState(
             method = PairingMethod.SIX_DIGIT_CODE,
@@ -55,6 +55,20 @@ internal class DevicesPairingPresentationTest {
             codeInput = "0".repeat(6),
         ).toPresentation()
         assertTrue(ready.submitCodeEnabled)
+    }
+
+    @Test
+    fun `local pairing presentation uses fixed prompts and minimal controls`() {
+        val waiting = DevicesPairingState(
+            method = PairingMethod.SIX_DIGIT_CODE,
+            phase = PairingAttemptPhase.WAITING_FOR_CODE,
+        ).toPresentation()
+
+        assertTrue(waiting.guidance.contains("\u8bf7\u5f00\u542f\u65e0\u7ebf\u8c03\u8bd5\u3002"))
+        assertTrue(waiting.guidance.contains("\u5df2\u68c0\u6d4b\u5230\u914d\u5bf9\u7aef\u53e3\uff0c\u8bf7\u8f93\u5165\u914d\u5bf9\u7801\uff1a"))
+        assertTrue(waiting.showCodeInputs)
+        assertTrue(waiting.showCancel)
+        assertFalse(waiting.guidance.contains("000000"))
     }
 
     @Test

@@ -55,6 +55,8 @@ class ApplicationSessionManagerTest {
         val accepted = manager.forceStopApplication("com.example.client", snapshot.sessionId)
         assertTrue(accepted is AdbOperationResult.Success)
         assertTrue((accepted as AdbOperationResult.Success).value is ApplicationMutationResult.RequestAccepted)
+        assertEquals(client.commands.count { it == "am force-stop --user 0 com.example.client" }, 1)
+        assertTrue(client.commands.none { it.startsWith("kill ") })
     }
 
     @Test

@@ -34,5 +34,14 @@
             android:name=".localpairing.LocalPairingForegroundService"
             android:exported="false"
             android:foregroundServiceType="shortService" />
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.logcat.share"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/logcat_share_paths" />
+        </provider>
     </application>
 </manifest>

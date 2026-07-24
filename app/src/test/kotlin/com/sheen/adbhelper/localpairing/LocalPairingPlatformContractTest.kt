@@ -154,6 +154,20 @@ internal class LocalPairingPlatformContractTest {
         assertFalse(source.contains("START_STICKY"))
     }
 
+    @Test
+    fun `service uses exact v005 notification copy and exposes stop action`() {
+        val source = String(
+            Files.readAllBytes(
+                Path.of("src/main/kotlin/com/sheen/adbhelper/localpairing/LocalPairingForegroundService.kt"),
+            ),
+        )
+
+        assertTrue(source.contains("请开启无线调试。"))
+        assertTrue(source.contains("已检测到配对端口，请输入配对码："))
+        assertTrue(source.contains("停止"))
+        assertTrue(source.contains("ACTION_STOP"))
+    }
+
     private fun assertRejected(
         policy: LocalPairingPlatformPolicy,
         windowActive: Boolean = true,

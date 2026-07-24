@@ -39,7 +39,7 @@ class AppUiPolicyTest {
     fun `application management is ordered after overview and is connection dependent`() {
         assertEquals(
             Destination.entries.map { it.label },
-            listOf("设备列表 / 首页", "设备概览", "文件浏览", "应用管理", "Shell 终端", "进程监控", "Logcat", "设置与隐私"),
+            listOf("设备列表 / 首页", "设备概览", "文件浏览", "应用管理", "Shell 终端", "进程管理", "Logcat", "设置与隐私"),
         )
         assertTrue(Destination.APPS.requiresConnection)
         assertFalse(isMenuEnabled(Destination.APPS.requiresConnection, connected = false))
@@ -56,7 +56,7 @@ class AppUiPolicyTest {
     fun `file browser destination is connection dependent and existing destinations retain semantics`() {
         assertEquals(
             Destination.entries.map { it.label },
-            listOf("设备列表 / 首页", "设备概览", "文件浏览", "应用管理", "Shell 终端", "进程监控", "Logcat", "设置与隐私"),
+            listOf("设备列表 / 首页", "设备概览", "文件浏览", "应用管理", "Shell 终端", "进程管理", "Logcat", "设置与隐私"),
         )
         assertTrue(Destination.FILES.requiresConnection)
         assertEquals(
@@ -109,6 +109,17 @@ class AppUiPolicyTest {
     fun `real background stop cancels but configuration stop retains file task`() {
         assertTrue(shouldCancelFileTasksOnStop(isChangingConfigurations = false))
         assertFalse(shouldCancelFileTasksOnStop(isChangingConfigurations = true))
+    }
+
+    @Test
+    fun `device home does not expose removed diagnostic event action`() {
+        val source = String(
+            Files.readAllBytes(
+                Path.of("../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt"),
+            ),
+        )
+        assertFalse(source.contains("脱敏诊断事件"))
+        assertFalse(source.contains("诊断事件"))
     }
 
 }

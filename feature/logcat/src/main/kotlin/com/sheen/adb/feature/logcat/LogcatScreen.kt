@@ -3,6 +3,8 @@ package com.sheen.adb.feature.logcat
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.FileProvider
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -34,10 +36,6 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sheen.adb.core.LogcatBuffer
 import com.sheen.adb.core.LogcatLevel
-import com.sheen.adb.core.ProcessApplicationAssociation
-import com.sheen.adb.core.StructuredLogcatKind
-import com.sheen.adb.core.StructuredLogcatLevel
-import com.sheen.adb.core.StructuredLogcatRecord
 import com.sheen.adb.ui.SheenDimensions
 
 enum class LogcatFilterControl { LEVEL, TAG, KEYWORD, PID, PROCESS, APPLICATION }
@@ -61,22 +59,11 @@ data class LogcatVisibleTransfer(
 )
 
 object LogcatPresentationPolicy {
-    val controls: List<LogcatFilterControl> = listOf(
-        LogcatFilterControl.LEVEL,
-        LogcatFilterControl.TAG,
-        LogcatFilterControl.KEYWORD,
-        LogcatFilterControl.PID,
-        LogcatFilterControl.PROCESS,
-        LogcatFilterControl.APPLICATION,
-    )
+    val controls: List<LogcatFilterControl> = emptyList()
 
     fun labels(): List<String> = listOf("日志等级", "标签", "关键字", "PID", "进程", "应用")
 
-    fun filterSummary(filter: LogcatAnalysisFilter): String = when (filter.activeCount) {
-        0 -> "未启用结果筛选"
-        1 -> "已启用 1 项筛选"
-        else -> "已启用 ${filter.activeCount} 项筛选，条件按 AND 同时满足"
-    }
+    fun filterSummary(filter: LogcatAnalysisFilter): String = "日志提取模式，不进行应用内分析或筛选"
 
     fun status(state: LogcatUiState): LogcatPresentationStatus = when {
         !state.isConnected -> LogcatPresentationStatus.DISCONNECTED
@@ -127,8 +114,8 @@ fun LogcatScreen(state: LogcatUiState, actions: LogcatViewModel) {
     val createDocument = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         uri?.let(actions::export)
     }
-    LaunchedEffect(state.visibleRecords.size, state.visibleRecords.lastOrNull()?.sequence) {
-        if (state.visibleRecords.isNotEmpty() && !state.isPaused) listState.scrollToItem(state.visibleRecords.size)
+    LaunchedEffect(state.visibleLines.size) {
+        if (state.visibleLines.isNotEmpty()) listState.scrollToItem(state.visibleLines.size)
     }
     LazyColumn(
         Modifier.padding(SheenDimensions.screenPadding),
@@ -137,17 +124,14 @@ fun LogcatScreen(state: LogcatUiState, actions: LogcatViewModel) {
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(SheenDimensions.itemSpacing)) {
-                Text("Logcat 基础分析", style = MaterialTheme.typography.headlineSmall)
-                Text("仅在本页前台且你点击“开始”后采集；离开页面立即停止并清除临时分析。")
+                Text("Logcat 日志提取", style = MaterialTheme.typography.headlineSmall)
+                Text("仅在本页前台且你点击“开始”后采集；日志只在当前进程内有界保留。")
                 if (!state.isConnected) Text("请先连接设备")
                 CaptureControls(state, actions)
-                AnalysisFilters(state, actions)
-                Text(LogcatPresentationPolicy.filterSummary(state.filter))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (!state.isCapturing) Button(actions::start, enabled = state.isConnected) { Text("开始") }
                     if (state.isCapturing) {
                         Button(actions::stop) { Text("停止") }
-                        OutlinedButton(actions::togglePause) { Text(if (state.isPaused) "继续" else "暂停") }
                     }
                     OutlinedButton(actions::clear) { Text("清屏") }
                 }
@@ -160,18 +144,36 @@ fun LogcatScreen(state: LogcatUiState, actions: LogcatViewModel) {
                         onClick = { createDocument.launch("sheen-logcat.txt") },
                         enabled = transfer.enabled,
                     ) { Text("导出当前可见") }
+                    OutlinedButton(
+                        onClick = {
+                            actions.prepareShareFile()?.let { file ->
+                                val uri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.logcat.share",
+                                    file,
+                                )
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "发送日志文件"))
+                            }
+                        },
+                        enabled = transfer.enabled,
+                    ) { Text("分享日志文件") }
                 }
                 PresentationStatus(state)
-                Text("界面只展示当前组合条件下最新 100 条；原始缓冲限制为 10,000 行或 4 MiB。")
-                state.processDegradedReason?.let { Text("进程关联降级：$it") }
+                Text("本版本不提供日志筛选、进程关联或分析，仅提取原始文本。")
                 state.exportNotice?.let { Text(it) }
                 state.error?.let { Text("${it.userMessage} ${it.nextStep}", color = MaterialTheme.colorScheme.error) }
             }
         }
-        items(
-            items = state.visibleRecords,
-            key = { "${it.snapshotGeneration}:${it.sequence}" },
-        ) { record -> StructuredRecordCard(record) }
+        items(state.visibleLines) { line ->
+            Card(Modifier.fillMaxWidth()) {
+                Text(line, Modifier.padding(10.dp), style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
@@ -202,62 +204,12 @@ private fun CaptureControls(state: LogcatUiState, actions: LogcatViewModel) {
 }
 
 @Composable
-private fun AnalysisFilters(state: LogcatUiState, actions: LogcatViewModel) {
-    Text("结果等级筛选（可多选）")
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        StructuredLogcatLevel.entries.forEach { level ->
-            FilterChip(
-                selected = level in state.levels,
-                onClick = { actions.toggleAnalysisLevel(level) },
-                label = { Text(level.shortName()) },
-            )
-        }
-    }
-    OutlinedTextField(
-        value = state.tagQuery,
-        onValueChange = actions::updateTagQuery,
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("标签") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = state.keyword,
-        onValueChange = actions::updateKeyword,
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("关键字") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = state.pidQuery,
-        onValueChange = actions::updatePidQuery,
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("PID") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = state.processQuery,
-        onValueChange = actions::updateProcessQuery,
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("进程名") },
-        singleLine = true,
-    )
-    OutlinedTextField(
-        value = state.applicationQuery,
-        onValueChange = actions::updateApplicationQuery,
-        modifier = Modifier.fillMaxWidth(),
-        label = { Text("可靠关联应用包名") },
-        singleLine = true,
-    )
-    OutlinedButton(actions::clearFilters, enabled = state.filter.activeCount > 0) { Text("清除全部筛选") }
-}
-
-@Composable
 private fun PresentationStatus(state: LogcatUiState) {
     val message = when (LogcatPresentationPolicy.status(state)) {
         LogcatPresentationStatus.DISCONNECTED -> "诊断未连接"
-        LogcatPresentationStatus.LOADING -> "正在获取当前进程快照…"
-        LogcatPresentationStatus.ACTIVE -> "正在显示 ${state.visibleRecords.size} 条当前匹配记录"
-        LogcatPresentationStatus.EMPTY -> "当前没有匹配的 Logcat"
+        LogcatPresentationStatus.LOADING -> "正在准备日志提取"
+        LogcatPresentationStatus.ACTIVE -> "正在显示 ${state.visibleRecords.size} 条原始日志"
+        LogcatPresentationStatus.EMPTY -> "当前没有日志"
         LogcatPresentationStatus.TRUNCATED -> "已达到有界缓冲上限，最早记录已淘汰"
         LogcatPresentationStatus.PARSE_DEGRADED -> "部分记录无法按 threadtime 解析，已保留原始文本"
         LogcatPresentationStatus.STOPPED -> "采集已停止；当前可见内容仍可由你复制或导出"
@@ -274,28 +226,6 @@ private fun PresentationStatus(state: LogcatUiState) {
 }
 
 @Composable
-private fun StructuredRecordCard(record: StructuredLogcatRecord) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-            val header = if (record.kind == StructuredLogcatKind.PARSED) {
-                "${record.level?.name ?: "?"}/${record.tag ?: "无标签"} · PID ${record.pid ?: "未知"}"
-            } else {
-                if (record.kind == StructuredLogcatKind.STDERR) "STDERR 原始记录" else "未解析原始记录"
-            }
-            Text(header, style = MaterialTheme.typography.labelLarge)
-            record.processName?.let { Text("进程：$it") }
-            Text(associationLabel(record.applicationAssociation))
-            Text(record.message ?: record.rawText, style = MaterialTheme.typography.bodySmall)
-        }
-    }
-}
-
-private fun associationLabel(value: ProcessApplicationAssociation): String = when (value) {
-    is ProcessApplicationAssociation.Verified -> "应用：${value.packageName}（可靠关联）"
-    is ProcessApplicationAssociation.Multiple -> "应用归属不唯一（共享 UID）"
-    is ProcessApplicationAssociation.Unknown -> "应用归属未知"
-}
-
 private fun LogcatLevel.displayName(): String = when (this) {
     LogcatLevel.VERBOSE -> "详细 V"
     LogcatLevel.DEBUG -> "调试 D"
@@ -303,16 +233,6 @@ private fun LogcatLevel.displayName(): String = when (this) {
     LogcatLevel.WARN -> "警告 W"
     LogcatLevel.ERROR -> "错误 E"
     LogcatLevel.FATAL -> "致命 F"
-}
-
-private fun StructuredLogcatLevel.shortName(): String = when (this) {
-    StructuredLogcatLevel.VERBOSE -> "V"
-    StructuredLogcatLevel.DEBUG -> "D"
-    StructuredLogcatLevel.INFO -> "I"
-    StructuredLogcatLevel.WARN -> "W"
-    StructuredLogcatLevel.ERROR -> "E"
-    StructuredLogcatLevel.FATAL -> "F"
-    StructuredLogcatLevel.ASSERT -> "A"
 }
 
 private fun copy(context: Context, label: String, value: String) {

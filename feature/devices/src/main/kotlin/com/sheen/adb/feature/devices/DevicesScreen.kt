@@ -45,8 +45,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.sheen.adb.core.AdbConnectionState
-import com.sheen.adb.core.AdbDiagnosticEvent
-import com.sheen.adb.core.AdbDiagnosticOutcome
 import com.sheen.adb.core.LocalPairingDiscoveryStatus
 import com.sheen.adb.core.LocalPairingNotificationState
 import com.sheen.adb.core.PairingMethod
@@ -157,10 +155,6 @@ internal fun DevicesScreen(
         Text("最近设备", style = MaterialTheme.typography.titleLarge)
         if (state.profiles.isEmpty()) Text("暂无设备档案。应用不会自动扫描局域网。")
         state.profiles.forEach { profile -> ProfileCard(profile, actions) }
-        OutlinedButton(onClick = actions::toggleDiagnostics) {
-            Text(if (state.showDiagnostics) "收起脱敏诊断事件" else "查看脱敏诊断事件（${state.diagnosticEvents.size}）")
-        }
-        if (state.showDiagnostics) DiagnosticsCard(state.diagnosticEvents, actions::clearDiagnostics)
     }
     val pairingPresentation = pairingState.toPresentation()
     if (pairingPresentation.showSessionReplacementConfirmation) {
@@ -379,27 +373,6 @@ private fun QrMatrixImage(
                     )
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun DiagnosticsCard(events: List<AdbDiagnosticEvent>, onClear: () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text("当前进程最近 100 条；不含真实地址、命令、输出、密钥或配对码。")
-            if (events.isEmpty()) Text("暂无诊断事件")
-            events.forEach { event ->
-                val outcome = when (event.outcome) {
-                    AdbDiagnosticOutcome.STARTED -> "开始"
-                    AdbDiagnosticOutcome.SUCCEEDED -> "成功"
-                    AdbDiagnosticOutcome.CANCELLED -> "取消"
-                    AdbDiagnosticOutcome.FAILED -> "失败"
-                    AdbDiagnosticOutcome.RESOURCE_CLOSED -> "资源关闭"
-                }
-                Text("#${event.sequence} ${event.stage} · $outcome · ${event.technicalCode}", style = MaterialTheme.typography.bodySmall)
-            }
-            OutlinedButton(onClick = onClear) { Text("清空") }
         }
     }
 }

@@ -54,6 +54,23 @@ internal class LocalPairingNotificationPolicyTest {
     }
 
     @Test
+    fun `deadline immediately becomes a terminal notification without an input action`() {
+        val decision = policy.decide(
+            window = liveWindow(),
+            nowMillis = 120_000L,
+            deviceUnlocked = true,
+            capability = LocalPairingNotificationCapability.AVAILABLE,
+        )
+
+        assertEquals(decision.state, LocalPairingNotificationState.RESULT)
+        assertEquals(decision.stopReason, LocalPairingStopReason.DEADLINE_REACHED)
+        assertFalse(decision.inputActionAvailable)
+        assertFalse(decision.submitAllowed)
+        assertNull(decision.actionWindowId)
+        assertFalse(decision.applicationInputAvailable)
+    }
+
+    @Test
     fun `permission notification and OEM restrictions keep application fallback`() {
         val permissionDenied = policy.decide(
             liveWindow(),

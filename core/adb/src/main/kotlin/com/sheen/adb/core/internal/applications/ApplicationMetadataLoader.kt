@@ -1,6 +1,5 @@
 package com.sheen.adb.core.internal.applications
 
-import java.util.LinkedHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -23,27 +22,18 @@ internal data class ApplicationMetadataLoadUpdate(
     val packageName: String,
     val status: ApplicationMetadataLoadStatus,
     val metadata: ParsedApplicationMetadata? = null,
-    val evictedIconPackages: Set<String> = emptySet(),
 )
 
-/** Sequential, current-session-only metadata enrichment with an in-memory icon LRU. */
+/** Sequential, current-session-only application label enrichment. */
 internal class ApplicationMetadataLoader(
     private val reader: RemoteApkReader,
     private val parseMetadata: (ByteArray, List<String>) -> ApplicationMetadataParseResult =
         ApplicationMetadataParser()::parse,
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     private val batchTimeout: Duration = 10.seconds,
-    private val iconCacheMaximumBytes: Long = 16L * 1024 * 1024,
 ) {
-    private data class CacheKey(val sessionId: String, val userId: Int, val packageName: String)
-
-    private val cacheLock = Any()
-    private val iconCache = LinkedHashMap<CacheKey, ParsedApplicationIcon>(16, 0.75f, true)
-    private var iconCacheBytes = 0L
-
     init {
         require(batchTimeout.isPositive())
-        require(iconCacheMaximumBytes >= MAX_APPLICATION_ICON_BYTES)
     }
 
     fun load(
@@ -103,26 +93,8 @@ internal class ApplicationMetadataLoader(
         }
     }
 
-    fun clear() = synchronized(cacheLock) {
-        iconCache.clear()
-        iconCacheBytes = 0L
-    }
-
-    fun retainSession(sessionId: String) = synchronized(cacheLock) {
-        val iterator = iconCache.entries.iterator()
-        while (iterator.hasNext()) {
-            val entry = iterator.next()
-            if (entry.key.sessionId != sessionId) {
-                iconCacheBytes -= entry.value.encodedBytes.size
-                iterator.remove()
-            }
-        }
-    }
-
-    internal fun cachedIconBytes(): Long = synchronized(cacheLock) { iconCacheBytes }
-
-    internal fun hasCachedIcon(sessionId: String, userId: Int, packageName: String): Boolean =
-        synchronized(cacheLock) { iconCache.containsKey(CacheKey(sessionId, userId, packageName)) }
+    fun clear() = Unit
+    fun retainSession(sessionId: String) = Unit
 
     private suspend fun kotlinx.coroutines.flow.FlowCollector<ApplicationMetadataLoadUpdate>.emitParsed(
         sessionId: String,
@@ -152,41 +124,13 @@ internal class ApplicationMetadataLoader(
                     emit(update(sessionId, userId, packageName, ApplicationMetadataLoadStatus.PARSE_FAILED))
                     return
                 }
-                val key = CacheKey(sessionId, userId, packageName)
-                val oversizedIcon = parsed.metadata.icon?.encodedBytes?.size?.let {
-                    it > MAX_APPLICATION_ICON_BYTES
-                } == true
-                val metadata = if (oversizedIcon) parsed.metadata.copy(icon = null) else parsed.metadata
-                val evicted = if (metadata.icon != null) cacheIcon(key, metadata.icon) else removeCachedIcon(key)
                 val status = when {
-                    oversizedIcon -> ApplicationMetadataLoadStatus.TOO_LARGE
-                    metadata.displayName == null && metadata.icon == null -> ApplicationMetadataLoadStatus.UNAVAILABLE
+                    parsed.metadata.displayName == null -> ApplicationMetadataLoadStatus.UNAVAILABLE
                     else -> ApplicationMetadataLoadStatus.AVAILABLE
                 }
-                emit(update(sessionId, userId, packageName, status, metadata, evicted))
+                emit(update(sessionId, userId, packageName, status, parsed.metadata))
             }
         }
-    }
-
-    private fun cacheIcon(key: CacheKey, icon: ParsedApplicationIcon): Set<String> = synchronized(cacheLock) {
-        iconCache.remove(key)?.let { iconCacheBytes -= it.encodedBytes.size }
-        val retained = icon.copy(encodedBytes = icon.encodedBytes.copyOf())
-        iconCache[key] = retained
-        iconCacheBytes += retained.encodedBytes.size
-        val evicted = linkedSetOf<String>()
-        val iterator = iconCache.entries.iterator()
-        while (iconCacheBytes > iconCacheMaximumBytes && iterator.hasNext()) {
-            val eldest = iterator.next()
-            iconCacheBytes -= eldest.value.encodedBytes.size
-            evicted += eldest.key.packageName
-            iterator.remove()
-        }
-        evicted
-    }
-
-    private fun removeCachedIcon(key: CacheKey): Set<String> = synchronized(cacheLock) {
-        iconCache.remove(key)?.let { iconCacheBytes -= it.encodedBytes.size }
-        emptySet()
     }
 
     private fun update(
@@ -195,8 +139,7 @@ internal class ApplicationMetadataLoader(
         packageName: String,
         status: ApplicationMetadataLoadStatus,
         metadata: ParsedApplicationMetadata? = null,
-        evicted: Set<String> = emptySet(),
-    ) = ApplicationMetadataLoadUpdate(sessionId, userId, packageName, status, metadata, evicted)
+    ) = ApplicationMetadataLoadUpdate(sessionId, userId, packageName, status, metadata)
 
     private fun RemoteApkReadFailure.toLoadStatus(): ApplicationMetadataLoadStatus = when (this) {
         RemoteApkReadFailure.UNAVAILABLE,

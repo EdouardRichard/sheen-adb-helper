@@ -16,6 +16,14 @@ internal object AdbCommands {
     const val NETWORK = "ip -o addr show scope global"
     const val PROCESSES_EXTENDED = "ps -A -o USER,PID,PPID,VSZ,RSS,S,NAME"
     const val PROCESSES_FALLBACK = "ps -A"
+    val PROCESS_COUNTERS =
+        "awk '/^cpu /{s=0; for(i=2;i<=NF;i++) s+=${'$'}i; print \"total\",s; exit}' /proc/stat; " +
+            "for d in /proc/[0-9]*; do p=${'$'}{d##*/}; r=${'$'}(cat \"${'$'}d/stat\" 2>/dev/null) || continue; " +
+            "r=${'$'}{r##*) }; set -- ${'$'}r; echo \"${'$'}p ${'$'}20 ${'$'}12 ${'$'}13\"; done"
+    val PROCESS_PSS =
+        "for d in /proc/[0-9]*; do p=${'$'}{d##*/}; " +
+            "v=${'$'}(awk '/^Pss:/{print ${'$'}2; exit}' \"${'$'}d/smaps_rollup\" 2>/dev/null); " +
+            "[ -n \"${'$'}v\" ] && echo \"${'$'}p ${'$'}v\"; done"
 
     fun logcat(config: LogcatConfig): String = buildString {
         append("logcat -v threadtime")
@@ -25,6 +33,42 @@ internal object AdbCommands {
 }
 
 internal object AdbCapabilityParsers {
+    data class ProcessCounter(
+        val startTimeTicks: Long,
+        val cpuTicks: Long,
+    )
+
+    fun totalCpuTicks(text: String): Long? = text.lineSequence()
+        .map { it.trim().split(Regex("\\s+")) }
+        .firstOrNull { it.size == 2 && it[0] == "total" }
+        ?.get(1)
+        ?.toLongOrNull()
+        ?.takeIf { it >= 0L }
+
+    fun processCounters(text: String): Map<Int, ProcessCounter> = buildMap {
+        text.lineSequence().forEach { line ->
+            val fields = line.trim().split(Regex("\\s+"))
+            if (fields.size != PROCESS_COUNTER_FIELDS) return@forEach
+            val pid = fields[0].toIntOrNull()?.takeIf { it > 0 } ?: return@forEach
+            val startTime = fields[1].toLongOrNull()?.takeIf { it >= 0L } ?: return@forEach
+            val userTicks = fields[2].toLongOrNull()?.takeIf { it >= 0L } ?: return@forEach
+            val systemTicks = fields[3].toLongOrNull()?.takeIf { it >= 0L } ?: return@forEach
+            val total = userTicks.takeIf { it <= Long.MAX_VALUE - systemTicks }?.plus(systemTicks)
+                ?: return@forEach
+            put(pid, ProcessCounter(startTime, total))
+        }
+    }
+
+    fun compactPss(text: String): Map<Int, Long> = buildMap {
+        text.lineSequence().forEach { line ->
+            val fields = line.trim().split(Regex("\\s+"))
+            if (fields.size != COMPACT_PSS_FIELDS) return@forEach
+            val pid = fields[0].toIntOrNull()?.takeIf { it > 0 } ?: return@forEach
+            val pssKiB = fields[1].toLongOrNull()?.takeIf { it >= 0L } ?: return@forEach
+            put(pid, pssKiB)
+        }
+    }
+
     fun overview(
         propertiesText: String,
         memoryText: String,
@@ -148,4 +192,7 @@ internal object AdbCapabilityParsers {
     private fun parseNetworkAddresses(text: String): List<String> = text.lineSequence().mapNotNull { line ->
         Regex("\\binet6?\\s+([^\\s/]+)").find(line)?.groupValues?.get(1)
     }.filterNot { it == "127.0.0.1" || it == "::1" }.distinct().toList()
+
+    private const val PROCESS_COUNTER_FIELDS = 4
+    private const val COMPACT_PSS_FIELDS = 2
 }

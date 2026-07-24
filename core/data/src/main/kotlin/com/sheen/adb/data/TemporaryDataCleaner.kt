@@ -22,6 +22,16 @@ class SafTemporaryDataCleaner(
     }
 }
 
+class LogcatShareTemporaryDataCleaner(
+    private val store: LogcatShareFileStore,
+    private val nowMillis: () -> Long = { System.currentTimeMillis() },
+) : TemporaryDataCleaner {
+    override suspend fun clear(): Boolean {
+        store.cleanupExpired(nowMillis())
+        return true
+    }
+}
+
 class AppTemporaryDataCleaner(context: Context) : TemporaryDataCleaner {
     private val cacheDirectory = context.applicationContext.cacheDir
     private val codeCacheDirectory = context.applicationContext.codeCacheDir

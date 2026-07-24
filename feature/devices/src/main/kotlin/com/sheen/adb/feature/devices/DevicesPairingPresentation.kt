@@ -26,7 +26,7 @@ internal fun DevicesPairingState.toPresentation(): DevicesPairingPresentation {
         title = "无线调试配对",
         guidance = when (method) {
             PairingMethod.QR -> "在被控端打开系统“无线调试”，由被控端系统扫描这里显示的临时二维码。"
-            PairingMethod.SIX_DIGIT_CODE -> "在被控端选择“使用配对码配对设备”，输入被控端显示的 6 位配对码和配对端口。"
+            PairingMethod.SIX_DIGIT_CODE -> "请开启无线调试。已检测到配对端口，请输入配对码："
             PairingMethod.NONE -> "选择二维码或 6 位配对码方式；配对成功只建立授权，之后仍需确认连接。"
         },
         statusText = if (invalidCode) {

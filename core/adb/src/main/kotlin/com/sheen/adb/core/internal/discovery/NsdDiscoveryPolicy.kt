@@ -2,12 +2,14 @@ package com.sheen.adb.core.internal.discovery
 
 import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryEvent
+import com.sheen.adb.core.WirelessDiscoveryMode
 import java.util.Collections
 
 data class NsdDiscoveryRequest(
     val generation: Long,
     val apiLevel: Int,
     val currentNetwork: NsdNetworkRef?,
+    val mode: WirelessDiscoveryMode = WirelessDiscoveryMode.LAN_FOREGROUND,
 )
 
 data class NsdNetworkRef(val value: String) {
@@ -174,6 +176,7 @@ class NsdDiscoveryPolicy {
 
     companion object {
         const val DEFAULT_LAN_DISCOVERY_CUTOFF_MILLIS: Long = 10_000L
+        const val DEFAULT_LOCAL_PAIRING_CUTOFF_MILLIS: Long = 120_000L
         const val NETWORK_BOUND_DISCOVERY_API: Int = 33
         const val ALL_ADDRESSES_API: Int = 34
         val APPROVED_SERVICE_TYPES: Set<String> = setOf(

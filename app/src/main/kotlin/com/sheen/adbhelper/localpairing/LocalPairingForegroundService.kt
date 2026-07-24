@@ -153,6 +153,7 @@ class LocalPairingForegroundService : Service() {
         startForegroundImmediately()
         when (intent?.action) {
             ACTION_SUBMIT_CODE -> handleRemoteInput(intent)
+            ACTION_STOP -> handleStop(intent)
             ACTION_NOTIFICATION_CLEARED -> {
                 notificationCleared = true
                 render(controller.state.value)
@@ -182,7 +183,7 @@ class LocalPairingForegroundService : Service() {
 
     private fun startForegroundImmediately() {
         if (foregroundStarted) return
-        val notification = baseNotification("正在准备本机无线配对", includeInputAction = false).build()
+        val notification = baseNotification("请开启无线调试。", includeInputAction = false).build()
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                 NOTIFICATION_ID,
@@ -220,10 +221,10 @@ class LocalPairingForegroundService : Service() {
         }
         if (plan.registerUserPresentReceiver) registerUserPresentReceiver() else unregisterUserPresentReceiver()
         val text = when {
-            plan.showRemoteInput -> "已发现本机配对端口，可在此输入 6 位配对码"
+            plan.showRemoteInput -> "已检测到配对端口，请输入配对码："
             plan.suggestNativeNotificationStyle -> "通知内输入不可用，请回到应用输入；可尝试系统原生通知样式"
             keyguardManager.isDeviceLocked -> "本机无线配对进行中，解锁后可继续输入"
-            else -> "正在等待本机无线调试配对端口"
+            else -> "请开启无线调试。"
         }
         notificationManager.notify(
             NOTIFICATION_ID,
@@ -254,7 +255,27 @@ class LocalPairingForegroundService : Service() {
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setDeleteIntent(notificationClearedIntent())
-            .also { builder -> if (includeInputAction) builder.addAction(remoteInputAction()) }
+            .also { builder ->
+                builder.addAction(stopAction())
+                if (includeInputAction) builder.addAction(remoteInputAction())
+            }
+    }
+
+    private fun stopAction(): Notification.Action {
+        val intent = Intent(this, LocalPairingForegroundService::class.java)
+            .setAction(ACTION_STOP)
+            .putExtra(EXTRA_PLATFORM_TOKEN, activePlatformToken)
+        val pendingIntent = PendingIntent.getService(
+            this,
+            STOP_REQUEST_CODE,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+            "停止",
+            pendingIntent,
+        ).build()
     }
 
     private fun remoteInputAction(): Notification.Action {
@@ -312,6 +333,13 @@ class LocalPairingForegroundService : Service() {
         serviceScope.launch {
             controller.submit(activeWindow.windowId, secret)
         }
+    }
+
+    private fun handleStop(intent: Intent) {
+        val token = intent.getStringExtra(EXTRA_PLATFORM_TOKEN)
+        if (token != null && token != activePlatformToken) return
+        controller.state.value.window?.windowId?.let(controller::cancel)
+        stopAndRemoveNotification()
     }
 
     private fun ensurePlatformToken(windowId: LocalPairingWindowId) {
@@ -373,7 +401,9 @@ class LocalPairingForegroundService : Service() {
         const val CHANNEL_ID = "local_pairing"
         const val NOTIFICATION_ID = 4102
         const val NOTIFICATION_CLEARED_REQUEST_CODE = 4103
+        const val STOP_REQUEST_CODE = 4104
         const val ACTION_SUBMIT_CODE = "com.sheen.adbhelper.localpairing.SUBMIT_CODE"
+        const val ACTION_STOP = "com.sheen.adbhelper.localpairing.STOP"
         const val ACTION_NOTIFICATION_CLEARED = "com.sheen.adbhelper.localpairing.NOTIFICATION_CLEARED"
         const val EXTRA_PLATFORM_TOKEN = "platform_token"
         const val REMOTE_INPUT_KEY = "pairing_code"

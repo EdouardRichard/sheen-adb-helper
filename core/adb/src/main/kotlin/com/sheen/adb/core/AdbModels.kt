@@ -514,6 +514,58 @@ data class ProcessAnalysisSnapshot(
     val degradedReason: String? = null,
 )
 
+enum class ProcessFieldState { AVAILABLE, CALCULATING, UNKNOWN }
+
+data class ProcessIdentity(
+    val sessionId: String,
+    val pid: Int,
+    val startTimeTicks: Long?,
+    val uid: String?,
+    val processName: String,
+    val observedGeneration: Long,
+)
+
+data class ProcessSnapshotEntry(
+    val identity: ProcessIdentity,
+    val applicationName: String = "无法解析应用名",
+    val applicationPackage: String? = null,
+    val cpuPercent: Double? = null,
+    val cpuState: ProcessFieldState = if (cpuPercent == null) ProcessFieldState.UNKNOWN else ProcessFieldState.AVAILABLE,
+    val pssMiB: Double? = null,
+    val pssState: ProcessFieldState = if (pssMiB == null) ProcessFieldState.UNKNOWN else ProcessFieldState.AVAILABLE,
+    val parentPid: Int? = null,
+) {
+    val pid: Int get() = identity.pid
+    val processName: String get() = identity.processName
+}
+
+enum class ProcessTerminationScope { SINGLE_PROCESS, WHOLE_APPLICATION_FORCE_STOP }
+
+data class ProcessTerminationRequest(
+    val requestId: String,
+    val sessionId: String,
+    val scope: ProcessTerminationScope,
+    val targetProcess: ProcessIdentity,
+    val targetPackage: String? = null,
+    val confirmedProcessSet: Set<ProcessIdentity> = emptySet(),
+    val riskAcknowledged: Boolean,
+    val forceStopImpactAcknowledged: Boolean = false,
+)
+
+enum class ProcessTerminationOutcome {
+    TERMINATED, PARTIAL, ALREADY_EXITED, POLICY_REJECTED, UNSUPPORTED,
+    IDENTITY_CHANGED, UNKNOWN, CANCELLED, TIMED_OUT, DISCONNECTED,
+}
+
+data class ProcessTerminationResult(
+    val sessionId: String,
+    val scope: ProcessTerminationScope,
+    val outcome: ProcessTerminationOutcome,
+    val verifiedTerminated: Set<ProcessIdentity> = emptySet(),
+    val remaining: Set<ProcessIdentity> = emptySet(),
+    val messageCode: String,
+)
+
 data class ProcessRecordAssociation(
     val processName: String?,
     val applicationAssociation: ProcessApplicationAssociation,

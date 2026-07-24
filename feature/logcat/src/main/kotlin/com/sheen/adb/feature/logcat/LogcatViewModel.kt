@@ -9,10 +9,9 @@ import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLevel
-import com.sheen.adb.core.StructuredLogcatKind
 import com.sheen.adb.core.StructuredLogcatLevel
-import com.sheen.adb.core.StructuredLogcatRecord
 import com.sheen.adb.data.TextExporter
+import com.sheen.adb.data.LogcatShareFileStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 enum class LogcatAnalysisStatus {
     DISCONNECTED,
@@ -50,7 +50,7 @@ data class LogcatUiState(
     val pidQuery: String = "",
     val processQuery: String = "",
     val applicationQuery: String = "",
-    val visibleRecords: List<StructuredLogcatRecord> = emptyList(),
+    val visibleRecords: List<String> = emptyList(),
     val visibleLines: List<String> = emptyList(),
     val droppedOldest: Boolean = false,
     val parseDegraded: Boolean = false,
@@ -66,8 +66,9 @@ data class LogcatUiState(
 class LogcatViewModel(
     private val manager: AdbSessionManager,
     private val exporter: TextExporter,
+    private val shareStore: LogcatShareFileStore? = null,
 ) : ViewModel() {
-    private var window: LogcatAnalysisWindow? = null
+    private val rawBuffer = LogcatBuffer(maxBytes = 10 * 1024 * 1024)
     private val mutableState = MutableStateFlow(LogcatUiState())
     val state: StateFlow<LogcatUiState> = mutableState.asStateFlow()
     private var capture: Job? = null
@@ -108,30 +109,13 @@ class LogcatViewModel(
         }
     }
 
-    fun toggleAnalysisLevel(value: StructuredLogcatLevel) = updateFilter { current ->
-        current.copy(levels = if (value in current.levels) current.levels - value else current.levels + value)
-    }
-
-    fun updateTagQuery(value: String) = updateFilter { it.copy(tagQuery = value.take(MAX_QUERY_LENGTH)) }
-
-    fun updateKeyword(value: String) = updateFilter { it.copy(keyword = value.take(MAX_QUERY_LENGTH)) }
-
-    fun updatePidQuery(value: String) = updateFilter { it.copy(pidQuery = value.take(MAX_QUERY_LENGTH)) }
-
-    fun updateProcessQuery(value: String) = updateFilter { it.copy(processQuery = value.take(MAX_QUERY_LENGTH)) }
-
-    fun updateApplicationQuery(value: String) = updateFilter { it.copy(applicationQuery = value.take(MAX_QUERY_LENGTH)) }
-
-    fun clearFilters() = updateFilter {
-        it.copy(
-            levels = emptySet(),
-            tagQuery = "",
-            keyword = "",
-            pidQuery = "",
-            processQuery = "",
-            applicationQuery = "",
-        )
-    }
+    fun toggleAnalysisLevel(value: StructuredLogcatLevel) = Unit
+    fun updateTagQuery(value: String) = Unit
+    fun updateKeyword(value: String) = Unit
+    fun updatePidQuery(value: String) = Unit
+    fun updateProcessQuery(value: String) = Unit
+    fun updateApplicationQuery(value: String) = Unit
+    fun clearFilters() = Unit
 
     fun start() {
         val current = mutableState.value
@@ -142,39 +126,14 @@ class LogcatViewModel(
             it.copy(
                 isCapturing = true,
                 isPaused = false,
-                status = LogcatAnalysisStatus.LOADING_PROCESSES,
+                status = LogcatAnalysisStatus.CAPTURING,
                 error = null,
                 exportNotice = null,
             )
         }
         capture = viewModelScope.launch {
             try {
-                when (val analysis = manager.loadProcessAnalysis(captureSessionId)) {
-                    is AdbOperationResult.Success -> {
-                        if (!isCurrent(captureSessionId, generation) || analysis.value.sessionId != captureSessionId) return@launch
-                        val analysisWindow = LogcatAnalysisWindow(captureSessionId, analysis.value.generation)
-                        analysisWindow.updateFilter(mutableState.value.filter)
-                        window = analysisWindow
-                        mutableState.update {
-                            it.copy(
-                                processGeneration = analysis.value.generation,
-                                visibleRecords = emptyList(),
-                                visibleLines = emptyList(),
-                                droppedOldest = false,
-                                parseDegraded = false,
-                                processDegradedReason = analysis.value.degradedReason,
-                                status = LogcatAnalysisStatus.CAPTURING,
-                            )
-                        }
-                        collectStructured(captureSessionId, generation, analysis.value.generation, current)
-                    }
-                    is AdbOperationResult.Failure -> mutableState.updateIfCurrent(captureSessionId, generation) {
-                        it.copy(isCapturing = false, status = LogcatAnalysisStatus.ERROR, error = analysis.error)
-                    }
-                    AdbOperationResult.Cancelled -> mutableState.updateIfCurrent(captureSessionId, generation) {
-                        it.copy(isCapturing = false, status = LogcatAnalysisStatus.CANCELLED)
-                    }
-                }
+                collectRaw(captureSessionId, generation, current)
             } catch (error: CancellationException) {
                 throw error
             } finally {
@@ -186,18 +145,19 @@ class LogcatViewModel(
         }
     }
 
-    private suspend fun collectStructured(
+    private suspend fun collectRaw(
         sessionId: String,
         generation: Long,
-        processGeneration: Long,
         initial: LogcatUiState,
     ) {
         val config = LogcatConfig(initial.minimumLevel, initial.buffers)
-        manager.streamStructuredLogcat(config, sessionId, processGeneration).collect { result ->
+        withTimeout(10 * 60 * 1000L) {
+            manager.streamLogcat(config).collect { result ->
             if (!isCurrent(sessionId, generation)) return@collect
             when (result) {
                 is AdbOperationResult.Success -> {
-                    if (window?.add(result.value) == true && !mutableState.value.isPaused) publish()
+                    rawBuffer.add(result.value.text)
+                    publish()
                 }
                 is AdbOperationResult.Failure -> mutableState.update {
                     it.copy(status = LogcatAnalysisStatus.ERROR, error = result.error)
@@ -205,6 +165,7 @@ class LogcatViewModel(
                 AdbOperationResult.Cancelled -> mutableState.update {
                     it.copy(status = LogcatAnalysisStatus.CANCELLED)
                 }
+            }
             }
         }
     }
@@ -217,8 +178,7 @@ class LogcatViewModel(
         capture?.cancel()
         capture = null
         if (clearWindow) {
-            window?.reset()
-            window = null
+            rawBuffer.clear()
             mutableState.update {
                 it.copy(
                     processGeneration = 0,
@@ -240,20 +200,11 @@ class LogcatViewModel(
     }
 
     fun togglePause() {
-        val activeWindow = window ?: return
-        if (!mutableState.value.isCapturing) return
-        if (mutableState.value.isPaused) {
-            activeWindow.resume()
-            mutableState.update { it.copy(isPaused = false, status = LogcatAnalysisStatus.CAPTURING) }
-            publish()
-        } else {
-            activeWindow.pause()
-            mutableState.update { it.copy(isPaused = true, status = LogcatAnalysisStatus.PAUSED) }
-        }
+        return
     }
 
     fun clear() {
-        window?.clear()
+        rawBuffer.clear()
         publish()
     }
 
@@ -267,21 +218,21 @@ class LogcatViewModel(
         }
     }
 
-    fun visibleText(): String = window?.visibleText() ?: mutableState.value.visibleLines.joinToString("\n")
-
-    private fun updateFilter(transform: (LogcatUiState) -> LogcatUiState) {
-        mutableState.update(transform)
-        window?.updateFilter(mutableState.value.filter)
-        publish()
+    fun prepareShareFile(): java.io.File? {
+        val store = shareStore ?: return null
+        val text = mutableState.value.visibleLines.joinToString("\n")
+        if (text.isBlank()) return null
+        return store.prepare(text, System.currentTimeMillis()).also(store::markChooserOpened).file
     }
 
+    fun visibleText(): String = mutableState.value.visibleLines.joinToString("\n")
+
     private fun publish() = mutableState.update { current ->
-        val records = window?.snapshot().orEmpty()
         current.copy(
-            visibleRecords = records,
-            visibleLines = records.map { it.rawText },
-            droppedOldest = window?.droppedOldest == true,
-            parseDegraded = records.any { it.kind != StructuredLogcatKind.PARSED },
+            visibleRecords = rawBuffer.snapshot(),
+            visibleLines = rawBuffer.snapshot(),
+            droppedOldest = rawBuffer.droppedOldest,
+            parseDegraded = false,
         )
     }
 
@@ -302,7 +253,6 @@ class LogcatViewModel(
     }
 
     private companion object {
-        const val MAX_QUERY_LENGTH = 255
     }
 }
 

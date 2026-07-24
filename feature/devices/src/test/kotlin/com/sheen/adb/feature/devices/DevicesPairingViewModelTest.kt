@@ -333,6 +333,41 @@ class DevicesPairingViewModelTest {
         }
     }
 
+    @Test
+    fun `local terminal result ignores a late controller update after the session window is gone`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val windowId = LocalPairingWindowId.of("window-timeout")
+            val viewModel = viewModel(
+                manager = manager,
+                attemptIds = listOf(PairingAttemptId.of("attempt-timeout")),
+                windowIds = listOf(windowId),
+            )
+            runCurrent()
+
+            viewModel.enterLocalPairingMode()
+            runCurrent()
+            viewModel.onPairingPageLeft()
+            advanceUntilIdle()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.CANCELLED)
+            val discoveryBeforeLateEvent = viewModel.pairingState.value.localDiscoveryStatus
+            manager.localController.publish(
+                windowId = windowId,
+                discoveryStatus = LocalPairingDiscoveryStatus.FOUND,
+                notificationDecision = notificationDecision(LocalPairingNotificationState.INPUT_READY),
+            )
+            runCurrent()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.CANCELLED)
+            assertFalse(viewModel.pairingState.value.localWindowActive)
+            assertEquals(viewModel.pairingState.value.localDiscoveryStatus, discoveryBeforeLateEvent)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun viewModel(
         manager: FakeManager,
         attemptIds: List<PairingAttemptId>,

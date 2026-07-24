@@ -78,12 +78,12 @@ class DevicesDiscoveryReducerTest {
             DevicesDiscoveryState(phase = DevicesDiscoveryPhase.SCANNING, generation = 4L),
             DevicesDiscoveryEvent.Snapshot(initial),
         )
-        assertEquals(content.state.items.single().endpointLabel, "IPv4 · 端口 42001")
+        assertEquals(content.state.items.single().endpointLabel, "IPv4 · 192.0.2.40 · 42001")
         assertTrue(content.state.items.single().selectable)
 
         val changed = initial.services.single().copy(port = 42_099, lastSeenAt = 2L)
         val changedResult = reduce(content.state, DevicesDiscoveryEvent.Snapshot(initial.copy(services = listOf(changed))))
-        assertEquals(changedResult.state.items.single().endpointLabel, "IPv4 · 端口 42099")
+        assertEquals(changedResult.state.items.single().endpointLabel, "IPv4 · 192.0.2.40 · 42099")
 
         val lost = changed.copy(status = WirelessServiceStatus.LOST, lastSeenAt = 3L)
         val lostResult = reduce(changedResult.state, DevicesDiscoveryEvent.Snapshot(initial.copy(services = listOf(lost))))

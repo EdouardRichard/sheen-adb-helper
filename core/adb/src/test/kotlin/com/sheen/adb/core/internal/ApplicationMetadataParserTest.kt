@@ -3,9 +3,7 @@ package com.sheen.adb.core.internal
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseFailure
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseResult
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParser
-import com.sheen.adb.core.internal.applications.DecodedApkIcon
 import com.sheen.adb.core.internal.applications.DecodedApkMetadata
-import com.sheen.adb.core.internal.applications.ParsedApplicationIconKind
 import java.io.ByteArrayOutputStream
 import java.util.Base64
 import java.util.Locale
@@ -20,14 +18,13 @@ import org.testng.annotations.Test
 
 class ApplicationMetadataParserTest {
     @Test
-    fun `selects preferred locale label and returns bounded raster icon`() {
+    fun `selects preferred locale label without reading icons`() {
         val apk = syntheticApk()
         val parser = ApplicationMetadataParser { _, locale ->
             DecodedApkMetadata(
                 packageName = "com.example.fixture",
                 splitName = null,
                 label = if (locale.language == "zh") "示例应用" else "Example",
-                icons = listOf(DecodedApkIcon.Raster("res/mipmap/icon.png", density = 480, bytes = PNG_1X1)),
             )
         }
 
@@ -36,32 +33,20 @@ class ApplicationMetadataParserTest {
         assertTrue(result is ApplicationMetadataParseResult.Success)
         val metadata = (result as ApplicationMetadataParseResult.Success).metadata
         assertEquals(metadata.displayName, "示例应用")
-        assertEquals(metadata.icon?.kind, ParsedApplicationIconKind.RASTER)
-        assertEquals(metadata.icon?.width, 1)
-        assertEquals(metadata.icon?.height, 1)
-        assertTrue(metadata.icon?.encodedBytes?.contentEquals(PNG_1X1) == true)
     }
 
     @Test
-    fun `uses adaptive foreground as an explicit fallback`() {
+    fun `label parser ignores icon resources`() {
         val parser = ApplicationMetadataParser { _, _ ->
             DecodedApkMetadata(
                 packageName = "com.example.fixture",
                 splitName = null,
                 label = "Example",
-                icons = listOf(
-                    DecodedApkIcon.Adaptive(
-                        foreground = DecodedApkIcon.Raster("res/drawable/foreground.png", 0, PNG_1X1),
-                        background = null,
-                    ),
-                ),
             )
         }
 
         val result = parser.parse(syntheticApk(), listOf("en-US")) as ApplicationMetadataParseResult.Success
 
-        assertEquals(result.metadata.icon?.kind, ParsedApplicationIconKind.ADAPTIVE_FOREGROUND_FALLBACK)
-        assertTrue(result.metadata.icon?.encodedBytes?.contentEquals(PNG_1X1) == true)
     }
 
     @Test
@@ -71,14 +56,12 @@ class ApplicationMetadataParserTest {
                 packageName = "com.example.fixture",
                 splitName = null,
                 label = null,
-                icons = listOf(DecodedApkIcon.Raster("res/mipmap/missing.png", 0, null)),
             )
         }
 
         val result = parser.parse(syntheticApk(), listOf("en-US")) as ApplicationMetadataParseResult.Success
 
         assertNull(result.metadata.displayName)
-        assertNull(result.metadata.icon)
     }
 
     @Test
@@ -131,7 +114,6 @@ class ApplicationMetadataParserTest {
                 packageName = "com.example.fixture",
                 splitName = "config.en",
                 label = "Example",
-                icons = emptyList(),
             )
         }
 

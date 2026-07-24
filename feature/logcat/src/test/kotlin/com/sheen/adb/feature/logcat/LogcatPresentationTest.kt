@@ -5,24 +5,25 @@ import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
+import java.nio.file.Files
+import java.nio.file.Path
 
 class LogcatPresentationTest {
     @Test
-    fun `presentation exposes only the six approved basic analysis controls`() {
-        assertEquals(
-            LogcatPresentationPolicy.controls,
-            listOf(
-                LogcatFilterControl.LEVEL,
-                LogcatFilterControl.TAG,
-                LogcatFilterControl.KEYWORD,
-                LogcatFilterControl.PID,
-                LogcatFilterControl.PROCESS,
-                LogcatFilterControl.APPLICATION,
-            ),
+    fun `screen exposes extraction controls without analysis or pause controls`() {
+        val source = String(
+            Files.readAllBytes(Path.of("src/main/kotlin/com/sheen/adb/feature/logcat/LogcatScreen.kt")),
         )
-        assertFalse(LogcatPresentationPolicy.labels().any { label ->
-            listOf("ANR", "崩溃识别", "CPU", "内存趋势", "线程转储").any { label.contains(it, ignoreCase = true) }
-        })
+        assertTrue(source.contains("Logcat 日志提取"))
+        assertTrue(source.contains("本版本不提供日志筛选、进程关联或分析"))
+        assertFalse(source.contains("结果等级筛选"))
+        assertFalse(source.contains("清除全部筛选"))
+        assertFalse(source.contains("暂停"))
+    }
+    @Test
+    fun `presentation exposes extraction without analysis controls`() {
+        assertTrue(LogcatPresentationPolicy.controls.isEmpty())
+        assertTrue(LogcatPresentationPolicy.filterSummary(LogcatAnalysisFilter()).contains("提取"))
     }
 
     @Test
@@ -38,8 +39,7 @@ class LogcatPresentationTest {
 
         val summary = LogcatPresentationPolicy.filterSummary(filter)
 
-        assertTrue(summary.contains("6"))
-        assertTrue(summary.contains("AND"))
+        assertTrue(summary.contains("提取"))
         assertFalse(summary.contains("fixture", ignoreCase = true))
         assertFalse(summary.contains("com.example", ignoreCase = true))
     }

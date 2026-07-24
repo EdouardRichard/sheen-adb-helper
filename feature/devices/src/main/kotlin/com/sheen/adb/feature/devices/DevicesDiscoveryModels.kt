@@ -33,6 +33,7 @@ internal enum class DevicesDiscoveryReachability {
 }
 
 internal data class DevicesDiscoveryItem(
+    val deviceName: String? = null,
     val serviceTypes: Set<WirelessServiceType>,
     val pairingTarget: WirelessDiscoveryTarget?,
     val connectTarget: WirelessDiscoveryTarget?,

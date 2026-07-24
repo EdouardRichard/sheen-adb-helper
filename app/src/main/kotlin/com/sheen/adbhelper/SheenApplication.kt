@@ -8,6 +8,8 @@ import com.sheen.adb.data.DataStoreDeviceProfileRepository
 import com.sheen.adb.data.SafTextExporter
 import com.sheen.adb.data.SafDocumentStore
 import com.sheen.adb.data.SafTemporaryDataCleaner
+import com.sheen.adb.data.LogcatShareFileStore
+import com.sheen.adb.data.LogcatShareTemporaryDataCleaner
 import com.sheen.adbhelper.localpairing.AndroidLocalPairingServiceLifecycle
 import com.sheen.adbhelper.localpairing.LocalPairingAppBridge
 
@@ -24,8 +26,10 @@ class AppContainer(application: Application) {
     val deviceProfiles = DataStoreDeviceProfileRepository.create(application)
     val textExporter = SafTextExporter(application)
     val safDocumentStore = SafDocumentStore(application)
+    val logcatShareFileStore = LogcatShareFileStore(application.cacheDir)
     val temporaryDataCleaner = CompositeTemporaryDataCleaner(
         AppTemporaryDataCleaner(application),
         SafTemporaryDataCleaner(safDocumentStore),
+        LogcatShareTemporaryDataCleaner(logcatShareFileStore),
     )
 }

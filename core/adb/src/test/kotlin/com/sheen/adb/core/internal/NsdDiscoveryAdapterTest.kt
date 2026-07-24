@@ -2,6 +2,7 @@ package com.sheen.adb.core.internal
 
 import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryEvent
+import com.sheen.adb.core.WirelessDiscoveryMode
 import com.sheen.adb.core.WirelessServiceStatus
 import com.sheen.adb.core.WirelessServiceType
 import com.sheen.adb.core.internal.discovery.AndroidNsdDiscoveryAdapter
@@ -122,6 +123,32 @@ class NsdDiscoveryAdapterTest {
         assertTrue(fixture.platform.multicastLocks.isEmpty())
         assertEquals(fixture.observedServices.single().addresses, ADDRESSES)
         assertEquals(fixture.observedServices.single().status, WirelessServiceStatus.RESOLVED)
+    }
+
+    @Test
+    fun `local pairing keeps discovering beyond the ten second LAN scan cutoff`() {
+        val fixture = fixture()
+
+        assertEquals(
+            fixture.adapter.start(
+                request(
+                    generation = 345L,
+                    apiLevel = 34,
+                    network = NETWORK_GAMMA,
+                    mode = WirelessDiscoveryMode.LOCAL_PAIRING,
+                ),
+            ),
+            NsdDiscoveryStartResult.Started,
+        )
+
+        assertEquals(
+            fixture.scheduler.delays.single(),
+            NsdDiscoveryPolicy.DEFAULT_LOCAL_PAIRING_CUTOFF_MILLIS,
+        )
+        assertTrue(
+            fixture.scheduler.delays.single() > NsdDiscoveryPolicy.DEFAULT_LAN_DISCOVERY_CUTOFF_MILLIS,
+        )
+        fixture.adapter.stop()
     }
 
     @Test
@@ -364,10 +391,12 @@ class NsdDiscoveryAdapterTest {
         generation: Long,
         apiLevel: Int,
         network: NsdNetworkRef? = null,
+        mode: WirelessDiscoveryMode = WirelessDiscoveryMode.LAN_FOREGROUND,
     ): NsdDiscoveryRequest = NsdDiscoveryRequest(
         generation = generation,
         apiLevel = apiLevel,
         currentNetwork = network,
+        mode = mode,
     )
 
     private fun resolvedService(

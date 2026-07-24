@@ -117,7 +117,7 @@ class DevicesDiscoveryPresentationTest {
         serviceTypes = setOf(WirelessServiceType.CONNECT),
         pairingTarget = null,
         connectTarget = target(generation, "target-$index"),
-        endpointLabel = "IPv4 · 端口 ${45_000 + index}",
+        endpointLabel = "IPv4 · 192.0.2.${index} · ${45_000 + index}",
         relation = DevicesDiscoveryRelation.UNKNOWN,
         reachability = DevicesDiscoveryReachability.RESOLVED,
         selectable = true,

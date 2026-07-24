@@ -1,9 +1,8 @@
-package com.sheen.adb.feature.apps
+﻿package com.sheen.adb.feature.apps
 
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.ApplicationField
-import com.sheen.adb.core.ApplicationMetadataStatus
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
 import org.testng.Assert.assertEquals
@@ -33,14 +32,14 @@ class AppsPolicyTest {
         )
         val state = connectedState().copy(
             applications = applications,
-            metadataByPackage = mapOf(
-                "com.Example.reader_2" to metadata("中文阅读器"),
-                "org.sample.disabled_3" to metadata("Reader Pro"),
-                "net.example.numeric4" to metadata("Reader Pro"),
+            displayNameByPackage = mapOf(
+                "com.Example.reader_2" to "涓枃闃呰鍣?",
+                "org.sample.disabled_3" to "Reader Pro",
+                "net.example.numeric4" to "Reader Pro",
             ),
         )
 
-        assertEquals(state.copy(query = "中文").visibleApplications.map { it.packageName }, listOf("com.Example.reader_2"))
+        assertEquals(state.copy(query = "涓枃").visibleApplications.map { it.packageName }, listOf("com.Example.reader_2"))
         assertEquals(
             state.copy(query = "READER PRO").visibleApplications.map { it.packageName },
             listOf("org.sample.disabled_3", "net.example.numeric4"),
@@ -54,33 +53,6 @@ class AppsPolicyTest {
             listOf("org.sample.disabled_3"),
         )
         assertEquals(state.copy(query = "numeric4").visibleApplications.single().packageName, "net.example.numeric4")
-    }
-
-    @Test
-    fun `same display names remain distinct by package and unavailable metadata keeps package placeholder`() {
-        val first = app("com.example.first")
-        val second = app("com.example.second")
-        val fallback = app("com.example.fallback")
-        val state = connectedState().copy(
-            applications = listOf(first, second, fallback),
-            metadataByPackage = mapOf(
-                first.packageName to metadata("同名应用"),
-                second.packageName to metadata("同名应用"),
-                fallback.packageName to AppsApplicationMetadata(
-                    displayName = null,
-                    icon = null,
-                    status = ApplicationMetadataStatus.UNAVAILABLE,
-                ),
-            ),
-            query = "同名",
-        )
-
-        assertEquals(state.visibleApplications.map { it.packageName }, listOf(first.packageName, second.packageName))
-        assertEquals(
-            state.copy(query = "fallback").visibleApplications.single().packageName,
-            fallback.packageName,
-        )
-        assertEquals(state.metadataByPackage[fallback.packageName]?.status, ApplicationMetadataStatus.UNAVAILABLE)
     }
 
     @Test
@@ -115,19 +87,19 @@ class AppsPolicyTest {
     fun `session switch clears snapshot confirmation filters errors and notices`() {
         val dirty = connectedState().copy(
             applications = listOf(app("com.example.client")),
-            metadataByPackage = mapOf("com.example.client" to metadata("客户端")),
+            displayNameByPackage = mapOf("com.example.client" to "瀹㈡埛绔?"),
             userId = 0,
             query = "client",
             filter = AppsFilter.DISABLED,
-            degradedReason = "降级",
+            degradedReason = "闄嶇骇",
             unavailableFields = setOf(ApplicationField.VERSION_NAME),
             error = AdbError.Timeout(AdbOperationStage.APPLICATIONS_LIST),
-            pendingConfirmation = AppsConfirmation(AppsOperation.DISABLE, "com.example.client", "one", "设备", 0),
-            operationNotice = AppsOperationNotice("结果未知", true),
+            pendingConfirmation = AppsConfirmation(AppsOperation.DISABLE, "com.example.client", "one", "璁惧", 0),
+            operationNotice = AppsOperationNotice("缁撴灉鏈煡", true),
         )
-        val switched = AppsPolicy.changedSession(dirty, true, "two", "新设备", false)
+        val switched = AppsPolicy.changedSession(dirty, true, "two", "new device", false)
         assertTrue(switched.applications.isEmpty())
-        assertTrue(switched.metadataByPackage.isEmpty())
+        assertTrue(switched.displayNameByPackage.isEmpty())
         assertEquals(switched.query, "")
         assertEquals(switched.filter, AppsFilter.ALL)
         assertNull(switched.pendingConfirmation)
@@ -140,20 +112,15 @@ class AppsPolicyTest {
         assertFalse(AppsUiState().isConnected)
         assertTrue(connectedState().copy(activeOperation = AppsOperation.LOADING, isLoading = true).isBusy)
         assertTrue(connectedState().applications.isEmpty())
-        assertEquals(connectedState().copy(degradedReason = "字段不可用").degradedReason, "字段不可用")
+        assertEquals(connectedState().copy(degradedReason = "field unavailable").degradedReason, "field unavailable")
         assertTrue(connectedState().copy(error = AdbError.ApplicationListUnsupported).error is AdbError.ApplicationListUnsupported)
         assertFalse(connectedState().copy(activeOperation = null, isLoading = false).isBusy)
-        assertTrue(connectedState().copy(operationNotice = AppsOperationNotice("结果未知", true)).operationNotice?.outcomeUnknown == true)
+        assertTrue(connectedState().copy(operationNotice = AppsOperationNotice("缁撴灉鏈煡", true)).operationNotice?.outcomeUnknown == true)
     }
 
-    private fun connectedState() = AppsUiState(isConnected = true, sessionId = "one", deviceDisplayName = "设备", userId = 0)
+    private fun connectedState() = AppsUiState(isConnected = true, sessionId = "one", deviceDisplayName = "璁惧", userId = 0)
 
     private fun app(name: String, state: RemoteApplicationEnabledState = RemoteApplicationEnabledState.ENABLED) =
         RemoteApplication(name, userId = 0, enabledState = state, isSystem = false)
 
-    private fun metadata(name: String) = AppsApplicationMetadata(
-        displayName = name,
-        icon = null,
-        status = ApplicationMetadataStatus.AVAILABLE,
-    )
 }

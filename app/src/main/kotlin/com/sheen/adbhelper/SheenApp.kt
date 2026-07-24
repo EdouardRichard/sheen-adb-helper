@@ -78,7 +78,7 @@ internal enum class Destination(val label: String, val requiresConnection: Boole
     FILES("文件浏览", true),
     APPS("应用管理", true),
     SHELL("Shell 终端", true),
-    PROCESSES("进程监控", true),
+    PROCESSES("进程管理", true),
     LOGCAT("Logcat", true),
     SETTINGS("设置与隐私", false),
 }
@@ -94,7 +94,7 @@ fun SheenApp(container: AppContainer, files: FilesViewModel) {
     val shell: ShellViewModel = viewModel(factory = factory { ShellViewModel(container.adbManager) })
     val processes: ProcessesViewModel = viewModel(factory = factory { ProcessesViewModel(container.adbManager) })
     val logcat: LogcatViewModel = viewModel(factory = factory {
-        LogcatViewModel(container.adbManager, container.textExporter)
+        LogcatViewModel(container.adbManager, container.textExporter, container.logcatShareFileStore)
     })
     val settings: SettingsViewModel = viewModel(factory = factory {
         SettingsViewModel(

@@ -49,6 +49,32 @@ internal class LocalPairingCoordinatorTest {
     }
 
     @Test
+    fun `repeated start while a window is active is rejected and does not replace nonce`() {
+        val fixture = Fixture()
+        val first = fixture.coordinator.start(ATTEMPT_ONE, WINDOW_ONE)
+
+        val duplicate = fixture.coordinator.start(ATTEMPT_TWO, WINDOW_TWO)
+
+        assertTrue(first is AdbOperationResult.Success<*>)
+        assertTrue(duplicate is AdbOperationResult.Failure)
+        assertEquals(fixture.coordinator.state.value.window?.windowId, WINDOW_ONE)
+        assertEquals(fixture.stopDiscoveryCalls, 0)
+    }
+
+    @Test
+    fun `used attempt or window identifiers cannot be reused after a completed window`() {
+        val fixture = Fixture()
+        fixture.coordinator.start(ATTEMPT_ONE, WINDOW_ONE)
+        assertTrue(fixture.coordinator.cancel(WINDOW_ONE) is AdbOperationResult.Success<*>)
+
+        val reusedAttempt = fixture.coordinator.start(ATTEMPT_ONE, WINDOW_TWO)
+        assertTrue(reusedAttempt is AdbOperationResult.Failure)
+
+        val freshAttempt = fixture.coordinator.start(ATTEMPT_TWO, WINDOW_TWO)
+        assertTrue(freshAttempt is AdbOperationResult.Success<*>)
+    }
+
+    @Test
     fun `one resolved pairing service becomes the only live target and multiple candidates stay ambiguous`() {
         val fixture = Fixture()
         fixture.coordinator.start(ATTEMPT_ONE, WINDOW_ONE)

@@ -3,14 +3,10 @@ package com.sheen.adb.core.internal
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbOperationResult
-import com.sheen.adb.core.ApplicationIconEncoding
-import com.sheen.adb.core.ApplicationIconFallback
 import com.sheen.adb.core.ApplicationMetadataStatus
 import com.sheen.adb.core.ApplicationMutationResult
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseFailure
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseResult
-import com.sheen.adb.core.internal.applications.ParsedApplicationIcon
-import com.sheen.adb.core.internal.applications.ParsedApplicationIconKind
 import com.sheen.adb.core.internal.applications.ParsedApplicationMetadata
 import com.sheen.adb.core.internal.applications.RemoteApkReadFailure
 import com.sheen.adb.core.internal.applications.RemoteApkReadResult
@@ -48,9 +44,6 @@ class ApplicationMetadataSessionManagerTest {
             assertEquals(update.packageName, snapshot.applications[index].packageName)
             assertEquals(update.status, ApplicationMetadataStatus.AVAILABLE)
             assertEquals(update.displayName, snapshot.applications[index].packageName)
-            assertEquals(update.icon?.encoding, ApplicationIconEncoding.PNG)
-            assertEquals(update.icon?.fallback, ApplicationIconFallback.NONE)
-            assertTrue(update.icon?.encodedBytes?.contentEquals(byteArrayOf(1, 2, 3, 4)) == true)
         }
     }
 
@@ -150,13 +143,6 @@ class ApplicationMetadataSessionManagerTest {
             ParsedApplicationMetadata(
                 packageName = packageName,
                 displayName = packageName,
-                icon = ParsedApplicationIcon(
-                    encodedBytes = byteArrayOf(1, 2, 3, 4),
-                    mimeType = "image/png",
-                    width = 1,
-                    height = 1,
-                    kind = ParsedApplicationIconKind.RASTER,
-                ),
             ),
         )
     }

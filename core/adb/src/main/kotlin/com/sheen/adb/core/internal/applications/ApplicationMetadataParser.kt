@@ -5,11 +5,8 @@ import java.util.Locale
 import java.util.zip.ZipException
 import java.util.zip.ZipInputStream
 import net.dongliu.apk.parser.ByteArrayApkFile
-import net.dongliu.apk.parser.bean.AdaptiveIcon
-import net.dongliu.apk.parser.bean.Icon
 
 internal const val MAX_APPLICATION_APK_BYTES: Int = 32 * 1024 * 1024
-internal const val MAX_APPLICATION_ICON_BYTES: Int = 1024 * 1024
 
 internal enum class ApplicationMetadataParseFailure {
     APK_TOO_LARGE,
@@ -19,23 +16,9 @@ internal enum class ApplicationMetadataParseFailure {
     PARSE_FAILED,
 }
 
-internal enum class ParsedApplicationIconKind {
-    RASTER,
-    ADAPTIVE_FOREGROUND_FALLBACK,
-}
-
-internal data class ParsedApplicationIcon(
-    val encodedBytes: ByteArray,
-    val mimeType: String,
-    val width: Int,
-    val height: Int,
-    val kind: ParsedApplicationIconKind,
-)
-
 internal data class ParsedApplicationMetadata(
     val packageName: String,
     val displayName: String?,
-    val icon: ParsedApplicationIcon?,
 )
 
 internal sealed interface ApplicationMetadataParseResult {
@@ -43,24 +26,10 @@ internal sealed interface ApplicationMetadataParseResult {
     data class Failure(val reason: ApplicationMetadataParseFailure) : ApplicationMetadataParseResult
 }
 
-internal sealed interface DecodedApkIcon {
-    data class Raster(
-        val path: String,
-        val density: Int,
-        val bytes: ByteArray?,
-    ) : DecodedApkIcon
-
-    data class Adaptive(
-        val foreground: Raster?,
-        val background: Raster?,
-    ) : DecodedApkIcon
-}
-
 internal data class DecodedApkMetadata(
     val packageName: String,
     val splitName: String?,
     val label: String?,
-    val icons: List<DecodedApkIcon>,
 )
 
 internal fun interface ApkMetadataDecoder {
@@ -108,8 +77,6 @@ internal class ApplicationMetadataParser(
         return try {
             var packageName: String? = null
             var displayName: String? = null
-            var icon: ParsedApplicationIcon? = null
-
             for (locale in locales) {
                 val decoded = decoder.decode(apkBytes, locale)
                 if (!decoded.splitName.isNullOrBlank()) {
@@ -125,10 +92,7 @@ internal class ApplicationMetadataParser(
                 if (displayName == null) {
                     displayName = decoded.label?.trim()?.takeIf(String::isNotEmpty)
                 }
-                if (icon == null) {
-                    icon = selectIcon(decoded.icons)
-                }
-                if (displayName != null && icon != null) break
+                if (displayName != null) break
             }
 
             val verifiedPackage = packageName
@@ -137,7 +101,6 @@ internal class ApplicationMetadataParser(
                 ParsedApplicationMetadata(
                     packageName = verifiedPackage,
                     displayName = displayName,
-                    icon = icon,
                 ),
             )
         } catch (_: Exception) {
@@ -145,35 +108,6 @@ internal class ApplicationMetadataParser(
         } catch (_: LinkageError) {
             ApplicationMetadataParseResult.Failure(ApplicationMetadataParseFailure.PARSE_FAILED)
         }
-    }
-
-    private fun selectIcon(icons: List<DecodedApkIcon>): ParsedApplicationIcon? = icons
-        .asSequence()
-        .mapNotNull { icon ->
-            when (icon) {
-                is DecodedApkIcon.Raster -> icon.toParsed(ParsedApplicationIconKind.RASTER)
-                is DecodedApkIcon.Adaptive -> icon.foreground?.toParsed(
-                    ParsedApplicationIconKind.ADAPTIVE_FOREGROUND_FALLBACK,
-                )
-            }
-        }
-        .maxByOrNull { it.sourceDensity }
-        ?.icon
-
-    private fun DecodedApkIcon.Raster.toParsed(kind: ParsedApplicationIconKind): IconCandidate? {
-        val data = bytes ?: return null
-        if (data.isEmpty() || data.size > MAX_APPLICATION_ICON_BYTES) return null
-        val image = readImageInfo(data) ?: return null
-        return IconCandidate(
-            sourceDensity = density,
-            icon = ParsedApplicationIcon(
-                encodedBytes = data.copyOf(),
-                mimeType = image.mimeType,
-                width = image.width,
-                height = image.height,
-                kind = kind,
-            ),
-        )
     }
 
     private fun inspectArchive(bytes: ByteArray): ArchiveInspection {
@@ -218,67 +152,6 @@ internal class ApplicationMetadataParser(
         return name.split('/').none { it == ".." || it == "." }
     }
 
-    private data class IconCandidate(val sourceDensity: Int, val icon: ParsedApplicationIcon)
-    private data class ImageInfo(val mimeType: String, val width: Int, val height: Int)
-
-    private fun readImageInfo(bytes: ByteArray): ImageInfo? =
-        readPngInfo(bytes) ?: readWebpInfo(bytes) ?: readJpegInfo(bytes)
-
-    private fun readPngInfo(bytes: ByteArray): ImageInfo? {
-        if (bytes.size < 24 || !bytes.copyOfRange(0, 8).contentEquals(PNG_SIGNATURE)) return null
-        val width = bytes.readIntBigEndian(16)
-        val height = bytes.readIntBigEndian(20)
-        return dimensions("image/png", width, height)
-    }
-
-    private fun readWebpInfo(bytes: ByteArray): ImageInfo? {
-        if (bytes.size < 30 || bytes.ascii(0, 4) != "RIFF" || bytes.ascii(8, 4) != "WEBP") return null
-        return when (bytes.ascii(12, 4)) {
-            "VP8X" -> dimensions(
-                "image/webp",
-                1 + bytes.readUInt24LittleEndian(24),
-                1 + bytes.readUInt24LittleEndian(27),
-            )
-            "VP8L" -> {
-                if (bytes.size < 25 || bytes[20].toInt() and 0xff != 0x2f) return null
-                val bits = bytes.readIntLittleEndian(21)
-                dimensions("image/webp", (bits and 0x3fff) + 1, ((bits ushr 14) and 0x3fff) + 1)
-            }
-            else -> null
-        }
-    }
-
-    private fun readJpegInfo(bytes: ByteArray): ImageInfo? {
-        if (bytes.size < 4 || bytes[0].toInt() and 0xff != 0xff || bytes[1].toInt() and 0xff != 0xd8) return null
-        var offset = 2
-        while (offset + 3 < bytes.size) {
-            if (bytes[offset].toInt() and 0xff != 0xff) return null
-            val marker = bytes[offset + 1].toInt() and 0xff
-            offset += 2
-            if (marker == 0xd9 || marker == 0xda) return null
-            if (marker == 0x01 || marker in 0xd0..0xd7) continue
-            if (offset + 2 > bytes.size) return null
-            val length = bytes.readUnsignedShortBigEndian(offset)
-            if (length < 2 || offset + length > bytes.size) return null
-            if (marker in JPEG_START_OF_FRAME_MARKERS && length >= 7) {
-                return dimensions(
-                    "image/jpeg",
-                    bytes.readUnsignedShortBigEndian(offset + 5),
-                    bytes.readUnsignedShortBigEndian(offset + 3),
-                )
-            }
-            offset += length
-        }
-        return null
-    }
-
-    private fun dimensions(mimeType: String, width: Int, height: Int): ImageInfo? =
-        if (width in 1..MAX_ICON_DIMENSION && height in 1..MAX_ICON_DIMENSION) {
-            ImageInfo(mimeType, width, height)
-        } else {
-            null
-        }
-
     private enum class ArchiveInspection { SAFE, MALFORMED, UNSAFE }
 
     private companion object {
@@ -287,11 +160,6 @@ internal class ApplicationMetadataParser(
         const val MAX_EXPANDED_ARCHIVE_BYTES = 64L * 1024 * 1024
         const val MAX_COMPRESSION_RATIO = 100L
         const val COMPRESSION_RATIO_GRACE_BYTES = 1024L * 1024
-        const val MAX_ICON_DIMENSION = 8192
-        val PNG_SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
-        val JPEG_START_OF_FRAME_MARKERS = setOf(
-            0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf,
-        )
     }
 }
 
@@ -304,45 +172,6 @@ private object DongliuApkMetadataDecoder : ApkMetadataDecoder {
                 packageName = meta.packageName.orEmpty(),
                 splitName = meta.split,
                 label = meta.label,
-                icons = apk.allIcons.mapNotNull { icon ->
-                    when (icon) {
-                        is AdaptiveIcon -> DecodedApkIcon.Adaptive(
-                            foreground = icon.foreground?.toDecoded(),
-                            background = icon.background?.toDecoded(),
-                        )
-                        is Icon -> icon.toDecoded()
-                        else -> null
-                    }
-                },
             )
         }
-
-    private fun Icon.toDecoded(): DecodedApkIcon.Raster = DecodedApkIcon.Raster(
-        path = path.orEmpty(),
-        density = density,
-        bytes = data,
-    )
 }
-
-private fun ByteArray.readIntBigEndian(offset: Int): Int =
-    (this[offset].toInt() and 0xff shl 24) or
-        (this[offset + 1].toInt() and 0xff shl 16) or
-        (this[offset + 2].toInt() and 0xff shl 8) or
-        (this[offset + 3].toInt() and 0xff)
-
-private fun ByteArray.readIntLittleEndian(offset: Int): Int =
-    (this[offset].toInt() and 0xff) or
-        (this[offset + 1].toInt() and 0xff shl 8) or
-        (this[offset + 2].toInt() and 0xff shl 16) or
-        (this[offset + 3].toInt() and 0xff shl 24)
-
-private fun ByteArray.readUInt24LittleEndian(offset: Int): Int =
-    (this[offset].toInt() and 0xff) or
-        (this[offset + 1].toInt() and 0xff shl 8) or
-        (this[offset + 2].toInt() and 0xff shl 16)
-
-private fun ByteArray.readUnsignedShortBigEndian(offset: Int): Int =
-    (this[offset].toInt() and 0xff shl 8) or (this[offset + 1].toInt() and 0xff)
-
-private fun ByteArray.ascii(offset: Int, length: Int): String =
-    String(this, offset, length, Charsets.US_ASCII)

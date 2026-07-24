@@ -26,6 +26,24 @@ data class VerifiedWirelessDeviceId(val value: String) {
     override fun toString(): String = "VerifiedWirelessDeviceId(redacted)"
 }
 
+enum class WirelessDeviceNameSource {
+    VERIFIED_AFTER_CONNECTION,
+}
+
+object WirelessDeviceNamePolicy {
+    private val bidiControls = setOf(
+        '\u061C', '\u200E', '\u200F', '\u202A', '\u202B', '\u202C',
+        '\u202D', '\u202E', '\u2066', '\u2067', '\u2068', '\u2069',
+    )
+
+    fun sanitize(value: String?): String? {
+        val trimmed = value?.trim() ?: return null
+        if (trimmed.isEmpty() || trimmed.codePointCount(0, trimmed.length) > 80) return null
+        if (trimmed.any { it.isISOControl() || it in bidiControls }) return null
+        return trimmed
+    }
+}
+
 class WirelessDiscoveryTarget(
     val generation: Long,
     val observationId: WirelessObservationId,
@@ -118,6 +136,8 @@ class WirelessServiceObservation(
     val port: Int,
     val status: WirelessServiceStatus,
     val verifiedDeviceId: VerifiedWirelessDeviceId? = null,
+    val verifiedDeviceName: String? = null,
+    val verifiedDeviceNameSource: WirelessDeviceNameSource? = null,
     val lastSeenAt: Long,
 ) {
     val addresses: List<WirelessAddress> = immutableList(addresses)
@@ -125,6 +145,15 @@ class WirelessServiceObservation(
     init {
         require(serviceName.isNotBlank()) { "Service name must not be blank." }
         require(port in 1..65535) { "Port must be between 1 and 65535." }
+        require(verifiedDeviceName == null || verifiedDeviceId != null) {
+            "A device name requires a verified identity."
+        }
+        require(verifiedDeviceNameSource == null || verifiedDeviceName != null) {
+            "A device name source requires a device name."
+        }
+        require(verifiedDeviceName == null || WirelessDeviceNamePolicy.sanitize(verifiedDeviceName) == verifiedDeviceName) {
+            "Device name must satisfy the safe display-name policy."
+        }
     }
 
     fun copy(
@@ -135,6 +164,8 @@ class WirelessServiceObservation(
         port: Int = this.port,
         status: WirelessServiceStatus = this.status,
         verifiedDeviceId: VerifiedWirelessDeviceId? = this.verifiedDeviceId,
+        verifiedDeviceName: String? = this.verifiedDeviceName,
+        verifiedDeviceNameSource: WirelessDeviceNameSource? = this.verifiedDeviceNameSource,
         lastSeenAt: Long = this.lastSeenAt,
     ): WirelessServiceObservation = WirelessServiceObservation(
         observationId = observationId,
@@ -144,6 +175,8 @@ class WirelessServiceObservation(
         port = port,
         status = status,
         verifiedDeviceId = verifiedDeviceId,
+        verifiedDeviceName = verifiedDeviceName,
+        verifiedDeviceNameSource = verifiedDeviceNameSource,
         lastSeenAt = lastSeenAt,
     )
 
@@ -156,6 +189,8 @@ class WirelessServiceObservation(
             port == other.port &&
             status == other.status &&
             verifiedDeviceId == other.verifiedDeviceId &&
+            verifiedDeviceName == other.verifiedDeviceName &&
+            verifiedDeviceNameSource == other.verifiedDeviceNameSource &&
             lastSeenAt == other.lastSeenAt
 
     override fun hashCode(): Int {
@@ -166,6 +201,8 @@ class WirelessServiceObservation(
         result = 31 * result + port
         result = 31 * result + status.hashCode()
         result = 31 * result + (verifiedDeviceId?.hashCode() ?: 0)
+        result = 31 * result + (verifiedDeviceName?.hashCode() ?: 0)
+        result = 31 * result + (verifiedDeviceNameSource?.hashCode() ?: 0)
         result = 31 * result + lastSeenAt.hashCode()
         return result
     }
@@ -179,6 +216,11 @@ class WirelessDisplayDevice(
 ) {
     val observations: List<WirelessServiceObservation> = immutableList(observations)
     val serviceTypes: Set<WirelessServiceType> = immutableSet(this.observations.map { it.serviceType })
+    val deviceName: String? = this.observations
+        .asSequence()
+        .filter { it.verifiedDeviceId == verifiedDeviceId }
+        .mapNotNull { it.verifiedDeviceName }
+        .firstOrNull()
 
     init {
         require(this.observations.isNotEmpty()) { "A display device must contain an observation." }

@@ -17,9 +17,7 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
     private val mutableState = MutableStateFlow(AppsUiState())
     val state: StateFlow<AppsUiState> = mutableState.asStateFlow()
     private var operation: Job? = null
-    private var metadataOperation: Job? = null
     private var operationGeneration = 0L
-    private var metadataGeneration = 0L
     private var foreground = false
     private var loadAttemptedSessionId: String? = null
 
@@ -55,7 +53,6 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
         foreground = value
         if (!value) {
             dismissConfirmation()
-            cancelMetadataLoad()
             loadAttemptedSessionId = null
             cancelActive(leavingPage = true)
         } else {
@@ -77,7 +74,6 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
         val current = mutableState.value
         val sessionId = current.sessionId ?: return
         if (!foreground || !current.isConnected || current.isBusy) return
-        cancelMetadataLoad()
         loadAttemptedSessionId = sessionId
         startOperation(AppsOperation.LOADING, null) { generation ->
             when (val result = manager.listApplications()) {
@@ -86,16 +82,13 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
                         it.copy(
                             userId = result.value.userId,
                             applications = result.value.applications,
-                            metadataByPackage = result.value.applications.associate {
-                                it.packageName to AppsApplicationMetadata()
-                            },
+                            displayNameByPackage = result.value.applications.associate { it.packageName to null },
                             unavailableFields = result.value.unavailableFields,
                             degradedReason = result.value.degradedReason,
                             error = null,
                             operationNotice = null,
                         )
                     }
-                    startMetadataLoad(result.value.sessionId, result.value.userId)
                 }
                 is AdbOperationResult.Failure -> if (isCurrent(generation, sessionId)) {
                     mutableState.update { it.copy(error = result.error) }
@@ -225,61 +218,11 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
     private fun isCurrent(generation: Long, sessionId: String): Boolean =
         generation == operationGeneration && foreground && mutableState.value.sessionId == sessionId
 
-    private fun startMetadataLoad(sessionId: String, userId: Int) {
-        cancelMetadataLoad()
-        val generation = ++metadataGeneration
-        metadataOperation = viewModelScope.launch {
-            try {
-                manager.observeApplicationMetadata(sessionId).collect { result ->
-                    if (!isCurrentMetadata(generation, sessionId, userId)) return@collect
-                    when (result) {
-                        is AdbOperationResult.Success -> applyMetadataUpdate(result.value, generation)
-                        is AdbOperationResult.Failure -> mutableState.update { it.copy(error = result.error) }
-                        AdbOperationResult.Cancelled -> Unit
-                    }
-                }
-            } finally {
-                if (generation == metadataGeneration) metadataOperation = null
-            }
-        }
-    }
-
-    private fun applyMetadataUpdate(
-        update: com.sheen.adb.core.ApplicationMetadataUpdate,
-        generation: Long,
-    ) {
-        if (!isCurrentMetadata(generation, update.sessionId, update.userId)) return
-        mutableState.update { current ->
-            if (current.applications.none { it.packageName == update.packageName }) return@update current
-            val next = current.metadataByPackage.toMutableMap()
-            update.evictedIconPackages.forEach { packageName ->
-                next[packageName]?.let { retained -> next[packageName] = retained.copy(icon = null) }
-            }
-            next[update.packageName] = AppsApplicationMetadata(
-                displayName = update.displayName,
-                icon = update.icon,
-                status = update.status,
-            )
-            current.copy(metadataByPackage = next, error = null)
-        }
-    }
-
-    private fun isCurrentMetadata(generation: Long, sessionId: String, userId: Int): Boolean =
-        generation == metadataGeneration && foreground && mutableState.value.let {
-            it.sessionId == sessionId && it.userId == userId
-        }
-
-    private fun cancelMetadataLoad() {
-        metadataGeneration++
-        metadataOperation?.cancel()
-        metadataOperation = null
-    }
 
     private fun cancelJobWithoutNotice() {
         operationGeneration++
         operation?.cancel()
         operation = null
-        cancelMetadataLoad()
     }
 
     override fun onCleared() {

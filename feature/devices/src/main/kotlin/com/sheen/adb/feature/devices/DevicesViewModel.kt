@@ -3,7 +3,6 @@ package com.sheen.adb.feature.devices
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.sheen.adb.core.AdbConnectionState
-import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbEndpointParser
 import com.sheen.adb.core.AdbError
@@ -43,12 +42,10 @@ data class DevicesUiState(
     val pairingEndpointInput: String = "",
     val pairingCode: String = "",
     val showPairing: Boolean = false,
-    val showDiagnostics: Boolean = false,
     val inputError: String? = null,
     val notice: String? = null,
     val connectionState: AdbConnectionState = AdbConnectionState.Disconnected(),
     val profiles: List<DeviceProfile> = emptyList(),
-    val diagnosticEvents: List<AdbDiagnosticEvent> = emptyList(),
     val pendingDeleteProfile: DeviceProfile? = null,
     val pendingRenameProfile: DeviceProfile? = null,
     val renameInput: String = "",
@@ -121,9 +118,6 @@ class DevicesViewModel(
                     cancelPairingOperation(markCancelled = true)
                 }
             }
-        }
-        viewModelScope.launch {
-            manager.diagnosticEvents.collect { events -> mutableState.update { it.copy(diagnosticEvents = events) } }
         }
         viewModelScope.launch {
             repository.profiles.collect { profiles -> mutableState.update { it.copy(profiles = profiles) } }
@@ -377,9 +371,6 @@ class DevicesViewModel(
             mutableState.update { it.copy(pairingCode = "", showPairing = false, notice = "已断开连接") }
         }
     }
-
-    fun toggleDiagnostics() = mutableState.update { it.copy(showDiagnostics = !it.showDiagnostics) }
-    fun clearDiagnostics() = manager.clearDiagnosticEvents()
 
     fun requestRename(profile: DeviceProfile) = mutableState.update {
         it.copy(pendingRenameProfile = profile, renameInput = profile.displayName)

@@ -25,6 +25,7 @@ internal enum class DevicesDiscoveryAction {
 }
 
 internal data class DevicesDiscoveryItemPresentation(
+    val deviceName: String?,
     val endpointLabel: String,
     val rolesText: String,
     val relationText: String,
@@ -60,6 +61,7 @@ internal fun DevicesDiscoveryState.toDiscoveryPresentation(): DevicesDiscoveryPr
         showManualAddress = true,
         items = items.take(MAX_DISCOVERY_ITEMS).map { item ->
             DevicesDiscoveryItemPresentation(
+                deviceName = item.deviceName,
                 endpointLabel = item.endpointLabel,
                 rolesText = item.serviceTypes.sortedBy(WirelessServiceType::ordinal).joinToString(" / ") {
                     when (it) {
@@ -128,6 +130,7 @@ internal fun DevicesDiscoveryPanel(
                         verticalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Text(item.rolesText, style = MaterialTheme.typography.titleMedium)
+                        item.deviceName?.let { Text(it, style = MaterialTheme.typography.titleMedium) }
                         Text(item.endpointLabel)
                         Text(item.relationText, style = MaterialTheme.typography.bodySmall)
                         Text(item.statusText, style = MaterialTheme.typography.bodySmall)

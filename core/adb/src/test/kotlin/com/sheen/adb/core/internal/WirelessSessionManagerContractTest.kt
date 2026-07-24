@@ -104,6 +104,28 @@ class WirelessSessionManagerContractTest {
     }
 
     @Test
+    fun `local pairing uses the single active source and cancellation closes only that generation`() = runBlocking {
+        val sourceFactory = FakeWirelessDiscoverySourceFactory()
+        val manager = manager(sourceFactory)
+        val emissions = Channel<AdbOperationResult<WirelessDiscoveryState>>(Channel.UNLIMITED)
+        val collection = async(Dispatchers.Default) {
+            manager.observeWirelessServices(WirelessDiscoveryMode.LOCAL_PAIRING, 5.seconds)
+                .collect(emissions::send)
+        }
+
+        val state = nextSuccess(emissions)
+        val source = sourceFactory.awaitSource(0)
+        assertEquals(source.request?.mode, WirelessDiscoveryMode.LOCAL_PAIRING)
+        assertEquals(source.request?.generation, state.generation)
+        assertEquals(sourceFactory.sources.size, 1)
+
+        collection.cancelAndJoin()
+        awaitCondition { source.closeCalls.get() == 1 }
+        assertEquals(source.closeCalls.get(), 1)
+        manager.close()
+    }
+
+    @Test
     fun `discovery has a finite timeout with a structured terminal error`() = runBlocking {
         val sourceFactory = FakeWirelessDiscoverySourceFactory()
         val manager = manager(sourceFactory)

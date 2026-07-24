@@ -10,9 +10,6 @@ import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.ApplicationField
-import com.sheen.adb.core.ApplicationIconEncoding
-import com.sheen.adb.core.ApplicationIconFallback
-import com.sheen.adb.core.ApplicationIconPayload
 import com.sheen.adb.core.ApplicationMetadataStatus
 import com.sheen.adb.core.ApplicationMetadataUpdate
 import com.sheen.adb.core.ApplicationMutationResult
@@ -40,6 +37,12 @@ import com.sheen.adb.core.ProcessAnalysisSnapshot
 import com.sheen.adb.core.ProcessApplicationAssociation
 import com.sheen.adb.core.ProcessAssociationUnknownReason
 import com.sheen.adb.core.ProcessRecordAssociation
+import com.sheen.adb.core.ProcessSnapshotEntry
+import com.sheen.adb.core.ProcessIdentity
+import com.sheen.adb.core.ProcessTerminationRequest
+import com.sheen.adb.core.ProcessTerminationResult
+import com.sheen.adb.core.ProcessTerminationOutcome
+import com.sheen.adb.core.ProcessTerminationScope
 import com.sheen.adb.core.QrPairingMaterial
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
@@ -78,7 +81,6 @@ import com.sheen.adb.core.internal.applications.ApplicationMetadataLoader
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseResult
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParser
 import com.sheen.adb.core.internal.applications.BoundedRemoteApkReader
-import com.sheen.adb.core.internal.applications.ParsedApplicationIconKind
 import com.sheen.adb.core.internal.applications.RemoteApkReader
 import com.sheen.adb.core.internal.diagnostics.ProcessAssociation
 import com.sheen.adb.core.internal.diagnostics.StructuredLogcatParser
@@ -87,6 +89,9 @@ import com.sheen.adb.core.internal.pairing.MonotonicClock
 import com.sheen.adb.core.internal.pairing.LocalPairingCoordinator
 import com.sheen.adb.core.internal.pairing.LocalPairingNotificationPolicy
 import com.sheen.adb.core.internal.pairing.QrPairingCoordinator
+import com.sheen.adb.core.internal.processes.ProcessApplicationAssociationResolver
+import com.sheen.adb.core.internal.processes.ProcessSnapshotParser
+import com.sheen.adb.core.internal.processes.ProcessTerminationPolicy
 import java.io.Closeable
 import java.security.SecureRandom
 import java.security.MessageDigest
@@ -116,6 +121,7 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runInterruptible
@@ -125,6 +131,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
 
@@ -274,6 +281,9 @@ internal class DefaultAdbSessionManager(
     private val diagnosticSequence = AtomicLong(0)
     private val wirelessDiscoveryGeneration = AtomicLong(0)
     private val processAnalysisGeneration = AtomicLong(0)
+    private val processRefreshRequestedGeneration = AtomicLong(0)
+    private val processTerminationRequestLock = Any()
+    private val consumedProcessTerminationRequestIds = linkedSetOf<String>()
     @Volatile
     private var active: ActiveSession? = null
     @Volatile
@@ -1671,6 +1681,281 @@ internal class DefaultAdbSessionManager(
         }
     }
 
+    /* P2 process operations are implemented by the session facade below. */
+    override suspend fun refreshProcesses(
+        expectedSessionId: String,
+        timeout: Duration,
+    ): AdbOperationResult<List<ProcessSnapshotEntry>> {
+        val initialSession = mutex.withLock { active }
+        if (initialSession == null || initialSession.id != expectedSessionId) {
+            return applicationFailure(
+                AdbError.ApplicationSessionInvalid(AdbOperationStage.PROCESSES),
+                initialSession?.endpoint,
+            )
+        }
+        val generation = processAnalysisGeneration.incrementAndGet()
+        processRefreshRequestedGeneration.set(generation)
+        return try {
+            withTimeout(minOf(timeout, PROCESS_REFRESH_BUDGET)) {
+                val applications = when (val result = listApplications(timeout)) {
+                    is AdbOperationResult.Success -> result.value
+                    is AdbOperationResult.Failure -> return@withTimeout result
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
+                    return@withTimeout AdbOperationResult.Cancelled
+                }
+                val psText = when (val result = executeShell(AdbCommands.PROCESSES_EXTENDED, timeout)) {
+                    is AdbOperationResult.Success -> result.value.stdout
+                    is AdbOperationResult.Failure -> return@withTimeout result
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                val processorCount = when (val result = executeShell(AdbCommands.CORES, timeout)) {
+                    is AdbOperationResult.Success -> result.value.stdout.trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
+                    is AdbOperationResult.Failure -> 1
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                val firstText = when (val result = executeShell(AdbCommands.PROCESS_COUNTERS, timeout)) {
+                    is AdbOperationResult.Success -> result.value.stdout
+                    is AdbOperationResult.Failure -> return@withTimeout result
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                delay(PROCESS_SAMPLE_INTERVAL)
+                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
+                    return@withTimeout AdbOperationResult.Cancelled
+                }
+                val secondText = when (val result = executeShell(AdbCommands.PROCESS_COUNTERS, timeout)) {
+                    is AdbOperationResult.Success -> result.value.stdout
+                    is AdbOperationResult.Failure -> return@withTimeout result
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                val pssText = when (val result = executeShell(AdbCommands.PROCESS_PSS, timeout)) {
+                    is AdbOperationResult.Success -> result.value.stdout
+                    is AdbOperationResult.Failure -> ""
+                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
+                }
+                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
+                    return@withTimeout AdbOperationResult.Cancelled
+                }
+                val firstCounters = AdbCapabilityParsers.processCounters(firstText)
+                val secondCounters = AdbCapabilityParsers.processCounters(secondText)
+                val applicationNames = applications.applications.associate { it.packageName to null }
+                val entries = ProcessSnapshotParser.parse(
+                    psText = psText,
+                    sessionId = expectedSessionId,
+                    generation = generation,
+                    firstProcessTicks = firstCounters.mapValues { it.value.cpuTicks },
+                    secondProcessTicks = secondCounters.mapValues { it.value.cpuTicks },
+                    elapsedTotalTicks = cpuTickDelta(firstText, secondText),
+                    processorCount = processorCount,
+                    pssKiBByPid = AdbCapabilityParsers.compactPss(pssText),
+                    startTimeTicksByPid = secondCounters.mapValues { it.value.startTimeTicks },
+                ).map { entry ->
+                    val resolved = ProcessApplicationAssociationResolver.resolve(
+                        entry.processName,
+                        applicationNames,
+                    )
+                    entry.copy(
+                        applicationName = resolved?.applicationName ?: "无法解析应用名",
+                        applicationPackage = resolved?.packageName,
+                    )
+                }
+                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
+                    AdbOperationResult.Cancelled
+                } else {
+                    AdbOperationResult.Success(entries)
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            applicationFailure(AdbError.Timeout(AdbOperationStage.PROCESSES), initialSession.endpoint)
+        } catch (_: CancellationException) {
+            AdbOperationResult.Cancelled
+        }
+    }
+
+    private suspend fun isCurrentProcessRefresh(expectedSessionId: String, generation: Long): Boolean =
+        processRefreshRequestedGeneration.get() == generation &&
+            mutex.withLock { active?.id == expectedSessionId }
+
+    private fun cpuTickDelta(firstText: String, secondText: String): Long? {
+        val first = AdbCapabilityParsers.totalCpuTicks(firstText) ?: return null
+        val second = AdbCapabilityParsers.totalCpuTicks(secondText) ?: return null
+        return (second - first).takeIf { it > 0L }
+    }
+
+    override suspend fun terminateProcess(
+        request: ProcessTerminationRequest,
+        timeout: Duration,
+    ): AdbOperationResult<ProcessTerminationResult> {
+        fun result(
+            outcome: ProcessTerminationOutcome,
+            messageCode: String,
+            verified: Set<ProcessIdentity> = emptySet(),
+            remaining: Set<ProcessIdentity> = emptySet(),
+        ) = AdbOperationResult.Success(
+            ProcessTerminationResult(
+                sessionId = request.sessionId,
+                scope = request.scope,
+                outcome = outcome,
+                verifiedTerminated = verified,
+                remaining = remaining,
+                messageCode = messageCode,
+            ),
+        )
+        val current = mutex.withLock { active }
+            ?: return result(ProcessTerminationOutcome.DISCONNECTED, "SESSION_DISCONNECTED")
+        if (request.sessionId != current.id) {
+            return result(ProcessTerminationOutcome.DISCONNECTED, "SESSION_CHANGED")
+        }
+        val confirmationAccepted = request.riskAcknowledged &&
+            (request.scope != ProcessTerminationScope.WHOLE_APPLICATION_FORCE_STOP || request.forceStopImpactAcknowledged) &&
+            rememberProcessTerminationRequest(request.requestId)
+        if (!confirmationAccepted) {
+            return result(ProcessTerminationOutcome.POLICY_REJECTED, "CONFIRMATION_REQUIRED")
+        }
+        if (!ProcessTerminationPolicy.allows(
+                request.scope,
+                request.targetProcess,
+                request.targetPackage,
+                request.confirmedProcessSet,
+            )
+        ) {
+            return result(ProcessTerminationOutcome.POLICY_REJECTED, "TARGET_NOT_ALLOWED")
+        }
+        return try {
+            withTimeout(timeout) {
+                val before = when (val refreshed = refreshProcesses(request.sessionId, PROCESS_REFRESH_BUDGET)) {
+                    is AdbOperationResult.Success -> refreshed.value
+                    is AdbOperationResult.Failure ->
+                        return@withTimeout result(ProcessTerminationOutcome.DISCONNECTED, "PRECHECK_FAILED")
+                    AdbOperationResult.Cancelled ->
+                        return@withTimeout result(ProcessTerminationOutcome.CANCELLED, "PRECHECK_CANCELLED")
+                }
+                val targetNow = before.firstOrNull { it.pid == request.targetProcess.pid }
+                    ?: return@withTimeout result(ProcessTerminationOutcome.ALREADY_EXITED, "TARGET_ALREADY_EXITED")
+                if (!sameProcessIdentity(request.targetProcess, targetNow.identity)) {
+                    return@withTimeout result(ProcessTerminationOutcome.IDENTITY_CHANGED, "PROCESS_IDENTITY_CHANGED")
+                }
+                val beforeScope = when (request.scope) {
+                    ProcessTerminationScope.SINGLE_PROCESS -> setOf(targetNow.identity)
+                    ProcessTerminationScope.WHOLE_APPLICATION_FORCE_STOP -> {
+                        val packageName = checkNotNull(request.targetPackage)
+                        val currentSet = before.filter { it.applicationPackage == packageName }.map { it.identity }.toSet()
+                        if (!sameProcessSet(request.confirmedProcessSet, currentSet)) {
+                            return@withTimeout result(
+                                ProcessTerminationOutcome.IDENTITY_CHANGED,
+                                "APPLICATION_PROCESS_SET_CHANGED",
+                            )
+                        }
+                        currentSet
+                    }
+                }
+                val command = when (request.scope) {
+                    ProcessTerminationScope.SINGLE_PROCESS -> "kill -TERM ${targetNow.pid}"
+                    ProcessTerminationScope.WHOLE_APPLICATION_FORCE_STOP -> {
+                        val userId = processUserId(targetNow.identity.uid)
+                            ?: return@withTimeout result(ProcessTerminationOutcome.UNSUPPORTED, "USER_ID_UNAVAILABLE")
+                        "am force-stop --user $userId ${request.targetPackage}"
+                    }
+                }
+                when (val dispatched = executeShell(command, timeout)) {
+                    is AdbOperationResult.Success -> if (dispatched.value.exitCode != 0) {
+                        return@withTimeout result(ProcessTerminationOutcome.POLICY_REJECTED, "COMMAND_REJECTED")
+                    }
+                    is AdbOperationResult.Failure ->
+                        return@withTimeout result(ProcessTerminationOutcome.UNKNOWN, "COMMAND_OUTCOME_UNKNOWN")
+                    AdbOperationResult.Cancelled ->
+                        return@withTimeout result(ProcessTerminationOutcome.CANCELLED, "COMMAND_CANCELLED")
+                }
+                val after = when (val refreshed = refreshProcesses(request.sessionId, PROCESS_REFRESH_BUDGET)) {
+                    is AdbOperationResult.Success -> refreshed.value
+                    is AdbOperationResult.Failure ->
+                        return@withTimeout result(ProcessTerminationOutcome.UNKNOWN, "VERIFY_FAILED")
+                    AdbOperationResult.Cancelled ->
+                        return@withTimeout result(ProcessTerminationOutcome.CANCELLED, "VERIFY_CANCELLED")
+                }
+                when (request.scope) {
+                    ProcessTerminationScope.SINGLE_PROCESS -> {
+                        val remains = after.any { sameProcessIdentity(request.targetProcess, it.identity) }
+                        if (remains) {
+                            result(
+                                ProcessTerminationOutcome.UNKNOWN,
+                                "TARGET_STILL_PRESENT",
+                                remaining = setOf(request.targetProcess),
+                            )
+                        } else {
+                            result(
+                                ProcessTerminationOutcome.TERMINATED,
+                                "TARGET_EXIT_VERIFIED",
+                                verified = setOf(request.targetProcess),
+                            )
+                        }
+                    }
+                    ProcessTerminationScope.WHOLE_APPLICATION_FORCE_STOP -> {
+                        val remaining = after
+                            .filter { it.applicationPackage == request.targetPackage }
+                            .map { it.identity }
+                            .toSet()
+                        val verified = beforeScope.filterTo(linkedSetOf()) { expected ->
+                            remaining.none { sameProcessIdentity(expected, it) }
+                        }
+                        when {
+                            remaining.isEmpty() -> result(
+                                ProcessTerminationOutcome.TERMINATED,
+                                "APPLICATION_STOP_VERIFIED",
+                                verified = beforeScope,
+                            )
+                            verified.isNotEmpty() -> result(
+                                ProcessTerminationOutcome.PARTIAL,
+                                "APPLICATION_PARTIALLY_STOPPED",
+                                verified = verified,
+                                remaining = remaining,
+                            )
+                            else -> result(
+                                ProcessTerminationOutcome.UNKNOWN,
+                                "APPLICATION_STILL_PRESENT",
+                                remaining = remaining,
+                            )
+                        }
+                    }
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            result(ProcessTerminationOutcome.TIMED_OUT, "TIMEOUT")
+        } catch (_: CancellationException) {
+            result(ProcessTerminationOutcome.CANCELLED, "CANCELLED")
+        }
+    }
+
+    private fun rememberProcessTerminationRequest(requestId: String): Boolean =
+        synchronized(processTerminationRequestLock) {
+            if (requestId.isBlank() || requestId in consumedProcessTerminationRequestIds) {
+                false
+            } else {
+                consumedProcessTerminationRequestIds += requestId
+                while (consumedProcessTerminationRequestIds.size > MAX_CONSUMED_PROCESS_REQUESTS) {
+                    consumedProcessTerminationRequestIds.remove(consumedProcessTerminationRequestIds.first())
+                }
+                true
+            }
+        }
+
+    private fun sameProcessIdentity(first: ProcessIdentity, second: ProcessIdentity): Boolean =
+        first.sessionId == second.sessionId &&
+            first.pid == second.pid &&
+            first.startTimeTicks != null &&
+            first.startTimeTicks == second.startTimeTicks &&
+            first.uid == second.uid &&
+            first.processName == second.processName
+
+    private fun sameProcessSet(first: Set<ProcessIdentity>, second: Set<ProcessIdentity>): Boolean =
+        first.size == second.size && first.all { expected -> second.any { sameProcessIdentity(expected, it) } }
+
+    private fun processUserId(uid: String?): Int? =
+        uid?.toIntOrNull()?.takeIf { it >= 0 }?.div(100_000)
+            ?: Regex("^u(\\d+)_a\\d+$").matchEntire(uid.orEmpty())
+                ?.groupValues?.get(1)?.toIntOrNull()
+
     override suspend fun listApplications(timeout: Duration): AdbOperationResult<ApplicationSnapshot> =
         applicationMutex.withLock {
             val session = mutex.withLock { active } ?: return@withLock applicationFailure(
@@ -1750,7 +2035,6 @@ internal class DefaultAdbSessionManager(
                                     userId = update.userId,
                                     packageName = update.packageName,
                                     displayName = null,
-                                    icon = null,
                                     status = ApplicationMetadataStatus.SESSION_CHANGED,
                                 ),
                             ),
@@ -1788,26 +2072,11 @@ internal class DefaultAdbSessionManager(
     }
 
     private fun com.sheen.adb.core.internal.applications.ApplicationMetadataLoadUpdate.toPublic(): ApplicationMetadataUpdate {
-        val parsedIcon = metadata?.icon
-        val publicIcon = parsedIcon?.mimeType?.toIconEncoding()?.let { encoding ->
-            ApplicationIconPayload(
-                encoding = encoding,
-                width = parsedIcon.width,
-                height = parsedIcon.height,
-                encodedBytes = parsedIcon.encodedBytes,
-                fallback = when (parsedIcon.kind) {
-                    ParsedApplicationIconKind.RASTER -> ApplicationIconFallback.NONE
-                    ParsedApplicationIconKind.ADAPTIVE_FOREGROUND_FALLBACK ->
-                        ApplicationIconFallback.ADAPTIVE_FOREGROUND
-                },
-            )
-        }
         return ApplicationMetadataUpdate(
             sessionId = sessionId,
             userId = userId,
             packageName = packageName,
             displayName = metadata?.displayName,
-            icon = publicIcon,
             status = when (status) {
                 ApplicationMetadataLoadStatus.AVAILABLE -> ApplicationMetadataStatus.AVAILABLE
                 ApplicationMetadataLoadStatus.UNAVAILABLE -> ApplicationMetadataStatus.UNAVAILABLE
@@ -1816,15 +2085,7 @@ internal class DefaultAdbSessionManager(
                 ApplicationMetadataLoadStatus.SESSION_CHANGED -> ApplicationMetadataStatus.SESSION_CHANGED
                 ApplicationMetadataLoadStatus.TIMED_OUT -> ApplicationMetadataStatus.TIMED_OUT
             },
-            evictedIconPackages = evictedIconPackages,
         )
-    }
-
-    private fun String.toIconEncoding(): ApplicationIconEncoding? = when (this) {
-        "image/png" -> ApplicationIconEncoding.PNG
-        "image/jpeg" -> ApplicationIconEncoding.JPEG
-        "image/webp" -> ApplicationIconEncoding.WEBP
-        else -> null
     }
 
     private fun clearApplicationMetadata() {
@@ -2184,6 +2445,18 @@ internal class DefaultAdbSessionManager(
             emit(AdbOperationResult.Failure(AdbError.RemoteClosed(AdbOperationStage.LOGCAT)))
             return@flow
         }
+        val lease = when (val acquired = acquireExclusiveOperation(AdbExclusiveOperationKind.LOGCAT, session.id)) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> {
+                emit(acquired)
+                return@flow
+            }
+            AdbOperationResult.Cancelled -> {
+                emit(AdbOperationResult.Cancelled)
+                return@flow
+            }
+        }
+        val leaseCompletion = currentCoroutineContext()[Job]?.invokeOnCompletion { lease.release() }
         appendDiagnostic(AdbOperationStage.LOGCAT, AdbDiagnosticOutcome.STARTED, "ADB_LOGCAT_STARTED", session.endpoint)
         var stream: ProtocolShellStream? = null
         val stdout = LineChunkDecoder()
@@ -2224,6 +2497,8 @@ internal class DefaultAdbSessionManager(
             emit(operationFailure(mapped, session.endpoint, error))
         } finally {
             withContext(NonCancellable + ioDispatcher) { runCatching { stream?.close() } }
+            withContext(NonCancellable) { lease.release() }
+            leaseCompletion?.dispose()
             appendDiagnostic(
                 AdbOperationStage.LOGCAT,
                 AdbDiagnosticOutcome.RESOURCE_CLOSED,
@@ -2757,6 +3032,9 @@ internal class DefaultAdbSessionManager(
         const val SELF_PACKAGE_NAME = "com.sheen.adbhelper"
         const val OPTIONAL_FIELDS_UNAVAILABLE_REASON =
             "设备基础包列表可用；版本号、版本名和安装器字段未通过跨 ROM 可靠性验证，已明确省略"
+        val PROCESS_REFRESH_BUDGET = 5.seconds
+        val PROCESS_SAMPLE_INTERVAL = 500.milliseconds
+        const val MAX_CONSUMED_PROCESS_REQUESTS = 128
         val FILE_PREPARE_TIMEOUT = 5.seconds
         const val DEFAULT_REMOTE_FILE_MODE = 0x81A4
         const val MAX_AUTO_RENAME_ATTEMPTS = 1_000

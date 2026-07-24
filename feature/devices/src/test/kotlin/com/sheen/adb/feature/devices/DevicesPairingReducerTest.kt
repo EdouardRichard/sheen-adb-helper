@@ -228,6 +228,29 @@ class DevicesPairingReducerTest {
     }
 
     @Test
+    fun `local timeout is terminal and later discovery or notification events are discarded`() {
+        val active = reduce(event = DevicesPairingEvent.EnterLocalMode).state
+        val expired = reduce(active, DevicesPairingEvent.Expired)
+
+        assertEquals(expired.state.phase, PairingAttemptPhase.EXPIRED)
+        assertFalse(expired.state.localWindowActive)
+        assertEquals(expired.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.STOPPED)
+
+        val lateDiscovery = reduce(
+            expired.state,
+            DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.FOUND),
+        )
+        val lateNotification = reduce(
+            expired.state,
+            DevicesPairingEvent.LocalNotificationChanged(LocalPairingNotificationState.INPUT_READY),
+        )
+        assertEquals(lateDiscovery.state, expired.state)
+        assertEquals(lateNotification.state, expired.state)
+        assertTrue(lateDiscovery.effects.isEmpty())
+        assertTrue(lateNotification.effects.isEmpty())
+    }
+
+    @Test
     fun `page leave keeps only an active window opened for system wireless settings`() {
         val active = reduce(event = DevicesPairingEvent.EnterLocalMode).state
 

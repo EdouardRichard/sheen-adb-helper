@@ -119,6 +119,8 @@ class DefaultAdbSessionManagerTest {
         val client = FakeClient(stream = stream)
         val manager = DefaultAdbSessionManager(FakeFactory(client), Dispatchers.IO)
         manager.connect(AdbEndpoint("logcat.local", 40006))
+        val sessionIdBeforeCancellation =
+            (manager.connectionState.value as AdbConnectionState.Connected).sessionId
 
         val collection = async(Dispatchers.Default) { manager.streamLogcat(LogcatConfig()).collect() }
         while (!stream.started.get()) Thread.yield()
@@ -127,7 +129,12 @@ class DefaultAdbSessionManagerTest {
 
         assertTrue(stream.closed.get())
         assertTrue(!client.closed.get())
-        assertTrue(manager.connectionState.value is AdbConnectionState.Connected)
+        val stateAfterCancellation = manager.connectionState.value
+        assertTrue(stateAfterCancellation is AdbConnectionState.Connected)
+        assertEquals(
+            (stateAfterCancellation as AdbConnectionState.Connected).sessionId,
+            sessionIdBeforeCancellation,
+        )
     }
 
     @Test

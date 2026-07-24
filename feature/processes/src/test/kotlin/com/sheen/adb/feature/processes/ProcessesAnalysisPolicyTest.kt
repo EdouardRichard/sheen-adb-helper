@@ -1,9 +1,7 @@
 package com.sheen.adb.feature.processes
 
-import com.sheen.adb.core.DeviceProcess
-import com.sheen.adb.core.ProcessAnalysisEntry
-import com.sheen.adb.core.ProcessApplicationAssociation
-import com.sheen.adb.core.ProcessAssociationUnknownReason
+import com.sheen.adb.core.ProcessIdentity
+import com.sheen.adb.core.ProcessSnapshotEntry
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
@@ -13,8 +11,8 @@ class ProcessesAnalysisPolicyTest {
     @Test
     fun `pid process name and application filters accept partial text and combine with AND`() {
         val entries = listOf(
-            entry(1234, "fixture.worker", ProcessApplicationAssociation.Verified("com.example.reader")),
-            entry(2345, "fixture.remote", ProcessApplicationAssociation.Verified("com.example.writer")),
+            entry(1234, "fixture.worker", "com.example.reader"),
+            entry(2345, "fixture.remote", "com.example.writer"),
         )
         val state = ProcessesUiState(
             isConnected = true,
@@ -25,39 +23,30 @@ class ProcessesAnalysisPolicyTest {
             applicationQuery = "example.read",
         )
 
-        assertEquals(state.visibleEntries.map { it.process.pid }, listOf(1234))
-        assertEquals(state.copy(pidQuery = "1234").visibleEntries.single().process.pid, 1234)
+        assertEquals(state.visibleEntries.map { it.pid }, listOf(1234))
+        assertEquals(state.copy(pidQuery = "1234").visibleEntries.single().pid, 1234)
         assertTrue(state.copy(pidQuery = "", processQuery = "", applicationQuery = "").visibleEntries == entries)
         assertTrue(state.copy(processQuery = "remote").visibleEntries.isEmpty())
     }
 
     @Test
-    fun `multiple association remains explicit and unknown never matches application filter`() {
-        val multiple = entry(
-            100,
-            "fixture.shared",
-            ProcessApplicationAssociation.Multiple(setOf("com.example.shared.one", "com.example.shared.two")),
-        )
-        val unknown = entry(
-            101,
-            "fixture.unknown",
-            ProcessApplicationAssociation.Unknown(ProcessAssociationUnknownReason.MISSING_UID),
-        )
+    fun `unknown association never matches application filter`() {
+        val known = entry(100, "fixture.shared", "com.example.shared.one")
+        val unknown = entry(101, "fixture.unknown", null)
         val state = ProcessesUiState(
             isConnected = true,
-            entries = listOf(multiple, unknown),
+            entries = listOf(known, unknown),
             applicationQuery = "shared.one",
         )
 
-        assertEquals(state.visibleEntries.single().applicationAssociation, multiple.applicationAssociation)
-        assertFalse(state.visibleEntries.single().applicationAssociation is ProcessApplicationAssociation.Verified)
+        assertEquals(state.visibleEntries.single().applicationPackage, "com.example.shared.one")
         assertTrue(state.copy(applicationQuery = "unknown").visibleEntries.isEmpty())
     }
 
     @Test
     fun `refresh classification distinguishes empty exited unsupported and cancelled`() {
-        val previous = listOf(entry(100, "fixture.old", ProcessApplicationAssociation.Verified("com.example.old")))
-        val current = listOf(entry(101, "fixture.new", ProcessApplicationAssociation.Verified("com.example.new")))
+        val previous = listOf(entry(100, "fixture.old", "com.example.old"))
+        val current = listOf(entry(101, "fixture.new", "com.example.new"))
 
         assertEquals(
             ProcessesPolicy.classifyRefresh(previous, current, degradedReason = null),
@@ -80,7 +69,7 @@ class ProcessesAnalysisPolicyTest {
             isConnected = true,
             sessionId = "session-a",
             generation = 7,
-            entries = listOf(entry(100, "fixture.old", ProcessApplicationAssociation.Verified("com.example.old"))),
+            entries = listOf(entry(100, "fixture.old", "com.example.old")),
             pidQuery = "100",
             processQuery = "old",
             applicationQuery = "example",
@@ -104,10 +93,9 @@ class ProcessesAnalysisPolicyTest {
     private fun entry(
         pid: Int,
         name: String,
-        association: ProcessApplicationAssociation,
-    ) = ProcessAnalysisEntry(
-        snapshotGeneration = 1,
-        process = DeviceProcess(name = name, pid = pid, uid = "u0_a123"),
-        applicationAssociation = association,
+        packageName: String?,
+    ) = ProcessSnapshotEntry(
+        identity = ProcessIdentity("session-a", pid, 900L + pid, "u0_a123", name, 1),
+        applicationPackage = packageName,
     )
 }

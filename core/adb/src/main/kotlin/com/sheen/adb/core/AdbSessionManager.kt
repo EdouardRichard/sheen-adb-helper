@@ -19,31 +19,12 @@ enum class ApplicationMetadataStatus {
     TIMED_OUT,
 }
 
-enum class ApplicationIconEncoding { PNG, JPEG, WEBP }
-
-enum class ApplicationIconFallback { NONE, ADAPTIVE_FOREGROUND }
-
-class ApplicationIconPayload(
-    val encoding: ApplicationIconEncoding,
-    val width: Int,
-    val height: Int,
-    encodedBytes: ByteArray,
-    val fallback: ApplicationIconFallback,
-) {
-    private val retainedBytes = encodedBytes.copyOf()
-
-    val encodedBytes: ByteArray
-        get() = retainedBytes.copyOf()
-}
-
 data class ApplicationMetadataUpdate(
     val sessionId: String,
     val userId: Int,
     val packageName: String,
     val displayName: String?,
-    val icon: ApplicationIconPayload?,
     val status: ApplicationMetadataStatus,
-    val evictedIconPackages: Set<String> = emptySet(),
 )
 
 internal data class WirelessDiscoverySourceRequest(
@@ -221,6 +202,18 @@ interface AdbSessionManager : AutoCloseable {
     ): AdbOperationResult<ProcessAnalysisSnapshot> = AdbOperationResult.Failure(
         AdbError.ApplicationSessionInvalid(AdbOperationStage.PROCESSES),
     )
+
+    suspend fun refreshProcesses(
+        expectedSessionId: String,
+        timeout: Duration = 5.seconds,
+    ): AdbOperationResult<List<ProcessSnapshotEntry>> =
+        AdbOperationResult.Failure(AdbError.ApplicationSessionInvalid(AdbOperationStage.PROCESSES))
+
+    suspend fun terminateProcess(
+        request: ProcessTerminationRequest,
+        timeout: Duration = 10.seconds,
+    ): AdbOperationResult<ProcessTerminationResult> =
+        AdbOperationResult.Failure(AdbError.ApplicationSessionInvalid(AdbOperationStage.PROCESSES))
 
     suspend fun listApplications(timeout: Duration = 15.seconds): AdbOperationResult<ApplicationSnapshot>
 

@@ -65,6 +65,7 @@ internal class DevicesDiscoveryReducer {
             val connectTarget = connect.resolvedTarget(snapshot.generation)
             val preferredEndpoint = connect ?: pairing ?: observations.first()
             DevicesDiscoveryItem(
+                deviceName = device.deviceName,
                 serviceTypes = device.serviceTypes,
                 pairingTarget = pairingTarget,
                 connectTarget = connectTarget,
@@ -128,11 +129,20 @@ internal class DevicesDiscoveryReducer {
             ?.let { WirelessDiscoveryTarget(generation, it.observationId) }
 
     private fun WirelessServiceObservation.endpointLabel(): String {
-        val family = when (addresses.firstOrNull()) {
+        val address = addresses.firstOrNull() ?: return "ADB · 地址不可用 · $port"
+        val protocol = when (address) {
             is WirelessAddress.Ipv4 -> "IPv4"
             is WirelessAddress.Ipv6 -> "IPv6"
-            null -> "地址不可用"
         }
-        return "$family · 端口 $port"
+        val rendered = when (address) {
+            is WirelessAddress.Ipv4 -> listOf(
+                address.firstOctet,
+                address.secondOctet,
+                address.thirdOctet,
+                address.fourthOctet,
+            ).joinToString(".")
+            is WirelessAddress.Ipv6 -> address.segments.joinToString(":") { it.toString(16) }
+        }
+        return "$protocol · $rendered · $port"
     }
 }

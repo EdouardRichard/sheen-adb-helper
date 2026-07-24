@@ -5,9 +5,6 @@ import com.sheen.adb.core.internal.applications.ApplicationMetadataLoader
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseResult
 import com.sheen.adb.core.internal.applications.BoundedRemoteApkReader
 import com.sheen.adb.core.internal.applications.MAX_APPLICATION_APK_BYTES
-import com.sheen.adb.core.internal.applications.MAX_APPLICATION_ICON_BYTES
-import com.sheen.adb.core.internal.applications.ParsedApplicationIcon
-import com.sheen.adb.core.internal.applications.ParsedApplicationIconKind
 import com.sheen.adb.core.internal.applications.ParsedApplicationMetadata
 import com.sheen.adb.core.internal.applications.RemoteApkReadFailure
 import com.sheen.adb.core.internal.applications.RemoteApkReadRequest
@@ -164,7 +161,7 @@ class ApplicationMetadataLoaderTest {
                 RemoteApkReadResult.Success(request.packageName.toByteArray(), "/data/app/redacted/base.apk")
             }
         }
-        val parser = parserFromBytes(iconSize = 8)
+        val parser = parserFromBytes()
         val loader = ApplicationMetadataLoader(
             reader = reader,
             parseMetadata = parser,
@@ -192,53 +189,10 @@ class ApplicationMetadataLoaderTest {
         )
     }
 
-    @Test
-    fun `loader enforces one MiB icon limit and sixteen MiB least recently used cache`() = runBlocking {
-        val reader = RemoteApkReader { request ->
-            RemoteApkReadResult.Success(request.packageName.toByteArray(), "/data/app/redacted/base.apk")
-        }
-        val oversizedLoader = ApplicationMetadataLoader(
-            reader = reader,
-            parseMetadata = parserFromBytes(MAX_APPLICATION_ICON_BYTES + 1),
-        )
-
-        val oversized = oversizedLoader.load(
-            "session-a",
-            0,
-            listOf("com.example.oversized"),
-            listOf("en-US"),
-        ).toList().single()
-
-        assertEquals(oversized.status, ApplicationMetadataLoadStatus.TOO_LARGE)
-        assertEquals(oversized.metadata?.displayName, "com.example.oversized")
-        assertEquals(oversized.metadata?.icon, null)
-
-        val cacheLoader = ApplicationMetadataLoader(
-            reader = reader,
-            parseMetadata = parserFromBytes(MAX_APPLICATION_ICON_BYTES),
-        )
-        val packages = (0..16).map { "com.example.app$it" }
-        val updates = cacheLoader.load("session-a", 0, packages, listOf("en-US")).toList()
-
-        assertEquals(cacheLoader.cachedIconBytes(), 16L * 1024 * 1024)
-        assertFalse(cacheLoader.hasCachedIcon("session-a", 0, packages.first()))
-        assertTrue(cacheLoader.hasCachedIcon("session-a", 0, packages.last()))
-        assertEquals(updates.last().evictedIconPackages, setOf(packages.first()))
-    }
-
-    private fun parserFromBytes(
-        iconSize: Int,
-    ): (ByteArray, List<String>) -> ApplicationMetadataParseResult = { bytes, _ ->
+    private fun parserFromBytes() : (ByteArray, List<String>) -> ApplicationMetadataParseResult = { bytes, _ ->
         val packageName = bytes.toString(Charsets.UTF_8)
-        val icon = ParsedApplicationIcon(
-            encodedBytes = ByteArray(iconSize),
-            mimeType = "image/png",
-            width = 1,
-            height = 1,
-            kind = ParsedApplicationIconKind.RASTER,
-        )
         ApplicationMetadataParseResult.Success(
-            ParsedApplicationMetadata(packageName, packageName, icon),
+            ParsedApplicationMetadata(packageName, packageName),
         )
     }
 
