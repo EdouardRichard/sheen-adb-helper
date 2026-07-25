@@ -6,11 +6,18 @@ import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.AdbExclusiveOperationKind
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.ExclusiveAdbOperationLease
+import com.sheen.adb.core.QuickActionKind
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertSame
@@ -18,6 +25,127 @@ import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
 
 class AdbExclusiveOperationCoordinatorTest {
+    @Test
+    fun `screenshot recording and reboot share one mutually exclusive lease group`() = runBlocking {
+        val manager = connectedManager()
+        val sessionId = connectedSessionId(manager)
+
+        QuickActionKind.entries.forEach { activeAction ->
+            val active = manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, sessionId)
+                as AdbOperationResult.Success<ExclusiveAdbOperationLease>
+
+            QuickActionKind.entries.forEach { requestedAction ->
+                val conflict = manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, sessionId)
+                assertTrue(
+                    conflict is AdbOperationResult.Failure &&
+                        conflict.error is AdbError.OperationConflict,
+                    "$requestedAction must conflict while $activeAction owns the quick-action lease",
+                )
+            }
+            active.value.release()
+        }
+    }
+
+    @Test
+    fun `quick actions conflict with file transfer apk extraction and logcat in both directions`() = runBlocking {
+        val manager = connectedManager()
+        val sessionId = connectedSessionId(manager)
+        val existingLongOperations = listOf(
+            AdbExclusiveOperationKind.FILE_TRANSFER,
+            AdbExclusiveOperationKind.APK_EXTRACTION,
+            AdbExclusiveOperationKind.LOGCAT,
+        )
+
+        existingLongOperations.forEach { longOperation ->
+            val longLease = manager.acquireExclusiveOperation(longOperation, sessionId)
+                as AdbOperationResult.Success<ExclusiveAdbOperationLease>
+            val blockedQuickAction =
+                manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, sessionId)
+            assertTrue(blockedQuickAction is AdbOperationResult.Failure)
+            assertSame(
+                (blockedQuickAction as AdbOperationResult.Failure).error.let {
+                    (it as AdbError.OperationConflict).activeKind
+                },
+                longOperation,
+            )
+            longLease.value.release()
+
+            val quickActionLease =
+                manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, sessionId)
+                    as AdbOperationResult.Success<ExclusiveAdbOperationLease>
+            val blockedLongOperation = manager.acquireExclusiveOperation(longOperation, sessionId)
+            assertTrue(blockedLongOperation is AdbOperationResult.Failure)
+            assertSame(
+                (blockedLongOperation as AdbOperationResult.Failure).error.let {
+                    (it as AdbError.OperationConflict).activeKind
+                },
+                AdbExclusiveOperationKind.QUICK_ACTION,
+            )
+            quickActionLease.value.release()
+        }
+    }
+
+    @Test
+    fun `quick action cancellation releases its lease`() = runBlocking {
+        val manager = connectedManager()
+        val sessionId = connectedSessionId(manager)
+        val started = CompletableDeferred<Unit>()
+        val operation = launch {
+            withQuickActionLease(manager, sessionId) {
+                started.complete(Unit)
+                awaitCancellation()
+            }
+        }
+        started.await()
+
+        operation.cancelAndJoin()
+
+        assertTrue(
+            manager.acquireExclusiveOperation(AdbExclusiveOperationKind.FILE_TRANSFER, sessionId)
+                is AdbOperationResult.Success,
+        )
+    }
+
+    @Test
+    fun `quick action exception releases its lease`() = runBlocking {
+        val manager = connectedManager()
+        val sessionId = connectedSessionId(manager)
+
+        val failure = runCatching {
+            withQuickActionLease(manager, sessionId) {
+                error("synthetic quick-action failure")
+            }
+        }
+
+        assertTrue(failure.isFailure)
+        assertTrue(
+            manager.acquireExclusiveOperation(AdbExclusiveOperationKind.LOGCAT, sessionId)
+                is AdbOperationResult.Success,
+        )
+    }
+
+    @Test
+    fun `quick action lease is invalidated when Session changes`() = runBlocking {
+        val manager = connectedManager()
+        val oldSessionId = connectedSessionId(manager)
+        val oldLease =
+            (manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, oldSessionId)
+                as AdbOperationResult.Success<ExclusiveAdbOperationLease>).value
+
+        manager.connect(AdbEndpoint("replacement.invalid", 40003))
+        val newSessionId = connectedSessionId(manager)
+
+        assertFalse(oldLease.isActive)
+        assertTrue(
+            manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, oldSessionId)
+                .let { it is AdbOperationResult.Failure && it.error is AdbError.SessionInvalid },
+        )
+        assertTrue(
+            manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, newSessionId)
+                is AdbOperationResult.Success,
+        )
+    }
+
     @Test
     fun `atomic competition grants exactly one exclusive lease`() = runBlocking {
         val manager = connectedManager()
@@ -100,8 +228,25 @@ class AdbExclusiveOperationCoordinatorTest {
                 AdbExclusiveOperationKind.FILE_TRANSFER,
                 AdbExclusiveOperationKind.APK_EXTRACTION,
                 AdbExclusiveOperationKind.LOGCAT,
+                AdbExclusiveOperationKind.QUICK_ACTION,
             ),
         )
+    }
+
+    private suspend fun <T> withQuickActionLease(
+        manager: DefaultAdbSessionManager,
+        sessionId: String,
+        block: suspend () -> T,
+    ): T {
+        val lease = (
+            manager.acquireExclusiveOperation(AdbExclusiveOperationKind.QUICK_ACTION, sessionId)
+                as AdbOperationResult.Success<ExclusiveAdbOperationLease>
+            ).value
+        return try {
+            block()
+        } finally {
+            withContext(NonCancellable) { lease.release() }
+        }
     }
 
     private suspend fun connectedManager(): DefaultAdbSessionManager =

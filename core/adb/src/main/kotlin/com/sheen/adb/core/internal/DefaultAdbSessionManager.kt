@@ -1,6 +1,7 @@
 package com.sheen.adb.core.internal
 
 import com.sheen.adb.core.AdbConnectionState
+import com.sheen.adb.core.AdbCaptureSink
 import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbDiagnosticOutcome
 import com.sheen.adb.core.AdbEndpoint
@@ -20,6 +21,9 @@ import com.sheen.adb.core.DeviceOverview
 import com.sheen.adb.core.DynamicDeviceMetrics
 import com.sheen.adb.core.DisconnectionReason
 import com.sheen.adb.core.ExclusiveAdbOperationLease
+import com.sheen.adb.core.CaptureFormat
+import com.sheen.adb.core.CaptureMetadata
+import com.sheen.adb.core.CaptureSinkResult
 import com.sheen.adb.core.FileTransferProgress
 import com.sheen.adb.core.LogcatConfig
 import com.sheen.adb.core.LogcatLine
@@ -43,6 +47,15 @@ import com.sheen.adb.core.ProcessTerminationRequest
 import com.sheen.adb.core.ProcessTerminationResult
 import com.sheen.adb.core.ProcessTerminationOutcome
 import com.sheen.adb.core.ProcessTerminationScope
+import com.sheen.adb.core.QuickActionCapabilities
+import com.sheen.adb.core.QuickActionCapability
+import com.sheen.adb.core.QuickActionKind
+import com.sheen.adb.core.QuickActionProgress
+import com.sheen.adb.core.QuickActionProgressPhase
+import com.sheen.adb.core.QuickActionResult
+import com.sheen.adb.core.RebootRequest
+import com.sheen.adb.core.ScreenshotCaptureRequest
+import com.sheen.adb.core.ScreenRecordRequest
 import com.sheen.adb.core.QrPairingMaterial
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
@@ -152,6 +165,7 @@ internal class DefaultAdbSessionManager(
         secureRandom = SecureRandom(),
     ),
     private val localPairingClock: MonotonicClock = MonotonicClock { System.nanoTime() / 1_000_000L },
+    private val quickActionProtocol: QuickActionProtocol = DefaultQuickActionProtocol(ioDispatcher),
 ) : AdbSessionManager, Closeable {
     private data class ActiveSession(
         val id: String,
@@ -169,6 +183,11 @@ internal class DefaultAdbSessionManager(
         val sessionId: String,
         val kind: AdbExclusiveOperationKind,
         val active: AtomicBoolean = AtomicBoolean(true),
+    )
+
+    private data class ActiveScreenRecording(
+        val sessionId: String,
+        val stopRequested: AtomicBoolean = AtomicBoolean(false),
     )
 
     private sealed interface WirelessDiscoverySignal {
@@ -289,6 +308,7 @@ internal class DefaultAdbSessionManager(
     @Volatile
     private var activeQrAttemptId: PairingAttemptId? = null
     private var activeExclusiveOperation: ActiveExclusiveOperation? = null
+    private var activeScreenRecording: ActiveScreenRecording? = null
     private var activeWirelessDiscovery: ActiveWirelessDiscovery? = null
     private var latestLanDiscoveryState: WirelessDiscoveryState? = null
     private val lanPairingAssociations = linkedMapOf<PairingAttemptId, LanPairingAssociation>()
@@ -376,6 +396,285 @@ internal class DefaultAdbSessionManager(
             )
         }
         AdbOperationResult.Success(ManagerExclusiveOperationLease(acquired))
+    }
+
+    override suspend fun quickActionCapabilities(
+        expectedSessionId: String,
+    ): QuickActionResult<QuickActionCapabilities> = QuickActionCapabilityResolver(
+        currentSessionId = { active?.id },
+        screenshotProbe = { sessionId ->
+            probeQuickActionCapability(sessionId, "command -v screencap >/dev/null 2>&1")
+        },
+        screenRecordProbe = { sessionId ->
+            probeQuickActionCapability(sessionId, "command -v screenrecord >/dev/null 2>&1")
+        },
+        rebootProbe = { sessionId ->
+            probeQuickActionCapability(
+                sessionId,
+                "cmd power help >/dev/null 2>&1 || command -v reboot >/dev/null 2>&1",
+            )
+        },
+    ).resolve(expectedSessionId)
+
+    override suspend fun captureScreenshot(
+        request: ScreenshotCaptureRequest,
+        sink: AdbCaptureSink,
+        progress: (QuickActionProgress) -> Unit,
+    ): QuickActionResult<CaptureMetadata> {
+        val session = active?.takeIf { it.id == request.expectedSessionId }
+            ?: return QuickActionResult.StaleSession(request.expectedSessionId)
+        val lease = when (
+            val acquired = acquireExclusiveOperation(
+                AdbExclusiveOperationKind.QUICK_ACTION,
+                request.expectedSessionId,
+            )
+        ) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return QuickActionResult.Failure(acquired.error)
+            AdbOperationResult.Cancelled -> return QuickActionResult.Cancelled
+        }
+        val started = TimeSource.Monotonic.markNow()
+        var completed = false
+        try {
+            val protocolResult = try {
+                withTimeout(request.timeout) {
+                    quickActionProtocol.captureScreenshot(session.client, sink) { bytes ->
+                        progress(
+                            QuickActionProgress(
+                                expectedSessionId = request.expectedSessionId,
+                                kind = QuickActionKind.SCREENSHOT,
+                                phase = QuickActionProgressPhase.CAPTURING,
+                                bytesWritten = bytes,
+                                elapsed = started.elapsedNow(),
+                                maxBytes = null,
+                                maxDuration = request.timeout,
+                            ),
+                        )
+                    }
+                }
+            } catch (_: TimeoutCancellationException) {
+                QuickActionProtocolCaptureResult.TimedOut
+            }
+            if (active?.id != request.expectedSessionId) {
+                return QuickActionResult.StaleSession(request.expectedSessionId)
+            }
+            return when (protocolResult) {
+                is QuickActionProtocolCaptureResult.Completed -> {
+                    if (protocolResult.bytesWritten <= 0L ||
+                        sink.finish() is CaptureSinkResult.Rejected
+                    ) {
+                        QuickActionResult.Failure(AdbError.Unknown(AdbOperationStage.QUICK_ACTION))
+                    } else {
+                        completed = true
+                        QuickActionResult.Success(
+                            CaptureMetadata(
+                                expectedSessionId = request.expectedSessionId,
+                                kind = QuickActionKind.SCREENSHOT,
+                                bytesWritten = protocolResult.bytesWritten,
+                                elapsed = started.elapsedNow(),
+                                format = CaptureFormat.PNG,
+                            ),
+                        )
+                    }
+                }
+                QuickActionProtocolCaptureResult.TimedOut ->
+                    QuickActionResult.Failure(AdbError.Timeout(AdbOperationStage.QUICK_ACTION))
+                QuickActionProtocolCaptureResult.EmptyOutput,
+                is QuickActionProtocolCaptureResult.InvalidOutput,
+                -> QuickActionResult.Failure(AdbError.Unknown(AdbOperationStage.QUICK_ACTION))
+            }
+        } catch (_: CancellationException) {
+            return QuickActionResult.Cancelled
+        } finally {
+            withContext(NonCancellable) {
+                if (!completed) sink.abort()
+                lease.release()
+            }
+        }
+    }
+
+    override suspend fun recordScreen(
+        request: ScreenRecordRequest,
+        sink: AdbCaptureSink,
+        progress: (QuickActionProgress) -> Unit,
+    ): QuickActionResult<CaptureMetadata> {
+        val session = active?.takeIf { it.id == request.expectedSessionId }
+            ?: return QuickActionResult.StaleSession(request.expectedSessionId)
+        val lease = when (
+            val acquired = acquireExclusiveOperation(
+                AdbExclusiveOperationKind.QUICK_ACTION,
+                request.expectedSessionId,
+            )
+        ) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return QuickActionResult.Failure(acquired.error)
+            AdbOperationResult.Cancelled -> return QuickActionResult.Cancelled
+        }
+        val started = TimeSource.Monotonic.markNow()
+        val recording = ActiveScreenRecording(request.expectedSessionId)
+        synchronized(exclusiveOperationLock) {
+            activeScreenRecording = recording
+        }
+        var completed = false
+        try {
+            val protocolResult = try {
+                withTimeout(request.timeout) {
+                    quickActionProtocol.recordScreen(
+                        client = session.client,
+                        sink = sink,
+                        maxBytes = request.maxBytes,
+                        maxDuration = request.maxDuration,
+                        stopRequested = recording.stopRequested::get,
+                    ) { bytes ->
+                        progress(
+                            QuickActionProgress(
+                                expectedSessionId = request.expectedSessionId,
+                                kind = QuickActionKind.SCREEN_RECORD,
+                                phase = if (recording.stopRequested.get()) {
+                                    QuickActionProgressPhase.STOPPING
+                                } else {
+                                    QuickActionProgressPhase.CAPTURING
+                                },
+                                bytesWritten = bytes,
+                                elapsed = started.elapsedNow(),
+                                maxBytes = request.maxBytes,
+                                maxDuration = request.maxDuration,
+                            ),
+                        )
+                    }
+                }
+            } catch (_: TimeoutCancellationException) {
+                QuickActionProtocolCaptureResult.TimedOut
+            }
+            if (active?.id != request.expectedSessionId) {
+                return QuickActionResult.StaleSession(request.expectedSessionId)
+            }
+            return when (protocolResult) {
+                is QuickActionProtocolCaptureResult.Completed -> {
+                    if (protocolResult.bytesWritten <= 0L ||
+                        protocolResult.bytesWritten > request.maxBytes ||
+                        sink.finish() is CaptureSinkResult.Rejected
+                    ) {
+                        QuickActionResult.Failure(AdbError.Unknown(AdbOperationStage.QUICK_ACTION))
+                    } else {
+                        completed = true
+                        QuickActionResult.Success(
+                            CaptureMetadata(
+                                expectedSessionId = request.expectedSessionId,
+                                kind = QuickActionKind.SCREEN_RECORD,
+                                bytesWritten = protocolResult.bytesWritten,
+                                elapsed = started.elapsedNow(),
+                                format = CaptureFormat.MP4,
+                            ),
+                        )
+                    }
+                }
+                QuickActionProtocolCaptureResult.TimedOut ->
+                    QuickActionResult.Failure(AdbError.Timeout(AdbOperationStage.QUICK_ACTION))
+                QuickActionProtocolCaptureResult.EmptyOutput,
+                is QuickActionProtocolCaptureResult.InvalidOutput,
+                -> QuickActionResult.Failure(AdbError.Unknown(AdbOperationStage.QUICK_ACTION))
+            }
+        } catch (_: CancellationException) {
+            return QuickActionResult.Cancelled
+        } finally {
+            withContext(NonCancellable) {
+                synchronized(exclusiveOperationLock) {
+                    if (activeScreenRecording === recording) activeScreenRecording = null
+                }
+                if (!completed) sink.abort()
+                lease.release()
+            }
+        }
+    }
+
+    override suspend fun stopScreenRecord(
+        expectedSessionId: String,
+    ): QuickActionResult<Unit> {
+        if (active?.id != expectedSessionId) {
+            return QuickActionResult.StaleSession(expectedSessionId)
+        }
+        val recording = synchronized(exclusiveOperationLock) {
+            activeScreenRecording?.takeIf { it.sessionId == expectedSessionId }
+        } ?: return QuickActionResult.Cancelled
+        recording.stopRequested.set(true)
+        return QuickActionResult.Success(Unit)
+    }
+
+    override suspend fun reboot(
+        request: RebootRequest,
+    ): QuickActionResult<Unit> {
+        val session = active?.takeIf { it.id == request.expectedSessionId }
+            ?: return QuickActionResult.StaleSession(request.expectedSessionId)
+        val capabilities = when (val resolved = quickActionCapabilities(request.expectedSessionId)) {
+            is QuickActionResult.Success -> resolved.value
+            is QuickActionResult.StaleSession -> return resolved
+            is QuickActionResult.Failure -> return resolved
+            QuickActionResult.Cancelled -> return QuickActionResult.Cancelled
+            is QuickActionResult.ResultUnknown -> return resolved
+        }
+        when (capabilities.reboot) {
+            QuickActionCapability.Supported -> Unit
+            is QuickActionCapability.Unsupported,
+            is QuickActionCapability.PolicyRejected,
+            is QuickActionCapability.ProbeFailed,
+            QuickActionCapability.Unknown,
+            -> return QuickActionResult.Failure(AdbError.DeviceRejected(AdbOperationStage.QUICK_ACTION))
+        }
+        val lease = when (
+            val acquired = acquireExclusiveOperation(
+                AdbExclusiveOperationKind.QUICK_ACTION,
+                request.expectedSessionId,
+            )
+        ) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return QuickActionResult.Failure(acquired.error)
+            AdbOperationResult.Cancelled -> return QuickActionResult.Cancelled
+        }
+        try {
+            val protocolResult = try {
+                withTimeout(request.timeout) { quickActionProtocol.reboot(session.client) }
+            } catch (_: TimeoutCancellationException) {
+                return QuickActionResult.Failure(AdbError.Timeout(AdbOperationStage.QUICK_ACTION))
+            }
+            if (active?.id != request.expectedSessionId &&
+                protocolResult != QuickActionProtocolRebootResult.DisconnectedAfterDispatch
+            ) {
+                return QuickActionResult.StaleSession(request.expectedSessionId)
+            }
+            return when (protocolResult) {
+                QuickActionProtocolRebootResult.Accepted -> QuickActionResult.Success(Unit)
+                QuickActionProtocolRebootResult.Rejected ->
+                    QuickActionResult.Failure(AdbError.DeviceRejected(AdbOperationStage.QUICK_ACTION))
+                QuickActionProtocolRebootResult.DisconnectedAfterDispatch -> {
+                    closeSession(session)
+                    mutableState.value = AdbConnectionState.Disconnected()
+                    QuickActionResult.ResultUnknown(request.expectedSessionId)
+                }
+            }
+        } catch (_: CancellationException) {
+            return QuickActionResult.Cancelled
+        } finally {
+            withContext(NonCancellable) { lease.release() }
+        }
+    }
+
+    private suspend fun probeQuickActionCapability(
+        expectedSessionId: String,
+        command: String,
+    ): QuickActionCapability = withContext(ioDispatcher) {
+        val session = active?.takeIf { it.id == expectedSessionId }
+            ?: return@withContext QuickActionCapability.Unknown
+        try {
+            when (session.client.execute(command).exitCode) {
+                0 -> QuickActionCapability.Supported
+                126 -> QuickActionCapability.PolicyRejected("device-policy")
+                127 -> QuickActionCapability.Unsupported("command-unavailable")
+                else -> QuickActionCapability.ProbeFailed("probe-failed")
+            }
+        } catch (_: Exception) {
+            QuickActionCapability.ProbeFailed("probe-failed")
+        }
     }
 
     override fun observeWirelessServices(

@@ -3,6 +3,8 @@ package com.sheen.adb.feature.devices
 import com.sheen.adb.core.AdbConnectionState
 import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbEndpoint
+import com.sheen.adb.core.AdbError
+import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.LocalPairingController
@@ -368,6 +370,192 @@ class DevicesPairingViewModelTest {
         }
     }
 
+    @Test
+    fun `QR timeout expires the attempt and clears temporary material`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val material = FakeMaterial(PairingAttemptId.of("attempt-qr-timeout"))
+            val discovery = manager.enqueueQrAttempt(material)
+            val viewModel = viewModel(manager, listOf(material.attemptId))
+
+            viewModel.selectPairingMethod(PairingMethod.QR)
+            viewModel.startSelectedPairing()
+            runCurrent()
+            discovery.emit(AdbOperationResult.Failure(AdbError.DiscoveryTimeout))
+            advanceUntilIdle()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.EXPIRED)
+            assertNull(viewModel.pairingState.value.qrMatrix)
+            assertNull(material.payload)
+            assertTrue(material.attemptId in manager.cancelledAttempts)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `six digit cancellation clears both reducer and screen input`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val viewModel = viewModel(manager, emptyList())
+
+            viewModel.selectPairingMethod(PairingMethod.SIX_DIGIT_CODE)
+            viewModel.startSelectedPairing()
+            viewModel.updatePairingCode("0".repeat(6))
+            viewModel.onPairingPageLeft()
+            advanceUntilIdle()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.CANCELLED)
+            assertEquals(viewModel.pairingState.value.codeInput, "")
+            assertEquals(viewModel.state.value.pairingCode, "")
+            assertEquals(manager.codePairCalls, 0)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `six digit timeout is distinct and never remains in state`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager(
+                codePairResult = AdbOperationResult.Failure(
+                    AdbError.Timeout(AdbOperationStage.PAIR),
+                ),
+            )
+            val viewModel = viewModel(manager, emptyList())
+
+            viewModel.selectPairingMethod(PairingMethod.SIX_DIGIT_CODE)
+            viewModel.startSelectedPairing()
+            viewModel.updatePairingEndpoint("synthetic.invalid:4711")
+            viewModel.updatePairingCode("0".repeat(6))
+            viewModel.pair()
+            advanceUntilIdle()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.EXPIRED)
+            assertEquals(viewModel.pairingState.value.codeInput, "")
+            assertEquals(viewModel.state.value.pairingCode, "")
+            assertFalse(viewModel.pairingState.value.toString().contains("000000"))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `session appearance cancels QR material without pairing the new session`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val material = FakeMaterial(PairingAttemptId.of("attempt-session-change"))
+            manager.enqueueQrAttempt(material)
+            val viewModel = viewModel(manager, listOf(material.attemptId))
+
+            viewModel.selectPairingMethod(PairingMethod.QR)
+            viewModel.startSelectedPairing()
+            runCurrent()
+            manager.connectionState.value = AdbConnectionState.Connected(
+                endpoint = AdbEndpoint("replacement.invalid", 4711),
+                sessionId = "session-replacement",
+            )
+            advanceUntilIdle()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.CANCELLED)
+            assertNull(viewModel.pairingState.value.qrMatrix)
+            assertNull(material.payload)
+            assertTrue(material.attemptId in manager.cancelledAttempts)
+            assertTrue(manager.qrPairCalls.isEmpty())
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `session appearance cancels six digit entry and clears its value`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val viewModel = viewModel(manager, emptyList())
+            runCurrent()
+
+            viewModel.selectPairingMethod(PairingMethod.SIX_DIGIT_CODE)
+            viewModel.startSelectedPairing()
+            viewModel.updatePairingCode("0".repeat(6))
+            manager.connectionState.value = AdbConnectionState.Connected(
+                endpoint = AdbEndpoint("replacement.invalid", 4711),
+                sessionId = "session-replacement",
+            )
+            runCurrent()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.CANCELLED)
+            assertEquals(viewModel.pairingState.value.codeInput, "")
+            assertEquals(viewModel.state.value.pairingCode, "")
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `local timeout clears application input and remains distinct from cancellation`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val windowId = LocalPairingWindowId.of("window-system-timeout")
+            val viewModel = viewModel(
+                manager = manager,
+                attemptIds = listOf(PairingAttemptId.of("attempt-system-timeout")),
+                windowIds = listOf(windowId),
+            )
+            runCurrent()
+
+            viewModel.enterLocalPairingMode()
+            viewModel.updatePairingCode("0".repeat(6))
+            manager.localController.publish(
+                windowId = windowId,
+                discoveryStatus = LocalPairingDiscoveryStatus.STOPPED,
+                stopReason = LocalPairingStopReason.SYSTEM_TIMEOUT,
+            )
+            runCurrent()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.EXPIRED)
+            assertEquals(viewModel.pairingState.value.codeInput, "")
+            assertEquals(viewModel.state.value.pairingCode, "")
+            assertFalse(viewModel.pairingState.value.localWindowActive)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `session appearance cancels the local window and clears its value`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val windowId = LocalPairingWindowId.of("window-session-change")
+            val viewModel = viewModel(
+                manager = manager,
+                attemptIds = listOf(PairingAttemptId.of("attempt-session-change")),
+                windowIds = listOf(windowId),
+            )
+            runCurrent()
+
+            viewModel.enterLocalPairingMode()
+            viewModel.updatePairingCode("0".repeat(6))
+            manager.connectionState.value = AdbConnectionState.Connected(
+                endpoint = AdbEndpoint("replacement.invalid", 4711),
+                sessionId = "session-replacement",
+            )
+            runCurrent()
+
+            assertEquals(viewModel.pairingState.value.phase, PairingAttemptPhase.CANCELLED)
+            assertEquals(viewModel.state.value.pairingCode, "")
+            assertEquals(manager.localController.cancelledWindows, listOf(windowId))
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
     private fun viewModel(
         manager: FakeManager,
         attemptIds: List<PairingAttemptId>,
@@ -438,6 +626,7 @@ class DevicesPairingViewModelTest {
 
     private class FakeManager(
         initialConnectionState: AdbConnectionState = AdbConnectionState.Disconnected(),
+        private val codePairResult: AdbOperationResult<Unit> = AdbOperationResult.Success(Unit),
     ) {
         val connectionState = MutableStateFlow(initialConnectionState)
         val diagnostics = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
@@ -488,7 +677,7 @@ class DevicesPairingViewModelTest {
                 "pairWithSecret" -> {
                     codePairCalls++
                     (args!![1] as PairingSecret).clear()
-                    AdbOperationResult.Success(Unit)
+                    codePairResult
                 }
                 "connect" -> {
                     connectCalls++
@@ -572,12 +761,14 @@ class DevicesPairingViewModelTest {
             windowId: LocalPairingWindowId,
             discoveryStatus: LocalPairingDiscoveryStatus,
             notificationDecision: LocalPairingNotificationDecision? = null,
+            stopReason: LocalPairingStopReason? = null,
         ) {
             val attemptId = startedWindows.first { it.second == windowId }.first
             mutableState.value = LocalPairingControllerState(
                 window = window(windowId, attemptId),
                 discoveryStatus = discoveryStatus,
                 notificationDecision = notificationDecision,
+                stopReason = stopReason,
             )
         }
 

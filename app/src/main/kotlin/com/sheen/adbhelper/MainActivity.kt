@@ -8,9 +8,19 @@ import androidx.activity.viewModels
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import com.sheen.adb.feature.files.FilesViewModel
+import com.sheen.adb.feature.overview.OverviewViewModel
 import com.sheen.adb.ui.SheenTheme
 
 class MainActivity : ComponentActivity() {
+    private val overviewViewModel by viewModels<OverviewViewModel> {
+        val container = (application as SheenApplication).container
+        object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T =
+                OverviewViewModel(container.adbManager, container.quickActionUseCase) as T
+        }
+    }
+
     private val filesViewModel by viewModels<FilesViewModel> {
         val container = (application as SheenApplication).container
         object : ViewModelProvider.Factory {
@@ -24,7 +34,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val container = (application as SheenApplication).container
-        setContent { SheenTheme { SheenApp(container, filesViewModel) } }
+        setContent { SheenTheme { SheenApp(container, filesViewModel, overviewViewModel) } }
     }
 
     override fun onStop() {

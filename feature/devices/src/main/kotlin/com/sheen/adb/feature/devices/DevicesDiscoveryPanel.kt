@@ -1,23 +1,36 @@
 package com.sheen.adb.feature.devices
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import com.sheen.adb.core.WirelessDiscoveryTarget
 import com.sheen.adb.core.WirelessServiceType
+import com.sheen.adb.ui.UiLanguage
+import com.sheen.adb.ui.SheenDimensions
+import com.sheen.adb.ui.SheenIcons
+import com.sheen.adb.ui.SheenShapes
 
 internal enum class DevicesDiscoveryAction {
     PAIR,
@@ -47,36 +60,38 @@ internal data class DevicesDiscoveryPresentation(
     val selectionMessage: String,
 )
 
-internal fun DevicesDiscoveryState.toDiscoveryPresentation(): DevicesDiscoveryPresentation {
+internal fun DevicesDiscoveryState.toDiscoveryPresentation(
+    language: UiLanguage = UiLanguage.ZH_CN,
+): DevicesDiscoveryPresentation {
     val selectedTarget = pendingSelection?.target
     val targetStillCurrent = selectedTarget == null || items.any { item ->
         item.selectable && (item.pairingTarget == selectedTarget || item.connectTarget == selectedTarget)
     }
     val selectionExpired = selectedTarget != null && !targetStillCurrent
     return DevicesDiscoveryPresentation(
-        statusText = discoveryStatusText(),
+        statusText = discoveryStatusText(language),
         showProgress = phase == DevicesDiscoveryPhase.SCANNING,
         showCancel = phase == DevicesDiscoveryPhase.SCANNING,
         showRefresh = phase != DevicesDiscoveryPhase.SCANNING,
         showManualAddress = true,
         items = items.take(MAX_DISCOVERY_ITEMS).map { item ->
             DevicesDiscoveryItemPresentation(
-                deviceName = item.deviceName,
+                deviceName = item.deviceName?.trim()?.takeIf(String::isNotEmpty),
                 endpointLabel = item.endpointLabel,
                 rolesText = item.serviceTypes.sortedBy(WirelessServiceType::ordinal).joinToString(" / ") {
                     when (it) {
-                        WirelessServiceType.PAIRING -> "配对服务"
-                        WirelessServiceType.CONNECT -> "连接服务"
+                        WirelessServiceType.PAIRING -> if (language == UiLanguage.ZH_CN) "配对服务" else "Pairing service"
+                        WirelessServiceType.CONNECT -> if (language == UiLanguage.ZH_CN) "连接服务" else "Connection service"
                     }
                 },
                 relationText = when (item.relation) {
-                    DevicesDiscoveryRelation.VERIFIED -> "已通过当前 Session 身份验证关联"
-                    DevicesDiscoveryRelation.UNKNOWN -> "配对与连接尚未验证关联，请分别确认"
+                    DevicesDiscoveryRelation.VERIFIED -> if (language == UiLanguage.ZH_CN) "已通过当前 Session 身份验证关联" else "Verified for the current session"
+                    DevicesDiscoveryRelation.UNKNOWN -> if (language == UiLanguage.ZH_CN) "配对与连接尚未验证关联，请分别确认" else "Pairing and connection are not verified as related"
                 },
                 statusText = when (item.reachability) {
-                    DevicesDiscoveryReachability.RESOLVED -> "当前可选择"
-                    DevicesDiscoveryReachability.LOST -> "服务已离线或端口已变化，请刷新"
-                    DevicesDiscoveryReachability.UNAVAILABLE -> "服务暂不可用，请刷新"
+                    DevicesDiscoveryReachability.RESOLVED -> if (language == UiLanguage.ZH_CN) "当前可选择" else "Available"
+                    DevicesDiscoveryReachability.LOST -> if (language == UiLanguage.ZH_CN) "服务已离线或端口已变化，请刷新" else "Service is offline or changed; refresh"
+                    DevicesDiscoveryReachability.UNAVAILABLE -> if (language == UiLanguage.ZH_CN) "服务暂不可用，请刷新" else "Service unavailable; refresh"
                 },
                 actions = buildSet {
                     if (item.pairingTarget != null && item.selectable) add(DevicesDiscoveryAction.PAIR)
@@ -89,9 +104,9 @@ internal fun DevicesDiscoveryState.toDiscoveryPresentation(): DevicesDiscoveryPr
         selectionExpired = selectionExpired,
         canConfirmSelection = selectedTarget != null && targetStillCurrent,
         selectionMessage = when {
-            selectionExpired -> "该服务已过期或端口已变化，请刷新后重新选择。"
-            pendingSelection is DevicesDiscoverySelection.Pairing -> "确认使用该系统公布的配对服务？仍需输入 6 位配对码。"
-            pendingSelection is DevicesDiscoverySelection.Connect -> "确认连接该系统公布的调试服务？应用不会自动替换当前 Session。"
+            selectionExpired -> if (language == UiLanguage.ZH_CN) "该服务已过期或端口已变化，请刷新后重新选择。" else "This service expired or changed. Refresh and select it again."
+            pendingSelection is DevicesDiscoverySelection.Pairing -> if (language == UiLanguage.ZH_CN) "确认使用该系统公布的配对服务？仍需输入 6 位配对码。" else "Use this advertised pairing service? A 6-digit code is still required."
+            pendingSelection is DevicesDiscoverySelection.Connect -> if (language == UiLanguage.ZH_CN) "确认连接该系统公布的调试服务？应用不会自动替换当前 Session。" else "Connect to this advertised debugging service? The current session is not replaced automatically."
             else -> ""
         },
     )
@@ -101,53 +116,34 @@ internal fun DevicesDiscoveryState.toDiscoveryPresentation(): DevicesDiscoveryPr
 internal fun DevicesDiscoveryPanel(
     state: DevicesDiscoveryState,
     actions: DevicesViewModel,
+    language: UiLanguage = UiLanguage.ZH_CN,
 ) {
-    val presentation = state.toDiscoveryPresentation()
-    Card(Modifier.fillMaxWidth()) {
-        Column(
-            Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Text("局域网无线调试设备", style = MaterialTheme.typography.titleLarge)
-            Text("仅发现系统公布的 ADB TLS 服务，不枚举子网或探测端口。")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (presentation.showProgress) CircularProgressIndicator()
-                if (presentation.showCancel) {
-                    OutlinedButton(onClick = actions::cancelDiscovery) { Text("取消扫描") }
+    val presentation = state.toDiscoveryPresentation(language)
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (presentation.items.isEmpty()) {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (presentation.showProgress) {
+                    CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
                 }
+                Text(
+                    presentation.statusText,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (presentation.showRefresh) {
-                    Button(onClick = actions::refreshDiscovery) { Text("刷新") }
-                }
-                if (presentation.showManualAddress) {
-                    TextButton(onClick = actions::useManualDiscoveryAddress) { Text("手动输入地址") }
-                }
-            }
-            Text(presentation.statusText)
-            presentation.items.forEach { item ->
-                Card(Modifier.fillMaxWidth()) {
-                    Column(
-                        Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text(item.rolesText, style = MaterialTheme.typography.titleMedium)
-                        item.deviceName?.let { Text(it, style = MaterialTheme.typography.titleMedium) }
-                        Text(item.endpointLabel)
-                        Text(item.relationText, style = MaterialTheme.typography.bodySmall)
-                        Text(item.statusText, style = MaterialTheme.typography.bodySmall)
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (DevicesDiscoveryAction.PAIR in item.actions) {
-                                item.pairingTarget?.let { target ->
-                                    Button(onClick = { actions.selectDiscoveryPairing(target) }) { Text("选择配对") }
-                                }
-                            }
-                            if (DevicesDiscoveryAction.CONNECT in item.actions) {
-                                item.connectTarget?.let { target ->
-                                    Button(onClick = { actions.selectDiscoveryConnect(target) }) { Text("选择连接") }
-                                }
-                            }
-                        }
+                    TextButton(onClick = actions::refreshDiscovery) {
+                        Text(localized(language, "刷新", "Refresh"))
                     }
                 }
+            }
+        } else {
+            presentation.items.forEach { item ->
+                DiscoveryDeviceCard(item, actions)
             }
         }
     }
@@ -155,24 +151,101 @@ internal fun DevicesDiscoveryPanel(
     if (state.pendingSelection != null) {
         AlertDialog(
             onDismissRequest = actions::dismissDiscoverySelection,
-            title = { Text("确认发现目标") },
+            title = { Text(localized(language, "确认发现目标", "Confirm discovered target")) },
             text = { Text(presentation.selectionMessage) },
             confirmButton = {
                 TextButton(
                     onClick = actions::confirmDiscoverySelection,
                     enabled = presentation.canConfirmSelection,
-                ) { Text("确认") }
+                ) { Text(localized(language, "确认", "Confirm")) }
             },
             dismissButton = {
-                TextButton(onClick = actions::dismissDiscoverySelection) { Text("取消") }
+                TextButton(onClick = actions::dismissDiscoverySelection) { Text(localized(language, "取消", "Cancel")) }
             },
         )
     }
 }
 
-private fun DevicesDiscoveryState.discoveryStatusText(): String = when (phase) {
+@Composable
+private fun DiscoveryDeviceCard(
+    item: DevicesDiscoveryItemPresentation,
+    actions: DevicesViewModel,
+) {
+    val onSelect: (() -> Unit)? = when {
+        DevicesDiscoveryAction.CONNECT in item.actions && item.connectTarget != null ->
+            ({ actions.selectDiscoveryConnect(item.connectTarget) })
+        DevicesDiscoveryAction.PAIR in item.actions && item.pairingTarget != null ->
+            ({ actions.selectDiscoveryPairing(item.pairingTarget) })
+        else -> null
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 96.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow, SheenShapes.extraLarge)
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, SheenShapes.extraLarge)
+            .clickable(enabled = onSelect != null) { onSelect?.invoke() }
+            .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Box(
+            Modifier
+                .size(SheenDimensions.deviceIconContainer)
+                .background(MaterialTheme.colorScheme.surfaceVariant, SheenShapes.full),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                SheenIcons.Phone,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp),
+            )
+        }
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                item.deviceName ?: item.rolesText,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                item.endpointLabel,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        IconButton(
+            onClick = { onSelect?.invoke() },
+            enabled = onSelect != null,
+            modifier = Modifier.size(SheenDimensions.minimumTouchTarget),
+        ) {
+            Icon(
+                SheenIcons.Wireless,
+                contentDescription = item.statusText,
+                tint = MaterialTheme.colorScheme.primary,
+            )
+        }
+    }
+}
+
+private fun DevicesDiscoveryState.discoveryStatusText(language: UiLanguage): String =
+    if (language == UiLanguage.EN_US) when (phase) {
+        DevicesDiscoveryPhase.IDLE -> "A 10-second foreground scan starts when this page opens."
+        DevicesDiscoveryPhase.SCANNING -> "Scanning for 10 seconds."
+        DevicesDiscoveryPhase.CONTENT -> "Found ${items.size} advertised targets."
+        DevicesDiscoveryPhase.EMPTY -> "No services found. Refresh or enter an address manually."
+        DevicesDiscoveryPhase.CANCELLED -> "Scan cancelled. Refresh to try again."
+        DevicesDiscoveryPhase.ERROR -> when (failure) {
+            DevicesDiscoveryFailure.NETWORK_UNAVAILABLE -> "Network unavailable. Check the connection and refresh."
+            DevicesDiscoveryFailure.PERMISSION_UNAVAILABLE -> "System discovery capability is unavailable."
+            DevicesDiscoveryFailure.RESOLUTION_FAILED -> "Service resolution failed or the target expired."
+            DevicesDiscoveryFailure.TIMED_OUT -> "The 10-second scan timed out."
+            DevicesDiscoveryFailure.SESSION_CHANGED -> "The ADB session changed. Refresh the results."
+            DevicesDiscoveryFailure.PLATFORM_FAILURE, null -> "Wireless service discovery failed."
+        }
+    } else when (phase) {
     DevicesDiscoveryPhase.IDLE -> "进入设备页后开始 10 秒前台扫描。"
-    DevicesDiscoveryPhase.SCANNING -> "正在扫描，最多显示 15 个系统公布的服务。"
+    DevicesDiscoveryPhase.SCANNING -> "正在进行 10 秒扫描，最多显示 15 个系统公布的服务。"
     DevicesDiscoveryPhase.CONTENT -> "已发现 ${items.size} 个可展示目标；未知关系不会按名称或地址合并。"
     DevicesDiscoveryPhase.EMPTY ->
         "未发现服务。VPN、热点隔离、当前网络或 ROM 策略可能限制发现，可刷新或手动输入。"
@@ -185,6 +258,9 @@ private fun DevicesDiscoveryState.discoveryStatusText(): String = when (phase) {
         DevicesDiscoveryFailure.SESSION_CHANGED -> "ADB Session 已变化，本轮结果已失效，请刷新。"
         DevicesDiscoveryFailure.PLATFORM_FAILURE, null -> "系统无线服务发现失败，请稍后刷新或手动输入。"
     }
-}
+    }
 
 private const val MAX_DISCOVERY_ITEMS = 15
+
+private fun localized(language: UiLanguage, zh: String, en: String): String =
+    if (language == UiLanguage.ZH_CN) zh else en

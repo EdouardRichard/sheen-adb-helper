@@ -32,6 +32,13 @@ class LogcatShareTemporaryDataCleaner(
     }
 }
 
+class QuickActionArtifactTemporaryDataCleaner(
+    private val artifactStore: QuickActionArtifactStore,
+) : TemporaryDataCleaner {
+    override suspend fun clear(): Boolean =
+        artifactStore.cleanupAll(ArtifactTerminationReason.FAILED).failedCount == 0
+}
+
 class AppTemporaryDataCleaner(context: Context) : TemporaryDataCleaner {
     private val cacheDirectory = context.applicationContext.cacheDir
     private val codeCacheDirectory = context.applicationContext.codeCacheDir

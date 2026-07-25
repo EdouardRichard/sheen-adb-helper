@@ -7,6 +7,7 @@ import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
 import org.testng.annotations.DataProvider
 import org.testng.annotations.Test
+import com.sheen.adb.ui.UiLanguage
 
 internal class DevicesPairingPresentationTest {
     @Test
@@ -109,6 +110,48 @@ internal class DevicesPairingPresentationTest {
         assertFalse(presentation.toString().contains("000000"))
     }
 
+    @Test
+    fun `local cancellation and timeout remain distinguishable without retaining pairing values`() {
+        val cancelled = DevicesPairingState(
+            method = PairingMethod.SIX_DIGIT_CODE,
+            phase = PairingAttemptPhase.CANCELLED,
+            codeInput = "0".repeat(6),
+            failure = DevicesPairingFailure.CANCELLED,
+            isLocalMode = true,
+        ).toPresentation()
+        val timedOut = DevicesPairingState(
+            method = PairingMethod.SIX_DIGIT_CODE,
+            phase = PairingAttemptPhase.EXPIRED,
+            codeInput = "0".repeat(6),
+            failure = DevicesPairingFailure.EXPIRED,
+            isLocalMode = true,
+        ).toPresentation()
+
+        assertEquals(cancelled.statusText, "本机配对已取消")
+        assertEquals(timedOut.statusText, "本机配对已超时，请重新开始")
+        assertFalse(cancelled.showCodeInputs)
+        assertFalse(timedOut.showCodeInputs)
+        assertFalse(cancelled.toString().contains("000000"))
+        assertFalse(timedOut.toString().contains("000000"))
+    }
+
+    @Test
+    fun `all pairing terminal outcomes have unique status text`() {
+        val outcomes = terminalStates().map { row ->
+            DevicesPairingState(
+                method = PairingMethod.QR,
+                phase = row[0] as PairingAttemptPhase,
+                failure = row[1] as DevicesPairingFailure?,
+            ).toPresentation().statusText
+        } + DevicesPairingState(
+            method = PairingMethod.QR,
+            phase = PairingAttemptPhase.UNSUPPORTED,
+            failure = DevicesPairingFailure.UNSUPPORTED,
+        ).toPresentation().statusText
+
+        assertEquals(outcomes.distinct().size, outcomes.size)
+    }
+
     @DataProvider
     fun terminalStates(): Array<Array<Any?>> = arrayOf(
         arrayOf(PairingAttemptPhase.SUCCEEDED, null, "配对成功，授权已建立；连接设备仍需用户确认", false),
@@ -142,5 +185,39 @@ internal class DevicesPairingPresentationTest {
         assertFalse(presentation.showStart)
         assertFalse(presentation.showQrMatrix)
         assertEquals(presentation.sessionReplacementText, "开始新配对前必须先断开当前 ADB Session。是否继续？")
+    }
+
+    @Test
+    fun `QR code local cancellation timeout failure and unsupported states are bilingual`() {
+        val states = listOf(
+            DevicesPairingState(
+                method = PairingMethod.QR,
+                phase = PairingAttemptPhase.WAITING_FOR_TARGET,
+            ),
+            DevicesPairingState(
+                method = PairingMethod.SIX_DIGIT_CODE,
+                phase = PairingAttemptPhase.CANCELLED,
+                isLocalMode = true,
+            ),
+            DevicesPairingState(
+                method = PairingMethod.SIX_DIGIT_CODE,
+                phase = PairingAttemptPhase.EXPIRED,
+                isLocalMode = true,
+            ),
+            DevicesPairingState(
+                method = PairingMethod.QR,
+                phase = PairingAttemptPhase.FAILED,
+            ),
+            DevicesPairingState(
+                method = PairingMethod.QR,
+                phase = PairingAttemptPhase.UNSUPPORTED,
+            ),
+        )
+        states.forEach { state ->
+            val chinese = state.toPresentation(UiLanguage.ZH_CN).statusText
+            val english = state.toPresentation(UiLanguage.EN_US).statusText
+            assertFalse(chinese == english)
+            assertFalse(english.any { it.code > 127 })
+        }
     }
 }

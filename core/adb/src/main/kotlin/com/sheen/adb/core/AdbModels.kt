@@ -2,6 +2,122 @@ package com.sheen.adb.core
 
 import kotlin.time.Duration
 
+enum class QuickActionKind {
+    SCREENSHOT,
+    SCREEN_RECORD,
+    REBOOT,
+}
+
+enum class CaptureFormat {
+    PNG,
+    MP4,
+}
+
+sealed interface QuickActionCapability {
+    data object Supported : QuickActionCapability
+    data class Unsupported(val reason: String) : QuickActionCapability
+    data class PolicyRejected(val reason: String) : QuickActionCapability
+    data class ProbeFailed(val reason: String) : QuickActionCapability
+    data object Unknown : QuickActionCapability
+}
+
+data class QuickActionCapabilities(
+    val expectedSessionId: String,
+    val screenshot: QuickActionCapability,
+    val screenRecord: QuickActionCapability,
+    val reboot: QuickActionCapability,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+    }
+}
+
+data class ScreenshotCaptureRequest(
+    val expectedSessionId: String,
+    val timeout: Duration,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(timeout.isPositive())
+    }
+}
+
+data class ScreenRecordRequest(
+    val expectedSessionId: String,
+    val timeout: Duration,
+    val maxDuration: Duration,
+    val maxBytes: Long,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(timeout.isPositive())
+        require(maxDuration.isPositive())
+        require(maxBytes > 0L)
+    }
+}
+
+data class RebootRequest(
+    val expectedSessionId: String,
+    val timeout: Duration,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(timeout.isPositive())
+    }
+}
+
+enum class QuickActionProgressPhase {
+    PREPARING,
+    CAPTURING,
+    STOPPING,
+    CLEANING_UP,
+}
+
+data class QuickActionProgress(
+    val expectedSessionId: String,
+    val kind: QuickActionKind,
+    val phase: QuickActionProgressPhase,
+    val bytesWritten: Long,
+    val elapsed: Duration,
+    val maxBytes: Long?,
+    val maxDuration: Duration,
+)
+
+data class CaptureMetadata(
+    val expectedSessionId: String,
+    val kind: QuickActionKind,
+    val bytesWritten: Long,
+    val elapsed: Duration,
+    val format: CaptureFormat,
+)
+
+sealed interface CaptureSinkResult {
+    data object Accepted : CaptureSinkResult
+    data class Rejected(val reason: String) : CaptureSinkResult
+}
+
+interface AdbCaptureSink {
+    val bytesWritten: Long
+
+    suspend fun write(
+        bytes: ByteArray,
+        offset: Int = 0,
+        length: Int = bytes.size,
+    ): CaptureSinkResult
+
+    suspend fun finish(): CaptureSinkResult
+
+    suspend fun abort()
+}
+
+sealed interface QuickActionResult<out T> {
+    data class Success<T>(val value: T) : QuickActionResult<T>
+    data class Failure(val error: AdbError) : QuickActionResult<Nothing>
+    data object Cancelled : QuickActionResult<Nothing>
+    data class StaleSession(val expectedSessionId: String) : QuickActionResult<Nothing>
+    data class ResultUnknown(val expectedSessionId: String) : QuickActionResult<Nothing>
+}
+
 enum class AdbOperationStage {
     ADDRESS,
     DISCOVERY,
@@ -19,6 +135,7 @@ enum class AdbOperationStage {
     FILE_TRANSFER,
     APK_EXTRACTION,
     FILE_BROWSER,
+    QUICK_ACTION,
     DISCONNECT,
 }
 
@@ -26,6 +143,7 @@ enum class AdbExclusiveOperationKind(val stage: AdbOperationStage) {
     FILE_TRANSFER(AdbOperationStage.FILE_TRANSFER),
     APK_EXTRACTION(AdbOperationStage.APK_EXTRACTION),
     LOGCAT(AdbOperationStage.LOGCAT),
+    QUICK_ACTION(AdbOperationStage.QUICK_ACTION),
 }
 
 interface ExclusiveAdbOperationLease : AutoCloseable {

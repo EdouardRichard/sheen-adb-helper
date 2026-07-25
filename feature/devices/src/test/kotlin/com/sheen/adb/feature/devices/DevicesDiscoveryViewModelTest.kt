@@ -97,6 +97,53 @@ class DevicesDiscoveryViewModelTest {
     }
 
     @Test
+    fun `twenty pull refreshes keep one active scan and latest generation wins`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val flows = List(21) { manager.enqueueDiscovery() }
+            val viewModel = viewModel(manager)
+
+            viewModel.onDiscoveryForeground()
+            runCurrent()
+            flows.first().emit(AdbOperationResult.Success(snapshot(100L, "initial")))
+            runCurrent()
+
+            repeat(20) { index ->
+                viewModel.onDiscoveryPullRefresh()
+                runCurrent()
+
+                assertTrue(
+                    flows.count { it.subscriptionCount.value > 0 } <= 1,
+                    "Refresh ${index + 1} left parallel discovery collectors active",
+                )
+                flows[index + 1].emit(
+                    AdbOperationResult.Success(snapshot(101L + index, "refresh-${index + 1}")),
+                )
+                runCurrent()
+            }
+
+            flows.first().emit(AdbOperationResult.Success(snapshot(100L, "stale-late")))
+            runCurrent()
+
+            assertEquals(manager.discoveryRequests.size, 21)
+            assertTrue(
+                manager.discoveryRequests.all {
+                    it == WirelessDiscoveryMode.LAN_FOREGROUND to 10.seconds
+                },
+            )
+            assertEquals(viewModel.discoveryState.value.generation, 120L)
+            assertEquals(
+                viewModel.discoveryState.value.items.single().connectTarget?.generation,
+                120L,
+            )
+            assertEquals(flows.count { it.subscriptionCount.value > 0 }, 1)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
     fun `background and explicit cancel stop collection and publish cancelled state`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {

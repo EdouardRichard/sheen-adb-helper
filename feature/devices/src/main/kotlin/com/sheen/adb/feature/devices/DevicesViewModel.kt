@@ -103,18 +103,20 @@ class DevicesViewModel(
     private var discoveredPairingAttemptId: PairingAttemptId? = null
     private var lastSuccessfulDiscoveredPairingAttemptId: PairingAttemptId? = null
     private var pendingDiscoveryConnectTarget: WirelessDiscoveryTarget? = null
+    private var pendingReplacementEndpoint: AdbEndpoint? = null
 
     init {
         viewModelScope.launch {
             manager.connectionState.collect { connection ->
                 mutableState.update { it.copy(connectionState = connection) }
-                val pairingWasActive = activeQrAttemptId != null
+                val pairingWasActive = hasNonTerminalPairing() || activeLocalWindowId != null
                 reducePairing(
                     DevicesPairingEvent.SessionAvailabilityChanged(
                         hasActiveSession = connection is AdbConnectionState.Connected,
                     ),
                 )
                 if (pairingWasActive && connection is AdbConnectionState.Connected) {
+                    if (activeLocalWindowId != null) stopLocalPairingWindow()
                     cancelPairingOperation(markCancelled = true)
                 }
             }
@@ -139,6 +141,8 @@ class DevicesViewModel(
     }
 
     fun refreshDiscovery() = startLanDiscovery()
+
+    fun onDiscoveryPullRefresh() = startLanDiscovery()
 
     fun onDiscoveryBackground() = stopLanDiscovery(markCancelled = true)
 
@@ -165,12 +169,19 @@ class DevicesViewModel(
     }
 
     fun confirmDiscoverySessionReplacement() {
-        val target = pendingDiscoveryConnectTarget ?: return
+        val target = pendingDiscoveryConnectTarget
+        val endpoint = pendingReplacementEndpoint
+        if (target == null && endpoint == null) return
+        pendingDiscoveryConnectTarget = null
+        pendingReplacementEndpoint = null
         mutableState.update { it.copy(awaitingDiscoverySessionReplacement = false) }
         startOperation { generation ->
             when (val disconnected = manager.disconnect()) {
                 is AdbOperationResult.Success -> if (generation == operationGeneration) {
-                    connectDiscoveredTarget(target, generation)
+                    when {
+                        target != null -> connectDiscoveredTarget(target, generation)
+                        endpoint != null -> connectEndpoint(endpoint, generation)
+                    }
                 }
                 is AdbOperationResult.Failure -> mutableState.update {
                     it.copy(notice = disconnected.error.userMessage)
@@ -182,24 +193,36 @@ class DevicesViewModel(
 
     fun dismissDiscoverySessionReplacement() {
         pendingDiscoveryConnectTarget = null
+        pendingReplacementEndpoint = null
         mutableState.update { it.copy(awaitingDiscoverySessionReplacement = false) }
     }
 
     fun connect() {
         val endpoint = parse(mutableState.value.endpointInput) ?: return
-        connect(endpoint)
+        requestConnection(endpoint)
     }
 
     fun reconnect(profile: DeviceProfile) {
         val raw = if (':' in profile.host) "[${profile.host}]:${profile.debugPort}" else "${profile.host}:${profile.debugPort}"
         mutableState.update { it.copy(endpointInput = raw, inputError = null, notice = null) }
-        connect(AdbEndpoint(profile.host, profile.debugPort))
+        requestConnection(AdbEndpoint(profile.host, profile.debugPort))
     }
 
-    private fun connect(endpoint: AdbEndpoint) = startOperation { generation ->
+    private fun requestConnection(endpoint: AdbEndpoint) {
+        if (mutableState.value.connectionState is AdbConnectionState.Connected) {
+            pendingReplacementEndpoint = endpoint
+            mutableState.update { it.copy(awaitingDiscoverySessionReplacement = true) }
+            return
+        }
+        startOperation { generation -> connectEndpoint(endpoint, generation) }
+    }
+
+    private suspend fun connectEndpoint(endpoint: AdbEndpoint, generation: Long) {
         mutableState.update { it.copy(showPairing = false, pairingCode = "", notice = null) }
-        val result = manager.connect(endpoint)
+        val result = manager.connect(endpoint, CONNECTION_TIMEOUT)
+        val active = manager.connectionState.value as? AdbConnectionState.Connected
         if (result is AdbOperationResult.Success && generation == operationGeneration) {
+            if (active?.endpoint != endpoint) return
             repository.recordSuccessfulConnection(
                 host = endpoint.host,
                 port = endpoint.port,
@@ -366,9 +389,18 @@ class DevicesViewModel(
 
     fun disconnect() {
         cancelPairingOperation(markCancelled = hasNonTerminalPairing())
-        startOperation { _ ->
-            manager.disconnect()
-            mutableState.update { it.copy(pairingCode = "", showPairing = false, notice = "已断开连接") }
+        startOperation { generation ->
+            when (val result = manager.disconnect()) {
+                is AdbOperationResult.Success -> if (generation == operationGeneration) {
+                    mutableState.update {
+                        it.copy(pairingCode = "", showPairing = false, notice = "已断开连接")
+                    }
+                }
+                is AdbOperationResult.Failure -> if (generation == operationGeneration) {
+                    mutableState.update { it.copy(notice = result.error.userMessage) }
+                }
+                AdbOperationResult.Cancelled -> Unit
+            }
         }
     }
 
@@ -722,6 +754,7 @@ class DevicesViewModel(
             activeLocalWindowId = null
             localPairingGeneration++
             reducePairing(event, handleEffects = false)
+            clearPairingCode()
         }
     }
 
@@ -886,7 +919,6 @@ class DevicesViewModel(
     private fun parse(raw: String): AdbEndpoint? = when (val result = AdbEndpointParser.parse(raw)) {
         is EndpointParseResult.Valid -> result.endpoint
         is EndpointParseResult.Invalid -> {
-            manager.reportInvalidAddress(result.reason)
             mutableState.update { it.copy(inputError = result.reason) }
             null
         }
@@ -904,6 +936,7 @@ class DevicesViewModel(
     companion object {
         const val HOST_IDENTITY_REFERENCE = "android-keystore-host-v1"
         private const val SIX_DIGIT_CODE_LENGTH = 6
+        private val CONNECTION_TIMEOUT = 10.seconds
         private val QR_PAIRING_TIMEOUT = 120.seconds
         private val LAN_DISCOVERY_TIMEOUT = 10.seconds
         private val TERMINAL_PAIRING_PHASES = setOf(

@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStoreFile
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import java.nio.charset.StandardCharsets
@@ -16,12 +17,15 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-class DataStoreDeviceProfileRepository private constructor(
+class DataStoreDeviceProfileRepository internal constructor(
     private val store: DataStore<Preferences>,
 ) : DeviceProfileRepository {
     override val profiles: Flow<List<DeviceProfile>> = store.data.map { preferences ->
         preferences[PROFILES].orEmpty().mapNotNull(ProfileCodec::decode)
             .sortedByDescending(DeviceProfile::lastConnectedAtEpochMillis)
+    }
+    override val languagePreference: Flow<LanguagePreference> = store.data.map { preferences ->
+        LanguagePreference.fromPersisted(preferences[LANGUAGE])
     }
 
     override suspend fun recordSuccessfulConnection(
@@ -79,6 +83,14 @@ class DataStoreDeviceProfileRepository private constructor(
         return deleted
     }
 
+    override suspend fun setLanguagePreference(language: LanguagePreference): Boolean =
+        runCatching {
+            store.edit { preferences ->
+                preferences[LANGUAGE] = language.persistedValue
+            }
+            true
+        }.getOrDefault(false)
+
     override suspend fun clearAll() {
         store.edit { it.clear() }
     }
@@ -88,6 +100,7 @@ class DataStoreDeviceProfileRepository private constructor(
 
     companion object {
         private val PROFILES = stringSetPreferencesKey("device_profiles_v1")
+        private val LANGUAGE = stringPreferencesKey("ui_language_v1")
 
         fun create(context: Context): DataStoreDeviceProfileRepository {
             val applicationContext = context.applicationContext

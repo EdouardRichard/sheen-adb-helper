@@ -150,6 +150,30 @@ interface AdbSessionManager : AutoCloseable {
         expectedSessionId: String,
     ): AdbOperationResult<ExclusiveAdbOperationLease>
 
+    suspend fun quickActionCapabilities(
+        expectedSessionId: String,
+    ): QuickActionResult<QuickActionCapabilities> = QuickActionResult.StaleSession(expectedSessionId)
+
+    suspend fun captureScreenshot(
+        request: ScreenshotCaptureRequest,
+        sink: AdbCaptureSink,
+        progress: (QuickActionProgress) -> Unit = {},
+    ): QuickActionResult<CaptureMetadata> = QuickActionResult.StaleSession(request.expectedSessionId)
+
+    suspend fun recordScreen(
+        request: ScreenRecordRequest,
+        sink: AdbCaptureSink,
+        progress: (QuickActionProgress) -> Unit = {},
+    ): QuickActionResult<CaptureMetadata> = QuickActionResult.StaleSession(request.expectedSessionId)
+
+    suspend fun stopScreenRecord(
+        expectedSessionId: String,
+    ): QuickActionResult<Unit> = QuickActionResult.StaleSession(expectedSessionId)
+
+    suspend fun reboot(
+        request: RebootRequest,
+    ): QuickActionResult<Unit> = QuickActionResult.StaleSession(request.expectedSessionId)
+
     suspend fun connect(
         endpoint: AdbEndpoint,
         timeout: Duration = 15.seconds,

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.provider.Settings
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -15,6 +16,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -24,6 +26,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sheen.adb.ui.SheenDimensions
+import com.sheen.adb.data.LanguagePreference
 
 @Composable
 fun SettingsRoute(viewModel: SettingsViewModel) {
@@ -34,6 +37,26 @@ fun SettingsRoute(viewModel: SettingsViewModel) {
         verticalArrangement = Arrangement.spacedBy(SheenDimensions.itemSpacing),
     ) {
         Text("设置与隐私", style = MaterialTheme.typography.headlineSmall)
+        Card(Modifier.fillMaxWidth()) {
+            Column(Modifier.padding(16.dp)) {
+                Text("语言", style = MaterialTheme.typography.titleMedium)
+                LanguageOption(
+                    label = "简体中文",
+                    selected = state.language == LanguagePreference.ZH_CN,
+                    enabled = !state.isSavingLanguage,
+                    onClick = { viewModel.selectLanguage(LanguagePreference.ZH_CN) },
+                )
+                LanguageOption(
+                    label = "English",
+                    selected = state.language == LanguagePreference.EN_US,
+                    enabled = !state.isSavingLanguage,
+                    onClick = { viewModel.selectLanguage(LanguagePreference.EN_US) },
+                )
+                state.languageError?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
         InfoCard("应用版本", state.versionLabel)
         InfoCard(
             "纯本地隐私承诺",
@@ -69,6 +92,23 @@ fun SettingsRoute(viewModel: SettingsViewModel) {
         confirmButton = { TextButton(onClick = viewModel::clearAll) { Text("确认清除") } },
         dismissButton = { TextButton(onClick = viewModel::dismissClear) { Text("取消") } },
     )
+}
+
+@Composable
+private fun LanguageOption(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, modifier = Modifier.padding(vertical = 12.dp))
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            enabled = enabled,
+        )
+    }
 }
 
 @Composable
