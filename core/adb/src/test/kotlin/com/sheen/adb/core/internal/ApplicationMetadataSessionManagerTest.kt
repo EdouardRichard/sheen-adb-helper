@@ -156,6 +156,7 @@ class ApplicationMetadataSessionManagerTest {
                     .joinToString(separator = "\n", postfix = "\n"),
             )
             command.startsWith("am force-stop --user 0 ") -> response("")
+            command.startsWith("pidof ") -> response("", exitCode = 1)
             else -> response("ok\n")
         }
     }

@@ -17,6 +17,7 @@ enum class V01StringKey(val semanticKey: String) {
     NAV_TERMINAL("nav.terminal"),
     NAV_LOGS("nav.logs"),
     CONNECTION_ENDPOINT_HINT("connection.endpoint.hint"),
+    CONNECTION_ENDPOINT_CONTENT_DESCRIPTION("connection.endpoint.content_description"),
     CONNECTION_CONNECTING("connection.connecting"),
     CONNECTION_CONNECTED("connection.connected"),
     CONNECTION_DISCONNECTING("connection.disconnecting"),
@@ -57,6 +58,7 @@ enum class V01StringKey(val semanticKey: String) {
 object V01Strings {
     private val catalogs: Map<UiLanguage, Map<V01StringKey, String>> = mapOf(
         UiLanguage.ZH_CN to mapOf(
+            V01StringKey.CONNECTION_ENDPOINT_CONTENT_DESCRIPTION to "\u0041\u0044\u0042 \u8c03\u8bd5\u5730\u5740",
             V01StringKey.MENU to "菜单",
             V01StringKey.HISTORY_DEVICES to "历史设备",
             V01StringKey.SETTINGS to "设置",
@@ -110,6 +112,7 @@ object V01Strings {
             V01StringKey.QUICK_RESULT_UNKNOWN to "操作结果未知",
         ),
         UiLanguage.EN_US to mapOf(
+            V01StringKey.CONNECTION_ENDPOINT_CONTENT_DESCRIPTION to "ADB debug address",
             V01StringKey.MENU to "Menu",
             V01StringKey.HISTORY_DEVICES to "Connection history",
             V01StringKey.SETTINGS to "Settings",

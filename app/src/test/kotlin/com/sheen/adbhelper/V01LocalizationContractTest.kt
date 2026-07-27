@@ -26,6 +26,7 @@ class V01LocalizationContractTest {
             V01StringKey.CONNECTION_CONNECTING,
             V01StringKey.CONNECTION_CONNECTED,
             V01StringKey.CONNECTION_DISCONNECTED,
+            V01StringKey.CONNECTION_ENDPOINT_CONTENT_DESCRIPTION,
         )
         keys.forEach { key ->
             assertFalse(
@@ -43,7 +44,7 @@ class V01LocalizationContractTest {
             "../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt",
         ).readText()
         assertTrue(app.contains("V01Strings.text(language"))
-        assertTrue(app.contains("connectionStatusName(connection, language)"))
+        assertTrue(app.contains("V01StringKey.CONNECTION_ENDPOINT_HINT"))
         assertTrue(devices.contains("V01Strings.text(language"))
     }
 }

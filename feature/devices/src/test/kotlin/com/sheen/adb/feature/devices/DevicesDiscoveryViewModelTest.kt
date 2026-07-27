@@ -14,6 +14,7 @@ import com.sheen.adb.core.LocalPairingNotificationState
 import com.sheen.adb.core.LocalPairingWindow
 import com.sheen.adb.core.LocalPairingWindowId
 import com.sheen.adb.core.PairingAttemptId
+import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.PairingSecret
 import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryMode
@@ -173,7 +174,7 @@ class DevicesDiscoveryViewModelTest {
     }
 
     @Test
-    fun `confirmed pairing selection submits through discovered target with one attempt`() = runTest {
+    fun `confirmed unpaired selection opens QR overlay without submitting a code attempt`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val manager = FakeManager()
@@ -182,20 +183,74 @@ class DevicesDiscoveryViewModelTest {
             val viewModel = viewModel(manager, attemptId)
             viewModel.onDiscoveryForeground()
             runCurrent()
-            flow.emit(AdbOperationResult.Success(snapshot(30L, "pairing", WirelessServiceType.PAIRING)))
+            flow.emit(AdbOperationResult.Success(snapshot(30L, "dynamic-debug")))
             runCurrent()
-            val target = viewModel.discoveryState.value.items.single().pairingTarget!!
+            val target = viewModel.discoveryState.value.items.single().connectTarget!!
 
-            viewModel.selectDiscoveryPairing(target)
+            viewModel.selectDiscoveryConnect(target)
             viewModel.confirmDiscoverySelection()
             viewModel.updatePairingCode("4".repeat(6))
             viewModel.pair()
+            runCurrent()
+
+            assertTrue(viewModel.state.value.showPairing)
+            assertEquals(viewModel.pairingState.value.method, PairingMethod.QR)
+            assertEquals(manager.pairTargets, emptyList<WirelessDiscoveryTarget>())
+            assertEquals(manager.pairAttempts, emptyList<PairingAttemptId>())
+            assertEquals(manager.manualPairCalls, 0)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `confirmed unpaired selection releases foreground discovery before QR pairing starts`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val foreground = manager.enqueueDiscovery()
+            val viewModel = viewModel(manager, PairingAttemptId.of("attempt-serialized-qr"))
+            viewModel.onDiscoveryForeground()
+            runCurrent()
+            foreground.emit(AdbOperationResult.Success(snapshot(32L, "dynamic-debug-serialized")))
+            runCurrent()
+            val target = viewModel.discoveryState.value.items.single().connectTarget!!
+
+            viewModel.selectDiscoveryConnect(target)
+            viewModel.confirmDiscoverySelection()
+            runCurrent()
+
+            assertEquals(
+                foreground.subscriptionCount.value,
+                0,
+                "The LAN discovery collector must be fully released before QR discovery can claim NSD.",
+            )
+            assertTrue(viewModel.state.value.showPairing)
+            assertEquals(viewModel.pairingState.value.method, PairingMethod.QR)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `legacy 5555 debug target connects directly without opening pairing`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            val flow = manager.enqueueDiscovery()
+            val viewModel = viewModel(manager)
+            viewModel.onDiscoveryForeground()
+            runCurrent()
+            flow.emit(AdbOperationResult.Success(snapshot(31L, "legacy-debug", port = 5_555)))
+            runCurrent()
+            val target = viewModel.discoveryState.value.items.single().connectTarget!!
+
+            viewModel.selectDiscoveryConnect(target)
+            viewModel.confirmDiscoverySelection()
             advanceUntilIdle()
 
-            assertEquals(manager.pairTargets, listOf(target))
-            assertEquals(manager.pairAttempts, listOf(attemptId))
-            assertEquals(manager.manualPairCalls, 0)
-            assertEquals(viewModel.state.value.pairingCode, "")
+            assertEquals(manager.connectTargets, listOf(target))
+            assertFalse(viewModel.state.value.showPairing)
         } finally {
             Dispatchers.resetMain()
         }
@@ -215,7 +270,7 @@ class DevicesDiscoveryViewModelTest {
             val viewModel = viewModel(manager)
             viewModel.onDiscoveryForeground()
             runCurrent()
-            flow.emit(AdbOperationResult.Success(snapshot(40L, "connect", WirelessServiceType.CONNECT)))
+            flow.emit(AdbOperationResult.Success(snapshot(40L, "connect", port = 5_555)))
             runCurrent()
             val target = viewModel.discoveryState.value.items.single().connectTarget!!
 
@@ -254,6 +309,7 @@ class DevicesDiscoveryViewModelTest {
         generation: Long,
         id: String,
         type: WirelessServiceType = WirelessServiceType.CONNECT,
+        port: Int = 45_050,
     ): WirelessDiscoveryState = WirelessDiscoveryState(
         generation = generation,
         services = listOf(
@@ -262,7 +318,7 @@ class DevicesDiscoveryViewModelTest {
                 serviceType = type,
                 serviceName = "synthetic-service",
                 addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 50)),
-                port = 45_050,
+                port = port,
                 status = WirelessServiceStatus.RESOLVED,
                 lastSeenAt = 1L,
             ),

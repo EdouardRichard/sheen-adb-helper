@@ -26,14 +26,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import com.sheen.adb.core.WirelessDiscoveryTarget
-import com.sheen.adb.core.WirelessServiceType
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
 
 internal enum class DevicesDiscoveryAction {
-    PAIR,
     CONNECT,
 }
 
@@ -46,6 +44,7 @@ internal data class DevicesDiscoveryItemPresentation(
     val actions: Set<DevicesDiscoveryAction>,
     val pairingTarget: WirelessDiscoveryTarget?,
     val connectTarget: WirelessDiscoveryTarget?,
+    val requiresPairing: Boolean,
 )
 
 internal data class DevicesDiscoveryPresentation(
@@ -78,15 +77,10 @@ internal fun DevicesDiscoveryState.toDiscoveryPresentation(
             DevicesDiscoveryItemPresentation(
                 deviceName = item.deviceName?.trim()?.takeIf(String::isNotEmpty),
                 endpointLabel = item.endpointLabel,
-                rolesText = item.serviceTypes.sortedBy(WirelessServiceType::ordinal).joinToString(" / ") {
-                    when (it) {
-                        WirelessServiceType.PAIRING -> if (language == UiLanguage.ZH_CN) "配对服务" else "Pairing service"
-                        WirelessServiceType.CONNECT -> if (language == UiLanguage.ZH_CN) "连接服务" else "Connection service"
-                    }
-                },
+                rolesText = if (language == UiLanguage.ZH_CN) "调试服务" else "Debugging service",
                 relationText = when (item.relation) {
-                    DevicesDiscoveryRelation.VERIFIED -> if (language == UiLanguage.ZH_CN) "已通过当前 Session 身份验证关联" else "Verified for the current session"
-                    DevicesDiscoveryRelation.UNKNOWN -> if (language == UiLanguage.ZH_CN) "配对与连接尚未验证关联，请分别确认" else "Pairing and connection are not verified as related"
+                    DevicesDiscoveryRelation.VERIFIED -> if (language == UiLanguage.ZH_CN) "已验证，可直接连接" else "Verified; ready to connect"
+                    DevicesDiscoveryRelation.UNKNOWN -> if (language == UiLanguage.ZH_CN) "尚未验证，需先配对" else "Not verified; pairing required"
                 },
                 statusText = when (item.reachability) {
                     DevicesDiscoveryReachability.RESOLVED -> if (language == UiLanguage.ZH_CN) "当前可选择" else "Available"
@@ -94,11 +88,11 @@ internal fun DevicesDiscoveryState.toDiscoveryPresentation(
                     DevicesDiscoveryReachability.UNAVAILABLE -> if (language == UiLanguage.ZH_CN) "服务暂不可用，请刷新" else "Service unavailable; refresh"
                 },
                 actions = buildSet {
-                    if (item.pairingTarget != null && item.selectable) add(DevicesDiscoveryAction.PAIR)
                     if (item.connectTarget != null && item.selectable) add(DevicesDiscoveryAction.CONNECT)
                 },
                 pairingTarget = item.pairingTarget,
                 connectTarget = item.connectTarget,
+                requiresPairing = item.requiresPairing,
             )
         },
         selectionExpired = selectionExpired,
@@ -106,7 +100,22 @@ internal fun DevicesDiscoveryState.toDiscoveryPresentation(
         selectionMessage = when {
             selectionExpired -> if (language == UiLanguage.ZH_CN) "该服务已过期或端口已变化，请刷新后重新选择。" else "This service expired or changed. Refresh and select it again."
             pendingSelection is DevicesDiscoverySelection.Pairing -> if (language == UiLanguage.ZH_CN) "确认使用该系统公布的配对服务？仍需输入 6 位配对码。" else "Use this advertised pairing service? A 6-digit code is still required."
-            pendingSelection is DevicesDiscoverySelection.Connect -> if (language == UiLanguage.ZH_CN) "确认连接该系统公布的调试服务？应用不会自动替换当前 Session。" else "Connect to this advertised debugging service? The current session is not replaced automatically."
+            pendingSelection is DevicesDiscoverySelection.Connect -> {
+                val selected = items.firstOrNull { it.connectTarget == pendingSelection.target }
+                if (selected?.requiresPairing == true) {
+                    if (language == UiLanguage.ZH_CN) {
+                        "该调试服务尚未配对。确认后打开二维码配对页面，配对成功后自动连接。"
+                    } else {
+                        "This debugging service is not paired. Continue to pair by QR code, then connect automatically."
+                    }
+                } else {
+                    if (language == UiLanguage.ZH_CN) {
+                        "确认直接连接该调试服务？"
+                    } else {
+                        "Connect directly to this debugging service?"
+                    }
+                }
+            }
             else -> ""
         },
     )
@@ -174,8 +183,6 @@ private fun DiscoveryDeviceCard(
     val onSelect: (() -> Unit)? = when {
         DevicesDiscoveryAction.CONNECT in item.actions && item.connectTarget != null ->
             ({ actions.selectDiscoveryConnect(item.connectTarget) })
-        DevicesDiscoveryAction.PAIR in item.actions && item.pairingTarget != null ->
-            ({ actions.selectDiscoveryPairing(item.pairingTarget) })
         else -> null
     }
     Row(

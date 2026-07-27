@@ -1,22 +1,33 @@
 package com.sheen.adb.feature.apps
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -24,31 +35,97 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.sheen.adb.core.ApplicationField
+import com.sheen.adb.core.ApplicationClassification
+import com.sheen.adb.core.ApplicationUninstallPreparation
+import com.sheen.adb.core.ApkInstallMode
 import com.sheen.adb.core.RemoteApplication
 import com.sheen.adb.core.RemoteApplicationEnabledState
+import com.sheen.adb.ui.SafeVerbatimPolicy
+import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.SheenDimensions
+import com.sheen.adb.ui.SheenIcons
+import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.UiLanguage
+import com.sheen.adb.data.SafComponentOutputStore
+import com.sheen.adb.data.SafDocumentStore
+import com.sheen.adb.data.SafStoreResult
+import java.util.concurrent.atomic.AtomicBoolean
+
+private const val DESIGN_SEARCH_PLACEHOLDER_ZH = "请输入应用名或包名。"
 
 @Composable
-fun AppsRoute(viewModel: AppsViewModel) {
+fun AppsRoute(
+    viewModel: AppsViewModel,
+    language: UiLanguage = UiLanguage.ZH_CN,
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val pendingUninstall by viewModel.pendingUninstall.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val documentStore = remember(context) { SafDocumentStore(context) }
+    val pickerLifecycleLease = remember { AtomicBoolean(false) }
+    val extractionDestination = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri == null) {
+            viewModel.dismissTaskResult()
+        } else {
+            viewModel.deliverExtraction(
+                destinationTreeId = uri.toString(),
+                outputs = SafComponentOutputStore(documentStore),
+            )
+        }
+    }
+    val installSource = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) {
+            viewModel.dismissTaskResult()
+        } else {
+            when (val source = documentStore.openSource(uri.toString())) {
+                is SafStoreResult.Success -> viewModel.installSelectedApk(
+                    source = source.value,
+                    mode = ApkInstallMode.STANDARD,
+                    expectedPackageName = null,
+                )
+                is SafStoreResult.Failure -> viewModel.dismissTaskResult()
+            }
+        }
+    }
+    LaunchedEffect(state.task?.taskId) {
+        val pickerTask = state.task?.takeIf { it.phase == AppsTaskPhase.PickerOpen } ?: return@LaunchedEffect
+        pickerLifecycleLease.set(true)
+        when (pickerTask.kind) {
+            AppsTaskKind.APK_EXTRACTION -> extractionDestination.launch(null)
+            AppsTaskKind.APK_INSTALLATION -> installSource.launch(
+                arrayOf("application/vnd.android.package-archive"),
+            )
+        }
+    }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> viewModel.setForeground(true)
-                Lifecycle.Event.ON_STOP -> viewModel.setForeground(false)
+                Lifecycle.Event.ON_START -> {
+                    viewModel.setForeground(true)
+                    pickerLifecycleLease.set(false)
+                }
+                Lifecycle.Event.ON_STOP ->
+                    if (!pickerLifecycleLease.get()) viewModel.setForeground(false)
                 else -> Unit
             }
         }
@@ -59,190 +136,572 @@ fun AppsRoute(viewModel: AppsViewModel) {
             viewModel.setForeground(false)
         }
     }
-    AppsScreen(state, viewModel)
+    AppsScreen(
+        state = state,
+        language = language,
+        pendingUninstall = pendingUninstall,
+        onDraftQuery = viewModel::updateDraftQuery,
+        onSearch = viewModel::applySearch,
+        onRefresh = viewModel::refresh,
+        onExtract = viewModel::beginApkExtraction,
+        onForceStop = viewModel::requestForceStop,
+        onDisable = viewModel::requestDisable,
+        onEnable = viewModel::requestEnable,
+        onUninstall = viewModel::requestUninstall,
+        onInstall = viewModel::beginApkInstallation,
+        onConfirmMutation = viewModel::confirmPending,
+        onDismissMutation = viewModel::dismissConfirmation,
+        onConfirmUninstall = viewModel::confirmUninstall,
+        onDismissUninstall = viewModel::cancelPendingConfirmation,
+        onConfirmForceInstall = viewModel::confirmForceInstall,
+        onDismissError = viewModel::dismissError,
+        onDismissTask = viewModel::dismissTaskResult,
+    )
 }
 
 @Composable
-fun AppsScreen(state: AppsUiState, actions: AppsViewModel) {
-    LazyColumn(
-        Modifier.padding(SheenDimensions.screenPadding),
-        verticalArrangement = Arrangement.spacedBy(SheenDimensions.itemSpacing),
+fun AppsScreen(
+    state: AppsUiState,
+    language: UiLanguage,
+    pendingUninstall: ApplicationUninstallPreparation?,
+    onDraftQuery: (String) -> Unit,
+    onSearch: () -> Unit,
+    onRefresh: () -> Unit,
+    onExtract: (String) -> Unit,
+    onForceStop: (String) -> Unit,
+    onDisable: (String) -> Unit,
+    onEnable: (String) -> Unit,
+    onUninstall: (String) -> Unit,
+    onInstall: () -> Unit,
+    onConfirmMutation: () -> Unit,
+    onDismissMutation: () -> Unit,
+    onConfirmUninstall: () -> Unit,
+    onDismissUninstall: () -> Unit,
+    onConfirmForceInstall: () -> Unit,
+    onDismissError: () -> Unit,
+    onDismissTask: () -> Unit,
+) {
+    BoxWithConstraints(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background),
     ) {
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(SheenDimensions.itemSpacing)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("应用管理", style = MaterialTheme.typography.headlineSmall)
-                    Button(
-                        onClick = actions::refresh,
-                        enabled = state.isConnected && !state.isBusy,
-                        modifier = Modifier.semantics { contentDescription = "刷新当前用户第三方应用列表" },
-                    ) { Text("刷新") }
-                }
-                Text("仅显示被控端当前 Android 用户的第三方应用；名称和图标只在当前连接中使用，不会保存。")
-                if (!state.isConnected) Text("请先连接设备")
-                if (state.isConnected && state.userId != null) {
-                    Text("设备：${state.deviceDisplayName} · 当前用户：${state.userId}")
-                }
-                OutlinedTextField(
-                    value = state.query,
-                    onValueChange = actions::updateQuery,
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("按应用名或包名搜索") },
-                    singleLine = true,
-                    enabled = !state.isBusy,
+        val pageMargin = if (maxWidth >= 600.dp) {
+            SheenDimensions.expandedPageHorizontalMargin
+        } else {
+            SheenDimensions.compactPageHorizontalMargin
+        }
+        Box(Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = pageMargin),
+            ) {
+                SearchBar(
+                    value = state.draftQuery,
+                    language = language,
+                    enabled = state.task == null && state.activeOperation == null,
+                    onValueChange = onDraftQuery,
+                    onSearch = onSearch,
                 )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilterChip(state.filter == AppsFilter.ALL, { actions.setFilter(AppsFilter.ALL) }, { Text("全部") }, enabled = !state.isBusy)
-                    FilterChip(state.filter == AppsFilter.ENABLED, { actions.setFilter(AppsFilter.ENABLED) }, { Text("已启用") }, enabled = !state.isBusy)
-                    FilterChip(state.filter == AppsFilter.DISABLED, { actions.setFilter(AppsFilter.DISABLED) }, { Text("已禁用") }, enabled = !state.isBusy)
-                }
-                if (state.isBusy) {
-                    CircularProgressIndicator()
-                    Text(activeOperationLabel(state))
-                    OutlinedButton(onClick = { actions.cancelActive() }) {
-                        Text(if (state.activeOperation == AppsOperation.LOADING) "取消加载" else "取消操作")
-                    }
-                }
-                state.degradedReason?.let { Text("降级说明：$it") }
-                if (state.unavailableFields.isNotEmpty()) {
-                    Text("设备未可靠提供：${state.unavailableFields.joinToString("、", transform = ApplicationField::displayName)}")
-                }
-                state.error?.let {
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(it.userMessage, color = MaterialTheme.colorScheme.error)
-                            Text("下一步：${it.nextStep}")
-                            Text("技术代码：${it.technicalCode}")
-                        }
-                    }
-                }
-                state.operationNotice?.let { notice ->
-                    Card(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(
-                                notice.message,
-                                color = if (notice.outcomeUnknown) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
-                            )
-                            TextButton(onClick = actions::dismissNotice) { Text("关闭提示") }
-                        }
-                    }
-                }
-                if (state.isConnected && !state.isLoading && state.error == null && state.applications.isEmpty()) {
-                    Text("当前用户没有可显示的第三方应用")
-                } else if (!state.isLoading && state.applications.isNotEmpty() && state.visibleApplications.isEmpty()) {
-                    Text("没有符合当前搜索和筛选条件的应用")
-                }
+                ApplicationsContent(
+                    state = state,
+                    language = language,
+                    onRefresh = onRefresh,
+                    onExtract = onExtract,
+                    onForceStop = onForceStop,
+                    onDisable = onDisable,
+                    onEnable = onEnable,
+                    onUninstall = onUninstall,
+                    onDismissError = onDismissError,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            FloatingActionButton(
+                onClick = onInstall,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = pageMargin, bottom = 16.dp)
+                    .size(56.dp)
+                    .semantics {
+                        contentDescription = AppsStrings.text(language, AppsStringKey.INSTALL_APK)
+                    },
+                shape = SheenShapes.extraLarge,
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            ) {
+                Icon(SheenIcons.UploadToDevice, contentDescription = null)
             }
         }
-        items(state.visibleApplications, key = { it.packageName }) { application ->
-            ApplicationCard(application, state, actions)
-        }
     }
-    state.pendingConfirmation?.let { ApplicationConfirmationDialog(it, actions) }
+
+    state.pendingConfirmation?.let {
+        MutationConfirmationDialog(
+            confirmation = it,
+            language = language,
+            onConfirm = onConfirmMutation,
+            onDismiss = onDismissMutation,
+        )
+    }
+    pendingUninstall?.let {
+        UninstallConfirmationDialog(
+            preparation = it,
+            language = language,
+            onConfirm = onConfirmUninstall,
+            onDismiss = onDismissUninstall,
+        )
+    }
+    state.task?.let {
+        AppsTaskDialog(it, language, onConfirmForceInstall, onDismissTask)
+    }
 }
 
 @Composable
-private fun ApplicationCard(application: RemoteApplication, state: AppsUiState, actions: AppsViewModel) {
-    val displayName = state.displayNameByPackage[application.packageName]
-        ?.takeIf { it.isNotBlank() }
-        ?: "无法解析应用名"
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun SearchBar(
+    value: String,
+    language: UiLanguage,
+    enabled: Boolean,
+    onValueChange: (String) -> Unit,
+    onSearch: () -> Unit,
+) {
+    val focusManager = LocalFocusManager.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 16.dp, bottom = 24.dp)
+            .background(MaterialTheme.colorScheme.surfaceContainerLow, SheenShapes.extraLarge)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.surfaceBright,
+                SheenShapes.extraLarge,
+            )
+            .padding(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(SheenDimensions.gutter),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val placeholder = if (language == UiLanguage.ZH_CN) {
+            DESIGN_SEARCH_PLACEHOLDER_ZH
+        } else {
+            AppsStrings.text(language, AppsStringKey.SEARCH_PLACEHOLDER)
+        }
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.weight(1f),
+            placeholder = { Text(placeholder) },
+            singleLine = true,
+            enabled = enabled,
+            textStyle = MaterialTheme.typography.labelLarge.copy(fontFamily = FontFamily.Monospace),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(onSearch = {
+                onSearch()
+                focusManager.clearFocus()
+            }),
+        )
+        IconButton(
+            onClick = onSearch,
+            enabled = enabled,
+            modifier = Modifier
+                .size(SheenDimensions.minimumTouchTarget)
+                .background(MaterialTheme.colorScheme.secondaryContainer, SheenShapes.large)
+                .semantics {
+                    contentDescription = AppsStrings.text(language, AppsStringKey.SEARCH_PLACEHOLDER)
+                },
+        ) {
+            Icon(SheenIcons.Search, contentDescription = null)
+        }
+    }
+}
+
+@Composable
+private fun ApplicationsContent(
+    state: AppsUiState,
+    language: UiLanguage,
+    onRefresh: () -> Unit,
+    onExtract: (String) -> Unit,
+    onForceStop: (String) -> Unit,
+    onDisable: (String) -> Unit,
+    onEnable: (String) -> Unit,
+    onUninstall: (String) -> Unit,
+    onDismissError: () -> Unit,
+    modifier: Modifier,
+) {
+    val visualState = appsVisualState(state)
+    if (visualState != AppsVisualState.Content) {
+        AppsStatePanel(visualState, state, language, onRefresh, onDismissError, modifier)
+        return
+    }
+    LazyColumn(
+        modifier = modifier.fillMaxWidth(),
+        contentPadding = PaddingValues(bottom = 88.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        items(
+            items = state.visibleApplications,
+            key = { application -> "${state.sessionId}:${application.userId}:${application.packageName}" },
+        ) { application ->
+            ApplicationCard(
+                application = application,
+                displayName = state.displayNameByPackage[application.packageName]
+                    ?.takeIf(String::isNotBlank)
+                    ?: AppsStrings.text(language, AppsStringKey.UNKNOWN_APP_NAME),
+                language = language,
+                enabled = !state.isBusy,
+                onExtract = { onExtract(application.packageName) },
+                onForceStop = { onForceStop(application.packageName) },
+                onDisable = { onDisable(application.packageName) },
+                onEnable = { onEnable(application.packageName) },
+                onUninstall = { onUninstall(application.packageName) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ApplicationCard(
+    application: RemoteApplication,
+    displayName: String,
+    language: UiLanguage,
+    enabled: Boolean,
+    onExtract: () -> Unit,
+    onForceStop: () -> Unit,
+    onDisable: () -> Unit,
+    onEnable: () -> Unit,
+    onUninstall: () -> Unit,
+) {
+    val rowActions = when (application.classification) {
+        ApplicationClassification.ORDINARY -> listOf(
+            AppsRowAction.EXTRACT_APK,
+            AppsRowAction.SET_ENABLED,
+            AppsRowAction.FORCE_STOP,
+            AppsRowAction.UNINSTALL,
+        )
+        ApplicationClassification.SYSTEM,
+        ApplicationClassification.UNKNOWN,
+        -> listOf(AppsRowAction.EXTRACT_APK)
+    }
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(
+                .5.dp,
+                MaterialTheme.colorScheme.surfaceBright.copy(alpha = .5f),
+                SheenShapes.extraLarge,
+            ),
+        shape = SheenShapes.extraLarge,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(application.packageName.let(::safePackageName),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(displayName.let(::safeApplicationName),
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(displayName, style = MaterialTheme.typography.titleMedium)
-                    Text(application.packageName, style = MaterialTheme.typography.bodySmall)
-                }
-            }
-            Text("状态：${application.enabledState.displayName()}")
-            application.versionName?.let { Text("版本名：$it") }
-            application.versionCode?.let { Text("版本号：$it") }
-            application.installerPackage?.let { Text("安装器：$it") }
-            if (AppsPolicy.canMutate(state, application)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = { actions.requestForceStop(application.packageName) },
-                        modifier = Modifier.semantics { contentDescription = "强制停止 ${application.packageName}" },
-                    ) { Text("强制停止") }
-                    when (application.enabledState) {
-                        RemoteApplicationEnabledState.ENABLED -> Button(
-                            onClick = { actions.requestDisable(application.packageName) },
-                            modifier = Modifier.semantics { contentDescription = "禁用 ${application.packageName}" },
-                        ) { Text("禁用") }
-                        RemoteApplicationEnabledState.DISABLED -> Button(
-                            onClick = { actions.requestEnable(application.packageName) },
-                            modifier = Modifier.semantics { contentDescription = "重新启用 ${application.packageName}" },
-                        ) { Text("重新启用") }
-                        RemoteApplicationEnabledState.UNKNOWN -> Unit
+                rowActions.forEach { action ->
+                    when (action) {
+                        AppsRowAction.EXTRACT_APK -> AppActionButton(
+                            icon = SheenIcons.Download,
+                            description = AppsStrings.text(language, AppsStringKey.EXTRACT_APK),
+                            enabled = enabled,
+                            tint = MaterialTheme.colorScheme.primary,
+                            onClick = onExtract,
+                        )
+                        AppsRowAction.SET_ENABLED -> AppActionButton(
+                            icon = if (application.enabledState == RemoteApplicationEnabledState.DISABLED) {
+                                SheenIcons.Enable
+                            } else {
+                                SheenIcons.Disable
+                            },
+                            description = AppsStrings.text(
+                                language,
+                                if (application.enabledState == RemoteApplicationEnabledState.DISABLED) {
+                                    AppsStringKey.ENABLE_APP
+                                } else {
+                                    AppsStringKey.DISABLE_APP
+                                },
+                            ),
+                            enabled = enabled &&
+                                application.enabledState != RemoteApplicationEnabledState.UNKNOWN,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            onClick = if (application.enabledState == RemoteApplicationEnabledState.DISABLED) {
+                                onEnable
+                            } else {
+                                onDisable
+                            },
+                        )
+                        AppsRowAction.FORCE_STOP -> AppActionButton(
+                            icon = SheenIcons.ForceStop,
+                            description = AppsStrings.text(language, AppsStringKey.FORCE_STOP_APP),
+                            enabled = enabled,
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            onClick = onForceStop,
+                        )
+                        AppsRowAction.UNINSTALL -> AppActionButton(
+                            icon = SheenIcons.Uninstall,
+                            description = AppsStrings.text(language, AppsStringKey.UNINSTALL_APP),
+                            enabled = enabled,
+                            tint = MaterialTheme.colorScheme.error,
+                            onClick = onUninstall,
+                        )
                     }
                 }
-            } else if (application.enabledState == RemoteApplicationEnabledState.UNKNOWN) {
-                Text("启用状态无法可靠确认；请刷新，当前不提供修改入口。")
-            } else if (state.isLocalSession && application.packageName == AppsPolicy.SELF_PACKAGE_NAME) {
-                Text("本机连接中禁止操作 Sheen ADB 助手自身。")
             }
         }
     }
 }
 
 @Composable
-private fun ApplicationConfirmationDialog(confirmation: AppsConfirmation, actions: AppsViewModel) {
-    val cancelFocus = remember { FocusRequester() }
-    LaunchedEffect(confirmation) { cancelFocus.requestFocus() }
-    AlertDialog(
-        onDismissRequest = actions::dismissConfirmation,
-        title = { Text("确认${confirmation.operation.displayName()}？") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("应用：${confirmation.packageName}")
-                Text("设备：${confirmation.deviceDisplayName}")
-                Text("当前用户：${confirmation.userId}")
-                Text(confirmation.operation.consequence())
-                Text("每次操作都必须单独确认；结果以设备实际状态为准。")
+private fun AppActionButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    description: String,
+    enabled: Boolean,
+    tint: androidx.compose.ui.graphics.Color,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .size(SheenDimensions.minimumTouchTarget)
+            .semantics { contentDescription = description },
+    ) {
+        Icon(icon, contentDescription = null, modifier = Modifier.size(20.dp), tint = tint)
+    }
+}
+
+@Composable
+private fun AppsStatePanel(
+    visualState: AppsVisualState,
+    state: AppsUiState,
+    language: UiLanguage,
+    onRefresh: () -> Unit,
+    onDismissError: () -> Unit,
+    modifier: Modifier,
+) {
+    val key = when (visualState) {
+        AppsVisualState.Disconnected -> AppsStringKey.ERROR
+        AppsVisualState.Unsupported -> AppsStringKey.UNSUPPORTED
+        AppsVisualState.OutcomeUnknown -> AppsStringKey.OUTCOME_UNKNOWN
+        AppsVisualState.Cancelled -> AppsStringKey.CANCELLED
+        AppsVisualState.PartialSuccess -> AppsStringKey.PARTIAL_SUCCESS
+        AppsVisualState.Empty -> AppsStringKey.NONE_COMMITTED
+        AppsVisualState.Initial,
+        AppsVisualState.Loading,
+        AppsVisualState.Progress,
+        -> AppsStringKey.PROGRESS
+        AppsVisualState.Error -> AppsStringKey.ERROR
+        AppsVisualState.Confirmation -> AppsStringKey.CONFIRM
+        AppsVisualState.Content -> AppsStringKey.TITLE
+    }
+    Box(modifier.fillMaxSize().padding(16.dp), contentAlignment = Alignment.Center) {
+        Surface(
+            shape = SheenShapes.extraLarge,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .2f)),
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (state.error != null) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        IconButton(onClick = onDismissError) {
+                            Icon(SheenIcons.Close, contentDescription = AppsStrings.text(language, AppsStringKey.CANCEL))
+                        }
+                    }
+                }
+                if (visualState == AppsVisualState.Loading || visualState == AppsVisualState.Progress) {
+                    CircularProgressIndicator(Modifier.size(28.dp))
+                }
+                Text(AppsStrings.text(language, key))
+                state.error?.technicalCode?.let {
+                    Text(
+                        AppsStrings.safeSingleLine(it, 64),
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (visualState == AppsVisualState.Error ||
+                    visualState == AppsVisualState.Unsupported ||
+                    visualState == AppsVisualState.Cancelled
+                ) {
+                    TextButton(onClick = onRefresh) {
+                        Text(AppsStrings.text(language, AppsStringKey.RETRY))
+                    }
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun MutationConfirmationDialog(
+    confirmation: AppsConfirmation,
+    language: UiLanguage,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                AppsStrings.text(
+                    language,
+                    if (confirmation.operation == AppsOperation.FORCE_STOP) {
+                        AppsStringKey.FORCE_STOP_CONFIRMATION
+                    } else {
+                        AppsStringKey.CONFIRM
+                    },
+                ),
+            )
         },
+        text = { Text(safePackageName(confirmation.packageName), fontFamily = FontFamily.Monospace) },
         confirmButton = {
-            TextButton(onClick = actions::confirmPending) { Text(confirmation.operation.displayName()) }
+            TextButton(onClick = onConfirm) { Text(AppsStrings.text(language, AppsStringKey.CONFIRM)) }
         },
         dismissButton = {
-            TextButton(onClick = actions::dismissConfirmation, modifier = Modifier.focusRequester(cancelFocus)) { Text("取消") }
+            TextButton(onClick = onDismiss) { Text(AppsStrings.text(language, AppsStringKey.CANCEL)) }
         },
     )
 }
 
-private fun activeOperationLabel(state: AppsUiState): String = when (state.activeOperation) {
-    AppsOperation.LOADING -> "正在读取当前用户第三方应用……"
-    AppsOperation.FORCE_STOP -> "正在强制停止：${state.activePackageName.orEmpty()}"
-    AppsOperation.DISABLE -> "正在禁用：${state.activePackageName.orEmpty()}"
-    AppsOperation.ENABLE -> "正在重新启用：${state.activePackageName.orEmpty()}"
-    null -> ""
+@Composable
+private fun UninstallConfirmationDialog(
+    preparation: ApplicationUninstallPreparation,
+    language: UiLanguage,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(AppsStrings.text(language, AppsStringKey.UNINSTALL_CONFIRMATION)) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(safePackageName(preparation.packageName), fontFamily = FontFamily.Monospace)
+                Text(AppsStrings.text(language, AppsStringKey.UNINSTALL_PRIVATE_DATA_WARNING))
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(AppsStrings.text(language, AppsStringKey.UNINSTALL_APP))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(AppsStrings.text(language, AppsStringKey.CANCEL)) }
+        },
+    )
 }
 
-private fun ApplicationField.displayName(): String = when (this) {
-    ApplicationField.VERSION_CODE -> "版本号"
-    ApplicationField.VERSION_NAME -> "版本名"
-    ApplicationField.INSTALLER_PACKAGE -> "安装器"
+@Composable
+private fun AppsTaskDialog(
+    task: AppsTaskState,
+    language: UiLanguage,
+    onConfirmForceInstall: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val key = when (val terminal = task.terminal) {
+        is AppsTaskTerminal.Extraction -> when (terminal.result) {
+            is AppsComponentResult.CompleteSuccess -> AppsStringKey.COMPLETE_SUCCESS
+            is AppsComponentResult.PartialSuccess -> AppsStringKey.PARTIAL_SUCCESS
+            is AppsComponentResult.NoneCommittedFailure -> AppsStringKey.NONE_COMMITTED
+        }
+        is AppsTaskTerminal.OldPackageRemovedNoRollback,
+        is AppsTaskTerminal.OutcomeUnknown,
+        is AppsTaskTerminal.CleanupUncertain,
+        -> AppsStringKey.OUTCOME_UNKNOWN
+        AppsTaskTerminal.Cancelled -> AppsStringKey.CANCELLED
+        AppsTaskTerminal.ForceInstallRequired -> AppsStringKey.FORCE_INSTALL_CONFIRMATION
+        AppsTaskTerminal.Success -> AppsStringKey.INSTALL_SUCCESS
+        null -> AppsStringKey.PROGRESS
+    }
+    AlertDialog(
+        onDismissRequest = { if (!task.navigationLocked && task.terminal != null) onDismiss() },
+        title = { Text(AppsStrings.text(language, key)) },
+        text = {
+            val terminal = task.terminal
+            if (terminal == null) {
+                CircularProgressIndicator()
+            } else if (terminal is AppsTaskTerminal.OutcomeUnknown) {
+                Text(
+                    AppsStrings.safeSingleLine(terminal.technicalCode, 64),
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                )
+            }
+        },
+        confirmButton = {
+            if (task.terminal == AppsTaskTerminal.ForceInstallRequired) {
+                TextButton(onClick = onConfirmForceInstall) {
+                    Text(AppsStrings.text(language, AppsStringKey.FORCE_INSTALL))
+                }
+            } else if (!task.navigationLocked && task.terminal != null) {
+                TextButton(onClick = onDismiss) {
+                    Text(AppsStrings.text(language, AppsStringKey.CONFIRM))
+                }
+            }
+        },
+        dismissButton = {
+            if (task.terminal == AppsTaskTerminal.ForceInstallRequired) {
+                TextButton(onClick = onDismiss) {
+                    Text(AppsStrings.text(language, AppsStringKey.CANCEL))
+                }
+            }
+        },
+    )
 }
 
-private fun RemoteApplicationEnabledState.displayName(): String = when (this) {
-    RemoteApplicationEnabledState.ENABLED -> "已启用"
-    RemoteApplicationEnabledState.DISABLED -> "已禁用"
-    RemoteApplicationEnabledState.UNKNOWN -> "设备未可靠提供"
+private fun appsVisualState(state: AppsUiState): AppsVisualState = when {
+    !state.isConnected -> AppsVisualState.Disconnected
+    state.isLoading -> AppsVisualState.Loading
+    state.error?.technicalCode?.contains("UNSUPPORTED") == true -> AppsVisualState.Unsupported
+    state.error != null -> AppsVisualState.Error
+    state.operationNotice?.outcomeUnknown == true -> AppsVisualState.OutcomeUnknown
+    state.task?.terminal is AppsTaskTerminal.Cancelled -> AppsVisualState.Cancelled
+    state.task?.componentResult is AppsComponentResult.PartialSuccess -> AppsVisualState.PartialSuccess
+    state.task != null && state.task.terminal == null -> AppsVisualState.Progress
+    state.pendingConfirmation != null -> AppsVisualState.Confirmation
+    state.applications.isEmpty() || state.visibleApplications.isEmpty() -> AppsVisualState.Empty
+    else -> AppsVisualState.Content
 }
 
-private fun AppsOperation.displayName(): String = when (this) {
-    AppsOperation.FORCE_STOP -> "强制停止"
-    AppsOperation.DISABLE -> "禁用"
-    AppsOperation.ENABLE -> "重新启用"
-    AppsOperation.LOADING -> "加载"
+private enum class AppsVisualState {
+    Initial,
+    Loading,
+    Content,
+    Empty,
+    Error,
+    Cancelled,
+    Disconnected,
+    Unsupported,
+    OutcomeUnknown,
+    Confirmation,
+    Progress,
+    PartialSuccess,
 }
 
-private fun AppsOperation.consequence(): String = when (this) {
-    AppsOperation.FORCE_STOP -> "可能立即中断前台任务、下载、通知和未保存工作；应用之后仍可能自动重启。"
-    AppsOperation.DISABLE -> "应用入口、通知、后台任务和关联功能可能不可用。"
-    AppsOperation.ENABLE -> "只修改 enabled state，不承诺恢复运行状态、通知、任务或数据。"
-    AppsOperation.LOADING -> ""
-}
+private fun safePackageName(raw: String): String =
+    SafeVerbatimText.render(raw, SafeVerbatimPolicy.SingleLine(96)).display
+
+private fun safeApplicationName(raw: String): String =
+    SafeVerbatimText.render(raw, SafeVerbatimPolicy.SingleLine(64)).display

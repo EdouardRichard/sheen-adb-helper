@@ -274,6 +274,8 @@ class FilesViewModel internal constructor(
     private var activeTransferLease: ExclusiveAdbOperationLease? = null
     private var requestSequence = 0L
     private var latestEntries = emptyMap<String, FileBrowserEntry>()
+    private var pageVisible = false
+    private var pickerLifecycleLease = false
 
     init {
         scope.launch {
@@ -283,6 +285,7 @@ class FilesViewModel internal constructor(
                         if (mutableState.value.sessionId != connection.sessionId) {
                             cancelAndCleanupForSessionChange()
                             loadJob?.cancel()
+                            latestEntries = emptyMap()
                             mutableState.value = FileTaskLifecycle.changeSession(mutableState.value, connection.sessionId)
                             load(path = null)
                         }
@@ -290,6 +293,7 @@ class FilesViewModel internal constructor(
                     else -> {
                         cancelAndCleanupForSessionChange()
                         loadJob?.cancel()
+                        latestEntries = emptyMap()
                         mutableState.value = FileTaskLifecycle.changeSession(mutableState.value, null)
                         mutableState.value = FilesReducer.reduce(mutableState.value, FilesAction.Disconnected)
                     }
@@ -308,19 +312,45 @@ class FilesViewModel internal constructor(
     fun select(path: String?) {
         mutableState.value = FilesReducer.reduce(mutableState.value, FilesAction.Select(path))
     }
+    fun updateScrollAnchor(absolutePath: String, offset: Int) {
+        mutableState.value = FilesReducer.reduce(
+            mutableState.value,
+            FilesAction.UpdateScrollAnchor(FileScrollAnchor(absolutePath, offset.coerceAtLeast(0))),
+        )
+    }
     fun cancelLoad() {
         loadJob?.cancel()
         mutableState.value = FilesReducer.reduce(mutableState.value, FilesAction.Cancelled)
     }
 
+    fun onPageVisible(visible: Boolean) {
+        if (pageVisible == visible) return
+        pageVisible = visible
+        if (!visible) {
+            if (pickerLifecycleLease) return
+            if (loadJob?.isActive == true) cancelLoad()
+            return
+        }
+        if (mutableState.value.sessionId == null) return
+        when (mutableState.value.browser) {
+            FilesBrowserState.Initial,
+            FilesBrowserState.Cancelled,
+            FilesBrowserState.Disconnected,
+            -> load(currentPath())
+            else -> Unit
+        }
+    }
+
     fun requestUpload() {
         if (!canStartPicker()) return
+        pickerLifecycleLease = true
         mutableState.value = mutableState.value.copy(pickerRequest = FilePickerRequest.UploadSource)
     }
 
     fun requestDownload() {
         if (!canStartPicker()) return
         val selected = mutableState.value.selectedPath?.let(latestEntries::get)?.takeIf { it.selectable } ?: return
+        pickerLifecycleLease = true
         mutableState.value = mutableState.value.copy(
             pickerRequest = FilePickerRequest.DownloadTarget(selected.name),
         )
@@ -435,11 +465,21 @@ class FilesViewModel internal constructor(
     }
 
     fun onHostStopped(isChangingConfigurations: Boolean) {
-        if (!isChangingConfigurations) cancelActiveTask()
+        if (!isChangingConfigurations && !pickerLifecycleLease) cancelActiveTask()
+    }
+
+    fun onHostStarted() {
+        pickerLifecycleLease = false
     }
 
     fun dismissTask() {
         mutableState.value = FileTaskLifecycle.dismissTerminal(mutableState.value)
+    }
+
+    fun dismissError() {
+        if (mutableState.value.browser is FilesBrowserState.Error) {
+            mutableState.value = mutableState.value.copy(browser = FilesBrowserState.Initial)
+        }
     }
 
     private suspend fun cancelAndCleanupForSessionChange() {
@@ -464,6 +504,7 @@ class FilesViewModel internal constructor(
             }
         }
         activeTransferLease = lease
+        var refreshAfterRelease = false
         try {
             transition(pending, FileTaskStatus.Transferring(0, pending.source.sizeBytes))
             val uploaded = pending.source.open().use { input ->
@@ -493,7 +534,10 @@ class FilesViewModel internal constructor(
                 FileConflictPolicy.AUTO_RENAME -> RemoteFileConflictPolicy.AUTO_RENAME
             }
             when (val committed = remote.commitUpload(pending.plan, corePolicy, pending.sessionId, lease)) {
-                is AdbOperationResult.Success -> transition(pending, FileTaskStatus.Succeeded)
+                is AdbOperationResult.Success -> {
+                    transition(pending, FileTaskStatus.Succeeded)
+                    refreshAfterRelease = true
+                }
                 is AdbOperationResult.Failure -> {
                     cleanupPending()
                     if (!hasCleanupFailure()) {
@@ -512,6 +556,9 @@ class FilesViewModel internal constructor(
         } finally {
             lease.release()
             if (activeTransferLease === lease) activeTransferLease = null
+            if (refreshAfterRelease && mutableState.value.sessionId == pending.sessionId) {
+                load(currentPath())
+            }
         }
     }
 

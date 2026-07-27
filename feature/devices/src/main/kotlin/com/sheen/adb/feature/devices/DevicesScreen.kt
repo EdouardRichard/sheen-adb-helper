@@ -3,6 +3,7 @@ package com.sheen.adb.feature.devices
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.provider.Settings
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -33,9 +34,11 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,6 +64,8 @@ import com.sheen.adb.data.DeviceProfile
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SafeVerbatimPolicy
+import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.V01StringKey
 import com.sheen.adb.ui.V01Strings
@@ -71,22 +76,29 @@ fun DevicesRoute(
     onOpenWirelessDebuggingSettings: () -> Unit = {},
     language: UiLanguage = UiLanguage.ZH_CN,
 ) {
+    val context = LocalContext.current
     val state by viewModel.state.collectAsStateWithLifecycle()
     val pairingState by viewModel.pairingState.collectAsStateWithLifecycle()
     val discoveryState by viewModel.discoveryState.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
-    var openingWirelessDebuggingSettings by remember { mutableStateOf(false) }
+    var localPairingPromptWirelessEnabled by remember { mutableStateOf<Boolean?>(null) }
+    var openWirelessSettingsWhenPairingReady by remember { mutableStateOf(false) }
+    val keepLocalPairingWhileOpeningSettings by rememberUpdatedState(
+        state.keepLocalPairingWhileOpeningSettings,
+    )
     DisposableEffect(lifecycle) {
         viewModel.onDiscoveryForeground()
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_START -> {
-                    openingWirelessDebuggingSettings = false
+                    if (keepLocalPairingWhileOpeningSettings) {
+                        viewModel.onLocalWirelessSettingsReturned()
+                    }
                     viewModel.onDiscoveryForeground()
                 }
                 Lifecycle.Event.ON_STOP -> {
                     viewModel.onDiscoveryBackground()
-                    if (!openingWirelessDebuggingSettings) viewModel.closePairing()
+                    if (!keepLocalPairingWhileOpeningSettings) viewModel.closePairing()
                 }
                 else -> Unit
             }
@@ -95,7 +107,19 @@ fun DevicesRoute(
         onDispose {
             lifecycle.removeObserver(observer)
             viewModel.onDiscoveryBackground()
-            if (!openingWirelessDebuggingSettings) viewModel.closePairing()
+            if (!keepLocalPairingWhileOpeningSettings) viewModel.closePairing()
+        }
+    }
+    LaunchedEffect(
+        state.keepLocalPairingWhileOpeningSettings,
+        openWirelessSettingsWhenPairingReady,
+    ) {
+        if (
+            openWirelessSettingsWhenPairingReady &&
+            state.keepLocalPairingWhileOpeningSettings
+        ) {
+            openWirelessSettingsWhenPairingReady = false
+            onOpenWirelessDebuggingSettings()
         }
     }
     DevicesScreen(
@@ -104,11 +128,72 @@ fun DevicesRoute(
         discoveryState = discoveryState,
         actions = viewModel,
         language = language,
+        onRequestLocalPairing = {
+            localPairingPromptWirelessEnabled = context.isWirelessDebuggingEnabled()
+        },
         onOpenWirelessDebuggingSettings = {
-            openingWirelessDebuggingSettings = true
             viewModel.onLocalWirelessSettingsOpened()
             onOpenWirelessDebuggingSettings()
         },
+    )
+    localPairingPromptWirelessEnabled?.let { wirelessDebuggingEnabled ->
+        AlertDialog(
+            onDismissRequest = { localPairingPromptWirelessEnabled = null },
+            title = { Text(localized(language, "本机配对", "Pair this device")) },
+            text = {
+                Text(
+                    if (wirelessDebuggingEnabled) {
+                        localized(
+                            language,
+                            "无线调试已打开。请打开“使用配对码配对设备”模式，随后在通知栏输入配对码。",
+                            "Wireless debugging is enabled. Open “Pair device with pairing code”, then enter the code from the notification.",
+                        )
+                    } else {
+                        localized(
+                            language,
+                            "未检测到无线调试。请先打开无线调试并打开“使用配对码配对设备”模式，随后在通知栏输入配对码。",
+                            "Wireless debugging is not enabled. Enable it, open “Pair device with pairing code”, then enter the code from the notification.",
+                        )
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        localPairingPromptWirelessEnabled = null
+                        openWirelessSettingsWhenPairingReady = true
+                        viewModel.enterLocalPairingMode(openingWirelessSettings = true)
+                    },
+                ) {
+                    Text(localized(language, "确定", "OK"))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { localPairingPromptWirelessEnabled = null }) {
+                    Text(localized(language, "取消", "Cancel"))
+                }
+            },
+        )
+    }
+}
+
+@Composable
+fun DevicesPairingOverlayRoute(
+    viewModel: DevicesViewModel,
+    onOpenWirelessDebuggingSettings: () -> Unit = {},
+    language: UiLanguage = UiLanguage.ZH_CN,
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val pairingState by viewModel.pairingState.collectAsStateWithLifecycle()
+    PairingCard(
+        state = state,
+        pairingState = pairingState,
+        actions = viewModel,
+        onOpenWirelessDebuggingSettings = {
+            viewModel.onLocalWirelessSettingsOpened()
+            onOpenWirelessDebuggingSettings()
+        },
+        language = language,
     )
 }
 
@@ -120,6 +205,7 @@ internal fun DevicesScreen(
     actions: DevicesViewModel,
     discoveryState: DevicesDiscoveryState = DevicesDiscoveryState(),
     onOpenWirelessDebuggingSettings: () -> Unit = {},
+    onRequestLocalPairing: () -> Unit = actions::enterLocalPairingMode,
     language: UiLanguage = UiLanguage.ZH_CN,
 ) {
     val context = LocalContext.current
@@ -130,12 +216,11 @@ internal fun DevicesScreen(
     ) {
         DisconnectedContent(
             state = state,
-            pairingState = pairingState,
             discoveryState = discoveryState,
             actions = actions,
             language = language,
             context = context,
-            onOpenWirelessDebuggingSettings = onOpenWirelessDebuggingSettings,
+            onRequestLocalPairing = onRequestLocalPairing,
         )
     }
     val pairingPresentation = pairingState.toPresentation(language)
@@ -170,13 +255,26 @@ internal fun DevicesScreen(
 @Composable
 private fun DisconnectedContent(
     state: DevicesUiState,
-    pairingState: DevicesPairingState,
     discoveryState: DevicesDiscoveryState,
     actions: DevicesViewModel,
     language: UiLanguage,
     context: Context,
-    onOpenWirelessDebuggingSettings: () -> Unit,
+    onRequestLocalPairing: () -> Unit,
 ) {
+    val currentConnectionError = state.connectionState as? AdbConnectionState.Error
+    val errorIdentity = currentConnectionError?.let { "${it.error.technicalCode}:${it.technicalDetails}" }
+    var dismissedConnectionError by remember(errorIdentity) { mutableStateOf<String?>(null) }
+    var showConnectionErrorDetails by remember(errorIdentity) { mutableStateOf(false) }
+    val visibleInputError = ConnectionPagePresentation.visibleInputError(
+        inputError = state.inputError,
+        connection = state.connectionState,
+    )
+    val inputErrorIdentity = visibleInputError
+    var dismissedInputError by remember(inputErrorIdentity) { mutableStateOf<String?>(null) }
+    val semanticState = ConnectionPagePresentation.disconnectedContentState(
+        connection = state.connectionState,
+        discovery = discoveryState,
+    )
     Column(
         Modifier.fillMaxSize().padding(SheenDimensions.screenPadding),
         verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -185,35 +283,136 @@ private fun DisconnectedContent(
             Modifier.weight(1f).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            state.inputError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            visibleInputError
+                ?.takeUnless { it == dismissedInputError }
+                ?.let { error ->
+                    DismissibleInputError(
+                        error = error,
+                        language = language,
+                        onDismiss = { dismissedInputError = inputErrorIdentity },
+                    )
+                }
             state.notice?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
             if (state.connectionState.isBusy()) {
                 OutlinedButton(onClick = actions::cancelCurrentOperation) {
                     Text(localized(language, "取消当前操作", "Cancel current operation"))
                 }
             }
-            (state.connectionState as? AdbConnectionState.Error)?.let { error ->
-                CompactConnectionError(error, context, language)
+            currentConnectionError?.takeUnless { errorIdentity == dismissedConnectionError }?.let { error ->
+                CompactConnectionError(
+                    error = error,
+                    language = language,
+                    onShowDetails = { showConnectionErrorDetails = true },
+                    onDismiss = {
+                        showConnectionErrorDetails = false
+                        dismissedConnectionError = errorIdentity
+                    },
+                )
             }
             Text(
                 V01Strings.text(language, V01StringKey.PAIRING_SCAN),
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.primary,
             )
-            DevicesDiscoveryPanel(discoveryState, actions, language)
-            if (pairingState.method != PairingMethod.NONE || pairingState.isLocalMode) {
-                PairingCard(state, pairingState, actions, onOpenWirelessDebuggingSettings, language)
+            when (semanticState) {
+                DisconnectedPageContentState.Loading,
+                DisconnectedPageContentState.Content,
+                DisconnectedPageContentState.Empty,
+                DisconnectedPageContentState.Error,
+                DisconnectedPageContentState.Cancelled,
+                DisconnectedPageContentState.Disconnected,
+                DisconnectedPageContentState.Unsupported,
+                -> DevicesDiscoveryPanel(discoveryState, actions, language)
             }
         }
-        PairingActionButtons(actions, language)
+        PairingActionButtons(actions, language, onRequestLocalPairing)
+    }
+    if (showConnectionErrorDetails && currentConnectionError != null) {
+        AlertDialog(
+            onDismissRequest = { showConnectionErrorDetails = false },
+            title = { Text(localized(language, "错误详情", "Error details")) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        SafeVerbatimText.render(
+                            raw = currentConnectionError.error.technicalCode,
+                            policy = SafeVerbatimPolicy.SingleLine(maxCodePoints = 64),
+                        ).display,
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Text(
+                        SafeVerbatimText.render(
+                            raw = currentConnectionError.technicalDetails,
+                            policy = SafeVerbatimPolicy.MultiLine(maxCodePoints = 2_048),
+                        ).display,
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        copy(
+                            context,
+                            localized(language, "Sheen ADB 脱敏技术详情", "Sheen ADB redacted technical details"),
+                            currentConnectionError.technicalDetails,
+                        )
+                    },
+                ) {
+                    Text(localized(language, "复制", "Copy"))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showConnectionErrorDetails = false }) {
+                    Text(localized(language, "关闭", "Close"))
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun DismissibleInputError(
+    error: String,
+    language: UiLanguage,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer, SheenShapes.large)
+            .border(1.dp, MaterialTheme.colorScheme.error, SheenShapes.large)
+            .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = SafeVerbatimText.render(
+                raw = error,
+                policy = SafeVerbatimPolicy.SingleLine(maxCodePoints = 64),
+            ).display,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        IconButton(onClick = onDismiss) {
+            Icon(
+                imageVector = SheenIcons.Close,
+                contentDescription = DevicesStrings.text(
+                    language,
+                    DevicesStringKey.DISMISS_ERROR_CONTENT_DESCRIPTION,
+                ),
+            )
+        }
     }
 }
 
 @Composable
 private fun CompactConnectionError(
     error: AdbConnectionState.Error,
-    context: Context,
     language: UiLanguage,
+    onShowDetails: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     Row(
         Modifier
@@ -225,13 +424,30 @@ private fun CompactConnectionError(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
-            error.error.userMessage,
+            DevicesStrings.text(language, DevicesStringKey.CONNECTION_ERROR),
             modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onErrorContainer,
         )
-        TextButton(onClick = { copy(context, "Sheen ADB 脱敏技术详情", error.technicalDetails) }) {
+        Text(
+            SafeVerbatimText.render(
+                raw = error.error.technicalCode,
+                policy = SafeVerbatimPolicy.SingleLine(maxCodePoints = 64),
+            ).display,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+        )
+        TextButton(onClick = onShowDetails) {
             Text(localized(language, "详情", "Details"))
+        }
+        IconButton(onClick = onDismiss) {
+            Icon(
+                imageVector = SheenIcons.Close,
+                contentDescription = DevicesStrings.text(
+                    language,
+                    DevicesStringKey.DISMISS_ERROR_CONTENT_DESCRIPTION,
+                ),
+            )
         }
     }
 }
@@ -240,6 +456,7 @@ private fun CompactConnectionError(
 private fun PairingActionButtons(
     actions: DevicesViewModel,
     language: UiLanguage,
+    onRequestLocalPairing: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -248,23 +465,17 @@ private fun PairingActionButtons(
         DesignActionButton(
             icon = SheenIcons.QrCodeScanner,
             label = V01Strings.text(language, V01StringKey.PAIRING_QR),
-            onClick = {
-                actions.selectPairingMethod(PairingMethod.QR)
-                actions.startSelectedPairing()
-            },
+            onClick = { actions.beginPairingFromConnectionPage(PairingMethod.QR) },
         )
         DesignActionButton(
             icon = SheenIcons.PairingCode,
             label = V01Strings.text(language, V01StringKey.PAIRING_CODE),
-            onClick = {
-                actions.selectPairingMethod(PairingMethod.SIX_DIGIT_CODE)
-                actions.startSelectedPairing()
-            },
+            onClick = { actions.beginPairingFromConnectionPage(PairingMethod.SIX_DIGIT_CODE) },
         )
         DesignActionButton(
             icon = SheenIcons.CellTower,
             label = V01Strings.text(language, V01StringKey.PAIRING_LOCAL),
-            onClick = actions::enterLocalPairingMode,
+            onClick = onRequestLocalPairing,
         )
     }
 }
@@ -331,20 +542,19 @@ private fun PairingCard(
                         }
                         if (pairingState.method == method) {
                             Button(
-                                onClick = { actions.selectPairingMethod(method) },
-                                enabled = !presentation.showCancel,
+                                onClick = { actions.switchPairingMethod(method) },
+                                enabled = false,
                             ) { Text(label) }
                         } else {
                             OutlinedButton(
-                                onClick = { actions.selectPairingMethod(method) },
-                                enabled = !presentation.showCancel,
+                                onClick = { actions.switchPairingMethod(method) },
                             ) { Text(label) }
                         }
                     }
                 }
             }
             Text(
-                if (pairingState.isLocalMode) pairingState.localStatusText(language) else presentation.statusText,
+                presentation.statusText,
                 color = MaterialTheme.colorScheme.primary,
             )
             if (pairingState.isLocalMode) {
@@ -360,6 +570,14 @@ private fun PairingCard(
             if (presentation.showQrMatrix) {
                 pairingState.qrMatrix?.let {
                     QrMatrixImage(it, Modifier.align(Alignment.CenterHorizontally))
+                }
+                TextButton(
+                    onClick = {
+                        actions.switchPairingMethod(PairingMethod.SIX_DIGIT_CODE)
+                    },
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                ) {
+                    Text(localized(language, "切换配对码配对", "Switch to pairing code"))
                 }
             }
             if (presentation.showCodeInputs) {
@@ -388,7 +606,15 @@ private fun PairingCard(
                     Button(onClick = actions::pair, enabled = presentation.submitCodeEnabled) { Text(localized(language, "提交配对码", "Submit code")) }
                 }
                 if (presentation.showCancel) {
-                    OutlinedButton(onClick = actions::onPairingPageLeft) { Text(localized(language, "取消", "Cancel")) }
+                    OutlinedButton(onClick = actions::onPairingPageLeft) {
+                        Text(
+                            if (pairingState.isLocalMode) {
+                                localized(language, "停止本机配对", "Stop local pairing")
+                            } else {
+                                localized(language, "取消", "Cancel")
+                            },
+                        )
+                    }
                 }
                 if (presentation.showRetry) {
                     Button(
@@ -412,15 +638,8 @@ private fun PairingCard(
     }
 }
 
-private fun DevicesPairingState.localStatusText(language: UiLanguage): String = when (localDiscoveryStatus) {
-    LocalPairingDiscoveryStatus.IDLE -> localized(language, "等待开始本机端口扫描", "Waiting to scan local pairing ports")
-    LocalPairingDiscoveryStatus.SEARCHING -> localized(language, "正在扫描本机无线调试配对端口", "Scanning local wireless debugging pairing ports")
-    LocalPairingDiscoveryStatus.FOUND -> localized(language, "已发现本机配对端口，请输入系统显示的 6 位配对码", "Pairing port found. Enter the 6-digit code shown by the system.")
-    LocalPairingDiscoveryStatus.NOT_FOUND -> localized(language, "暂未发现配对端口，请确认系统配对码对话框保持打开", "No pairing port found. Keep the system pairing-code dialog open.")
-    LocalPairingDiscoveryStatus.AMBIGUOUS -> localized(language, "发现多个本机配对端口，请在系统设置中保留当前配对窗口后重试", "Multiple pairing ports were found. Keep only the current system pairing window open and retry.")
-    LocalPairingDiscoveryStatus.UNSUPPORTED -> localized(language, "当前系统未提供可发现的本机无线调试配对服务", "This system does not expose a discoverable local wireless pairing service.")
-    LocalPairingDiscoveryStatus.STOPPED -> localized(language, "本机配对端口扫描已停止", "Local pairing-port scan stopped")
-}
+private fun Context.isWirelessDebuggingEnabled(): Boolean =
+    Settings.Global.getInt(contentResolver, "adb_wifi_enabled", 0) == 1
 
 private fun DevicesPairingState.localNotificationText(language: UiLanguage): String = when (localNotificationState) {
     LocalPairingNotificationState.HIDDEN -> localized(language, "应用内配对码输入始终可用；通知栏输入正在准备", "In-app code entry remains available while notification input is prepared.")

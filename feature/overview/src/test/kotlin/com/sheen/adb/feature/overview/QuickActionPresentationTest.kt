@@ -1,6 +1,9 @@
 package com.sheen.adb.feature.overview
 
 import com.sheen.adb.core.QuickActionKind
+import com.sheen.adb.ui.SafeVerbatimPolicy
+import com.sheen.adb.ui.SafeVerbatimText
+import java.io.File
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
@@ -330,5 +333,81 @@ class QuickActionPresentationTest {
         assertTrue(runningNew is QuickActionUiState.Running)
         assertEquals((runningNew as QuickActionUiState.Running).sessionId, "session-new")
         assertFalse(lateOldArtifact.toString().contains("artifact-old"))
+    }
+
+    @Test
+    fun `completed screenshot exposes only the existing save entry`() {
+        val artifact = QuickActionArtifactRef(
+            opaqueId = "artifact-screenshot",
+            sessionId = "session-a",
+            format = QuickActionArtifactFormat.PNG,
+            sizeBytes = 8,
+        )
+        val completed = reducer.reduce(
+            QuickActionUiState.Running(
+                kind = QuickActionKind.SCREENSHOT,
+                sessionId = "session-a",
+            ),
+            QuickActionPresentationEvent.ArtifactReady(
+                kind = QuickActionKind.SCREENSHOT,
+                sessionId = "session-a",
+                artifact = artifact,
+            ),
+        )
+
+        assertEquals(
+            completed,
+            QuickActionUiState.AwaitingExport(
+                kind = QuickActionKind.SCREENSHOT,
+                sessionId = "session-a",
+                artifact = artifact,
+            ),
+        )
+
+        val screen = File(
+            "src/main/kotlin/com/sheen/adb/feature/overview/OverviewScreen.kt",
+        ).readText()
+        val awaitingBranch = screen.substringAfter("is QuickActionUiState.AwaitingExport")
+            .substringBefore("is QuickActionUiState.Exporting")
+        assertFalse(awaitingBranch.contains("\u5f55\u5c4f"))
+        assertFalse(awaitingBranch.contains("record", ignoreCase = true))
+        assertFalse(awaitingBranch.contains("success", ignoreCase = true))
+    }
+
+    @Test
+    fun `artifact labels and technical codes use bounded safe verbatim presentation`() {
+        val hostileArtifactLabel = "capture\u202E.png\u0000\r\nnext"
+        val hostileTechnicalCode = "FAIL\u2066CODE\u0007"
+        val artifactDisplay = SafeVerbatimText.render(
+            hostileArtifactLabel,
+            SafeVerbatimPolicy.SingleLine(maxCodePoints = 24),
+        )
+        val technicalDisplay = SafeVerbatimText.render(
+            hostileTechnicalCode,
+            SafeVerbatimPolicy.SingleLine(maxCodePoints = 24),
+        )
+
+        assertFalse(artifactDisplay.display.contains('\u202E'))
+        assertFalse(artifactDisplay.display.contains('\u0000'))
+        assertFalse(artifactDisplay.display.contains('\n'))
+        assertFalse(technicalDisplay.display.drop(1).dropLast(1).contains('\u2066'))
+        assertFalse(technicalDisplay.display.contains('\u0007'))
+
+        val screen = File(
+            "src/main/kotlin/com/sheen/adb/feature/overview/OverviewScreen.kt",
+        ).readText()
+        listOf(
+            "OverviewStrings",
+            "SafeVerbatimText",
+            "destinationName",
+            "technicalCode",
+        ).forEach { token ->
+            assertTrue(screen.contains(token), "missing safe Overview presentation token $token")
+        }
+        assertFalse(
+            Regex("""Text\(\s*"[^"]*\$\{state\.(destinationName|technicalCode)""")
+                .containsMatchIn(screen),
+            "artifact labels and technical codes must not be interpolated directly into UI text",
+        )
     }
 }

@@ -1,10 +1,18 @@
 package com.sheen.adb.core.internal
 
 import com.sheen.adb.core.AdbEndpoint
+import com.sheen.adb.core.ApkComponent
+import com.sheen.adb.core.TerminalInput
+import com.sheen.adb.core.internal.applications.ApkPackagePolicy
+import com.sheen.adb.core.internal.applications.ApplicationPackageProtocol
+import com.sheen.adb.core.internal.applications.InstalledApkComponent
+import com.sheen.adb.core.internal.applications.InstalledComponentDecision
 import java.io.EOFException
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.ArrayDeque
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -15,6 +23,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withTimeout
@@ -45,6 +55,133 @@ internal interface ProtocolShellCommand : AutoCloseable {
     fun execute(): ProtocolShellResponse
 }
 
+internal interface ProtocolInteractiveShellStream : AutoCloseable {
+    fun read(): ProtocolShellPacket
+    fun write(bytes: ByteArray)
+    fun closeInput()
+    fun closeOutput()
+}
+
+internal class ProtocolInteractiveShell(
+    private val stream: ProtocolInteractiveShellStream,
+) : AutoCloseable {
+    private val writeMutex = Mutex()
+    private val decodedPackets = ArrayDeque<ProtocolShellPacket>()
+    private val readyMarker = "__SHEEN_READY_${UUID.randomUUID().toString().replace("-", "")}__"
+    private val readyMarkerBytes = readyMarker.encodeToByteArray()
+    @Volatile
+    private var awaitingReadyMarker = false
+    private var retainedStandardOutput = ByteArray(0)
+
+    fun read(): ProtocolShellPacket {
+        decodedPackets.pollFirst()?.let { return it }
+        while (true) {
+            when (val packet = stream.read()) {
+                is ProtocolShellPacket.StandardOutput -> decodeStandardOutput(packet.bytes)
+                is ProtocolShellPacket.Exit -> {
+                    flushRetainedStandardOutput()
+                    decodedPackets.addLast(packet)
+                }
+                else -> decodedPackets.addLast(packet)
+            }
+            decodedPackets.pollFirst()?.let { return it }
+        }
+    }
+
+    suspend fun sendSubmittedCommand(completeCommand: String) {
+        val submittedCommand = buildString {
+            append(completeCommand)
+            append('\n')
+            append("printf '")
+            append(readyMarker)
+            append("'")
+            append('\n')
+        }
+        val submittedPayload = submittedCommand.encodeToByteArray()
+        writeMutex.withLock {
+            awaitingReadyMarker = true
+            try {
+                runInterruptible(Dispatchers.IO) { stream.write(submittedPayload) }
+            } catch (error: Throwable) {
+                awaitingReadyMarker = false
+                retainedStandardOutput = ByteArray(0)
+                throw error
+            }
+        }
+    }
+
+    suspend fun sendTerminalInput(terminalInput: TerminalInput) {
+        val encoded = TerminalInputEncoder.encode(terminalInput)
+        writeMutex.withLock {
+            runInterruptible(Dispatchers.IO) { stream.write(encoded) }
+        }
+    }
+
+    fun closeInput() = stream.closeInput()
+
+    fun closeOutput() = stream.closeOutput()
+
+    override fun close() = stream.close()
+
+    private fun decodeStandardOutput(bytes: ByteArray) {
+        if (!awaitingReadyMarker) {
+            if (bytes.isNotEmpty()) decodedPackets.addLast(ProtocolShellPacket.StandardOutput(bytes))
+            return
+        }
+        val combined = retainedStandardOutput + bytes
+        val markerIndex = combined.indexOf(readyMarkerBytes)
+        if (markerIndex >= 0) {
+            val beforeMarker = combined.copyOfRange(0, markerIndex)
+            val afterMarker = combined.copyOfRange(markerIndex + readyMarkerBytes.size, combined.size)
+            retainedStandardOutput = ByteArray(0)
+            awaitingReadyMarker = false
+            if (beforeMarker.isNotEmpty()) {
+                decodedPackets.addLast(ProtocolShellPacket.StandardOutput(beforeMarker))
+            }
+            // An empty stdout packet is an internal command-completion boundary. Raw streams never
+            // produce empty stdout packets: EOF is mapped to ProtocolShellPacket.Exit.
+            decodedPackets.addLast(ProtocolShellPacket.StandardOutput(ByteArray(0)))
+            if (afterMarker.isNotEmpty()) {
+                decodedPackets.addLast(ProtocolShellPacket.StandardOutput(afterMarker))
+            }
+            return
+        }
+
+        val retainedCount = minOf(readyMarkerBytes.size - 1, combined.size)
+        val emitCount = combined.size - retainedCount
+        if (emitCount > 0) {
+            decodedPackets.addLast(
+                ProtocolShellPacket.StandardOutput(combined.copyOfRange(0, emitCount)),
+            )
+        }
+        retainedStandardOutput = combined.copyOfRange(emitCount, combined.size)
+    }
+
+    private fun flushRetainedStandardOutput() {
+        if (retainedStandardOutput.isNotEmpty()) {
+            decodedPackets.addLast(ProtocolShellPacket.StandardOutput(retainedStandardOutput))
+            retainedStandardOutput = ByteArray(0)
+        }
+        awaitingReadyMarker = false
+    }
+
+    private fun ByteArray.indexOf(needle: ByteArray): Int {
+        if (needle.isEmpty()) return 0
+        if (size < needle.size) return -1
+        for (start in 0..size - needle.size) {
+            var matches = true
+            for (offset in needle.indices) {
+                if (this[start + offset] != needle[offset]) {
+                    matches = false
+                    break
+                }
+            }
+            if (matches) return start
+        }
+        return -1
+    }
+}
+
 internal enum class ProtocolSyncVersion { V1, V2 }
 
 internal data class ProtocolRemoteEntry(
@@ -69,6 +206,16 @@ internal data class ProtocolDirectoryListing(
     val entries: List<ProtocolRemoteEntry>,
 )
 
+internal data class ProtocolVerifiedReceiveReceipt(
+    val before: ProtocolRemoteStat,
+    val after: ProtocolRemoteStat,
+    val transferredBytes: Long,
+)
+
+internal class ProtocolReceiveDigestFallbackRequired(
+    val before: ProtocolRemoteStat,
+) : IOException()
+
 internal interface ProtocolSyncStream : AutoCloseable {
     val version: ProtocolSyncVersion
     val transferVersion: ProtocolSyncVersion get() = version
@@ -92,7 +239,56 @@ internal interface AdbProtocolClient : AutoCloseable {
         override fun close() = Unit
     }
     fun openShellStream(command: String): ProtocolShellStream
+    fun openInteractiveShell(): ProtocolInteractiveShellStream =
+        throw UnsupportedOperationException("interactive shell unavailable")
     fun openSync(): ProtocolSyncStream = throw UnsupportedOperationException("sync unavailable")
+}
+
+internal data class ResolvedApkComponent(
+    val publicComponent: ApkComponent,
+    val remotePath: String,
+)
+
+internal class ProtocolApkComponentException : IOException()
+
+internal object ApkExtractionProtocol {
+    suspend fun discover(
+        client: AdbProtocolClient,
+        userId: Int,
+        packageName: String,
+        timeout: Duration,
+    ): List<ResolvedApkComponent> = withTimeout(timeout) {
+        val response = runInterruptible(Dispatchers.IO) {
+            client.openShellCommand(
+                ApplicationPackageProtocol.installedPaths(userId, packageName),
+            ).use(ProtocolShellCommand::execute)
+        }
+        if (response.exitCode != 0 || response.stderr.isNotBlank()) {
+            throw ProtocolApkComponentException()
+        }
+        val paths = response.stdout.lineSequence()
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .map { line ->
+                if (!line.startsWith("package:")) throw ProtocolApkComponentException()
+                line.removePrefix("package:").trim()
+            }
+            .toList()
+        val accepted = ApkPackagePolicy.resolveInstalledComponents(paths)
+            as? InstalledComponentDecision.Accepted
+            ?: throw ProtocolApkComponentException()
+        accepted.components.map(::toResolvedComponent)
+    }
+
+    private fun toResolvedComponent(component: InstalledApkComponent) = ResolvedApkComponent(
+        publicComponent = ApkComponent(
+            componentId = component.componentId,
+            role = component.role,
+            displayName = component.displayName,
+            expectedSizeBytes = null,
+        ),
+        remotePath = component.remotePath,
+    )
 }
 
 internal object KadbRemoteFileProtocol {
@@ -153,6 +349,7 @@ internal object KadbRemoteFileProtocol {
                 ) { sync, markProgress ->
                     syncVersion = sync.transferVersion
                     sync.recv(path) { buffer, offset, length ->
+                        if (Thread.currentThread().isInterrupted) throw CancellationException()
                         require(offset >= 0 && length >= 0 && offset + length <= buffer.size)
                         var cursor = offset
                         var remaining = length
@@ -189,6 +386,62 @@ internal object KadbRemoteFileProtocol {
         }
     }
 
+    suspend fun receiveVerified(
+        client: AdbProtocolClient,
+        path: String,
+        destination: OutputStream,
+        noProgressTimeout: Duration,
+        cancellationGrace: Duration = 3.seconds,
+        onForcedSessionClose: () -> Unit = { client.close() },
+        progress: (Long) -> Unit = {},
+    ): ProtocolVerifiedReceiveReceipt {
+        require(noProgressTimeout.isPositive())
+        require(cancellationGrace.isPositive())
+        val transferred = AtomicLong(0L)
+        return runTransferWithNoProgressTimeout(
+            client,
+            noProgressTimeout,
+            cancellationGrace,
+            onForcedSessionClose,
+        ) { sync, markProgress ->
+            val before = sync.stat(path)
+            if (before.size < 0L || before.modifiedEpochSeconds <= 0L) {
+                throw ProtocolReceiveDigestFallbackRequired(before)
+            }
+            sync.recv(path) { buffer, offset, length ->
+                if (Thread.currentThread().isInterrupted) throw CancellationException()
+                require(offset >= 0 && length >= 0 && offset + length <= buffer.size)
+                var cursor = offset
+                var remaining = length
+                while (remaining > 0) {
+                    val count = minOf(remaining, MAX_TRANSFER_CHUNK_BYTES)
+                    try {
+                        destination.write(buffer, cursor, count)
+                    } catch (error: Exception) {
+                        if (error is CancellationException) throw error
+                        throw ProtocolLocalDestinationException(error)
+                    }
+                    val total = transferred.addAndGet(count.toLong())
+                    markProgress()
+                    progress(total)
+                    cursor += count
+                    remaining -= count
+                }
+            }
+            try {
+                destination.flush()
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                throw ProtocolLocalDestinationException(error)
+            }
+            ProtocolVerifiedReceiveReceipt(
+                before = before,
+                after = sync.stat(path),
+                transferredBytes = transferred.get(),
+            )
+        }
+    }
+
     suspend fun send(
         client: AdbProtocolClient,
         path: String,
@@ -215,6 +468,7 @@ internal object KadbRemoteFileProtocol {
                 ) { sync, markProgress ->
                     syncVersion = sync.transferVersion
                     sync.send(path, mode, modifiedEpochMillis) { requested ->
+                        if (Thread.currentThread().isInterrupted) throw CancellationException()
                         val maximum = minOf(requested.size, MAX_TRANSFER_CHUNK_BYTES)
                         val count = try {
                             var read = source.read(requested, 0, maximum)
@@ -331,8 +585,17 @@ internal class ProtocolLocalDestinationException(cause: Throwable) : IOException
 
 internal class ProtocolCommandStreamException : java.io.IOException()
 
+internal class ProtocolConnectionHandshakeTimeoutException(cause: Throwable) : java.io.IOException(cause)
+
 internal interface AdbProtocolClientFactory {
     fun open(endpoint: AdbEndpoint): AdbProtocolClient
+    fun openForConnectionProbe(endpoint: AdbEndpoint): AdbConnectionProbeClient =
+        AdbConnectionProbeClient(open(endpoint), reusableForSession = true)
     suspend fun pair(endpoint: AdbEndpoint, pairingCode: CharArray)
     fun clearIdentity()
 }
+
+internal data class AdbConnectionProbeClient(
+    val client: AdbProtocolClient,
+    val reusableForSession: Boolean,
+)

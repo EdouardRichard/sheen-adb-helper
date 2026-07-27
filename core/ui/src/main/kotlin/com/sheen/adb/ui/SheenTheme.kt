@@ -9,6 +9,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -24,16 +25,23 @@ object SheenDesignTokens {
 object SheenDimensions {
     val rhythm = 4.dp
     val gutter = 12.dp
+    val commonGutter = 12.dp
     val screenPadding = 16.dp
+    val compactPageHorizontalMargin = 16.dp
+    val expandedPageHorizontalMargin = 24.dp
     val itemSpacing = 12.dp
     val visualTouchTarget = 44.dp
-    val minimumTouchTarget = 48.dp
+    val minimumTouchTarget = 44.dp
     val topBarVisualHeight = 44.dp
     val bottomBarHeight = 60.dp
     val drawerWidth = 288.dp
     val expandedPaneWidth = drawerWidth
     val deviceIconContainer = 40.dp
     val metricCardMinHeight = 206.dp
+}
+
+object SheenColors {
+    val terminalBackground = Color.Black
 }
 
 object SheenCornerRadii {

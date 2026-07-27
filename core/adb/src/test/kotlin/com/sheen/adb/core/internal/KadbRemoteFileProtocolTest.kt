@@ -8,6 +8,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -22,6 +23,33 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 class KadbRemoteFileProtocolTest {
+    @Test
+    fun `verified receive keeps stat transfer and final stat on one sync child stream`() = runBlocking {
+        val payload = "verified".encodeToByteArray()
+        val before = ProtocolRemoteStat(0x81A4, payload.size.toLong(), 10, 20, 30)
+        val sync = FakeSync(
+            version = ProtocolSyncVersion.V2,
+            receivePayload = payload,
+            stat = before,
+        )
+        val client = FakeClient(sync)
+        val destination = ByteArrayOutputStream()
+
+        val receipt = KadbRemoteFileProtocol.receiveVerified(
+            client = client,
+            path = "/remote/verified.bin",
+            destination = destination,
+            noProgressTimeout = 1.seconds,
+        )
+
+        assertEquals(client.openCount.get(), 1)
+        assertEquals(receipt.before, before)
+        assertEquals(receipt.after, before)
+        assertEquals(receipt.transferredBytes, payload.size.toLong())
+        assertEquals(destination.toByteArray(), payload)
+        assertTrue(sync.closed)
+    }
+
     @Test
     fun `sync v1 and v2 receive and send stream bytes with progress and close`() = runBlocking {
         for (version in ProtocolSyncVersion.entries) {
@@ -127,6 +155,66 @@ class KadbRemoteFileProtocolTest {
         assertTrue(blocked.entered.await(1, TimeUnit.SECONDS))
         job.cancelAndJoin()
         assertTrue(blocked.closed)
+    }
+
+    @Test
+    fun `cooperative send cancellation releases sync without forcing the session closed`() = runBlocking {
+        val entered = CountDownLatch(1)
+        val clientClosed = AtomicBoolean(false)
+        val syncClosed = AtomicBoolean(false)
+        val sync = object : ProtocolSyncStream {
+            override val version = ProtocolSyncVersion.V2
+            override fun list(path: String) = emptyList<ProtocolRemoteEntry>()
+            override fun lstat(path: String) = ProtocolRemoteStat(0x81A4, 0, 0, null, null)
+            override fun stat(path: String) = lstat(path)
+            override fun send(
+                path: String,
+                mode: Int,
+                modifiedEpochMillis: Long,
+                source: (ByteArray) -> Int,
+            ) {
+                val buffer = ByteArray(64 * 1024)
+                entered.countDown()
+                while (!clientClosed.get() && source(buffer) >= 0) Unit
+            }
+            override fun close() {
+                syncClosed.set(true)
+            }
+        }
+        val client = object : AdbProtocolClient {
+            override fun execute(command: String): ProtocolShellResponse = error("unused")
+            override fun openShellStream(command: String): ProtocolShellStream = error("unused")
+            override fun openSync(): ProtocolSyncStream = sync
+            override fun close() {
+                clientClosed.set(true)
+            }
+        }
+        val infiniteSource = object : InputStream() {
+            override fun read(): Int = 0
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                buffer.fill(0, offset, offset + length)
+                return length
+            }
+        }
+
+        val job = async(Dispatchers.Default) {
+            KadbRemoteFileProtocol.send(
+                client = client,
+                path = "/remote/cancel.part",
+                source = infiniteSource,
+                mode = 0x81A4,
+                modifiedEpochMillis = 0L,
+                noProgressTimeout = 5.seconds,
+                cancellationGrace = 100.milliseconds,
+                onForcedSessionClose = client::close,
+            )
+        }
+        assertTrue(entered.await(1, TimeUnit.SECONDS))
+
+        job.cancelAndJoin()
+
+        assertTrue(syncClosed.get())
+        assertFalse(clientClosed.get(), "cooperative cancellation must not invalidate the active Session")
     }
 
     @Test
@@ -371,12 +459,16 @@ class KadbRemoteFileProtocolTest {
 
     private class FakeClient(private val sync: FakeSync) : AdbProtocolClient {
         var shellCalled = false
+        val openCount = AtomicInteger(0)
         override fun execute(command: String): ProtocolShellResponse {
             shellCalled = true
             error("file names must not use shell")
         }
         override fun openShellStream(command: String): ProtocolShellStream = error("unused")
-        override fun openSync(): ProtocolSyncStream = sync.copyForOpen()
+        override fun openSync(): ProtocolSyncStream {
+            openCount.incrementAndGet()
+            return sync.copyForOpen()
+        }
         override fun close() = Unit
     }
 

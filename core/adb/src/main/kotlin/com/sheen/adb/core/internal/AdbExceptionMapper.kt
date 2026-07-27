@@ -10,8 +10,13 @@ import java.net.ProtocolException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import javax.net.ssl.SSLException
+import kotlinx.coroutines.TimeoutCancellationException
 
 internal object AdbExceptionMapper {
+    const val INTERACTIVE_SHELL_UNSUPPORTED = "INTERACTIVE_SHELL_UNSUPPORTED"
+    const val INTERACTIVE_SHELL_TIMEOUT = "INTERACTIVE_SHELL_TIMEOUT"
+    const val INTERACTIVE_SHELL_OUTCOME_UNKNOWN = "INTERACTIVE_SHELL_OUTCOME_UNKNOWN"
+
     fun map(error: Throwable, stage: AdbOperationStage): AdbError {
         val causes = generateSequence(error) { it.cause }.take(8).toList()
         val commandStreamStage = stage == AdbOperationStage.SHELL || stage == AdbOperationStage.LOGCAT
@@ -36,5 +41,12 @@ internal object AdbExceptionMapper {
         val type = error.javaClass.simpleName.ifBlank { "Throwable" }
         val target = endpoint?.redacted() ?: "<无目标>"
         return "type=$type; target=$target"
+    }
+
+    fun interactiveShellTechnicalCode(error: Throwable, writeStarted: Boolean): String = when {
+        error is UnsupportedOperationException -> INTERACTIVE_SHELL_UNSUPPORTED
+        error is TimeoutCancellationException || error is SocketTimeoutException -> INTERACTIVE_SHELL_TIMEOUT
+        writeStarted -> INTERACTIVE_SHELL_OUTCOME_UNKNOWN
+        else -> "INTERACTIVE_SHELL_PROTOCOL"
     }
 }

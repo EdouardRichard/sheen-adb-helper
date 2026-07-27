@@ -1,6 +1,8 @@
 package com.sheen.adb.feature.settings
 
 import com.sheen.adb.data.LanguagePreference
+import com.sheen.adb.ui.UiLanguage
+import java.io.File
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertNull
@@ -37,7 +39,36 @@ class SettingsPresentationTest {
 
         assertEquals(failed.language, LanguagePreference.EN_US)
         assertFalse(failed.isSavingLanguage)
-        assertEquals(failed.languageError, "语言偏好保存失败，请重试。")
+        assertEquals(failed.languageMessage, SettingsMessageCode.LANGUAGE_SAVE_FAILED)
+    }
+
+    @Test
+    fun `language feedback is resolved by the settings catalog at presentation time`() {
+        assertEquals(
+            SettingsStrings.resolve(UiLanguage.ZH_CN, SettingsStringKey.LANGUAGE_SAVE_FAILED),
+            "语言偏好保存失败，请重试。",
+        )
+        assertEquals(
+            SettingsStrings.resolve(UiLanguage.EN_US, SettingsStringKey.LANGUAGE_SAVE_FAILED),
+            "Could not save the language preference. Try again.",
+        )
+        assertEquals(
+            SettingsStrings.requiredKeys(UiLanguage.ZH_CN),
+            SettingsStrings.requiredKeys(UiLanguage.EN_US),
+        )
+    }
+
+    @Test
+    fun `settings route receives root language and owns no second language source`() {
+        val source = File(
+            "src/main/kotlin/com/sheen/adb/feature/settings/SettingsScreen.kt",
+        ).readText()
+
+        assertTrue(source.contains("fun SettingsRoute("))
+        assertTrue(source.contains("language: UiLanguage"))
+        assertTrue(source.contains("SettingsStrings.resolve("))
+        assertFalse(source.contains("languagePreference.collect"))
+        assertFalse(source.contains("\"语言偏好保存失败，请重试。\""))
     }
 
     @Test

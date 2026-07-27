@@ -22,8 +22,12 @@ data class SettingsUiState(
     val settingsHelp: String? = null,
     val language: LanguagePreference = LanguagePreference.ZH_CN,
     val isSavingLanguage: Boolean = false,
-    val languageError: String? = null,
-)
+    val languageMessage: SettingsMessageCode? = null,
+) {
+    @Deprecated("Use languageMessage and resolve it in Settings presentation")
+    val languageError: String?
+        get() = null
+}
 
 class SettingsViewModel(
     versionLabel: String,
@@ -38,7 +42,7 @@ class SettingsViewModel(
         viewModelScope.launch {
             repository.languagePreference.collect { language ->
                 mutableState.update {
-                    it.copy(language = language, isSavingLanguage = false, languageError = null)
+                    it.copy(language = language, isSavingLanguage = false, languageMessage = null)
                 }
             }
         }
@@ -82,13 +86,13 @@ internal fun SettingsUiState.selectLanguage(language: LanguagePreference): Setti
     copy(
         language = language,
         isSavingLanguage = true,
-        languageError = null,
+        languageMessage = null,
     )
 
 internal fun SettingsUiState.finishLanguageSave(success: Boolean): SettingsUiState =
     copy(
         isSavingLanguage = false,
-        languageError = if (success) null else "语言偏好保存失败，请重试。",
+        languageMessage = if (success) null else SettingsMessageCode.LANGUAGE_SAVE_FAILED,
     )
 
 internal fun SettingsUiState.applyClearResult(success: Boolean): SettingsUiState =

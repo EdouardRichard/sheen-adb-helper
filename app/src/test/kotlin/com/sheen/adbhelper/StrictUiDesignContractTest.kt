@@ -1,6 +1,7 @@
 package com.sheen.adbhelper
 
 import java.io.File
+import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
@@ -26,6 +27,90 @@ class StrictUiDesignContractTest {
     }
 
     @Test
+    fun `v1 terminal design tokens use the reviewed local palette and dimensions`() {
+        val theme = source("../core/ui/src/main/kotlin/com/sheen/adb/ui/SheenTheme.kt")
+
+        listOf(
+            "0xFF0B1326",
+            "0xFF31394D",
+            "0xFF060E20",
+            "0xFF131B2E",
+            "0xFF171F33",
+            "0xFF222A3D",
+            "0xFF2D3449",
+            "0xFFADC6FF",
+            "0xFF4D8EFF",
+            "0xFF4EDEA3",
+            "0xFF00A572",
+            "0xFFFFB95F",
+            "0xFFCA8100",
+            "0xFFFFB4AB",
+        ).forEach { token ->
+            assertTrue(theme.contains(token), "missing reviewed color token $token")
+        }
+        listOf(
+            "minimumTouchTarget = 44.dp",
+            "compactPageHorizontalMargin = 16.dp",
+            "expandedPageHorizontalMargin = 24.dp",
+            "commonGutter = 12.dp",
+            "terminalBackground =",
+        ).forEach { token ->
+            assertTrue(theme.contains(token), "missing reviewed dimension/token $token")
+        }
+    }
+
+    @Test
+    fun `v1 action icons are project owned vectors`() {
+        val icons = source("../core/ui/src/main/kotlin/com/sheen/adb/ui/SheenIcons.kt")
+
+        listOf(
+            "UploadToDevice",
+            "Download",
+            "Disable",
+            "Enable",
+            "ForceStop",
+            "Uninstall",
+            "Delete",
+            "KeyboardReturn",
+            "ArrowUp",
+            "ArrowDown",
+        ).forEach { name ->
+            assertTrue(icons.contains("val $name: ImageVector"), "missing local icon $name")
+        }
+        assertFalse(icons.contains("Icons.Default.Add"), "APK install icon must not be a plus")
+    }
+
+    @Test
+    fun `v1 screens remain Compose only and load no remote UI assets`() {
+        val roots = listOf(
+            File("src/main"),
+            File("../core/ui/src/main"),
+            File("../feature"),
+        )
+        val sourceFiles = roots
+            .filter(File::exists)
+            .flatMap { root ->
+                root.walkTopDown()
+                    .filter { it.isFile && it.extension in setOf("kt", "kts", "xml") }
+                    .toList()
+            }
+        val forbidden = listOf(
+            "android.webkit.WebView",
+            "WebView(",
+            "fonts.googleapis.com",
+            "fonts.gstatic.com",
+            "material-symbols",
+            "@font-face",
+        )
+        val violations = sourceFiles.flatMap { file ->
+            val text = file.readText()
+            forbidden.filter(text::contains).map { token -> "${file.path}: $token" }
+        }
+
+        assertEquals(violations, emptyList<String>(), violations.joinToString("\n"))
+    }
+
+    @Test
     fun `app shell uses design-specific top bottom and drawer layouts`() {
         val app = source("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt")
 
@@ -36,6 +121,17 @@ class StrictUiDesignContractTest {
         assertFalse(app.contains("NavigationBar {"))
         assertFalse(app.contains("navigationGlyph()"))
         assertFalse(app.contains("onLocal: () -> Unit"))
+    }
+
+    @Test
+    fun `every destination reuses the designed adb session top bar`() {
+        val app = source("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt")
+        val scaffold = app.substringAfter("private fun AppScaffold(")
+            .substringBefore("private fun V1AnimatedDestinationContent(")
+
+        assertTrue(scaffold.contains("topBar = {\n            SheenConnectionTopBar("))
+        assertFalse(scaffold.contains("if (destination == MainDestination.CONNECTION)"))
+        assertFalse(scaffold.contains("TopAppBar("))
     }
 
     @Test

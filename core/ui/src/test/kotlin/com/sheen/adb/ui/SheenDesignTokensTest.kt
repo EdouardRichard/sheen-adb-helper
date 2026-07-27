@@ -60,8 +60,8 @@ class SheenDesignTokensTest {
     }
 
     @Test
-    fun `visual size and accessible hit target are distinct`() {
+    fun `visual size and minimum hit target follow the reviewed design`() {
         assertEquals(SheenDimensions.visualTouchTarget, 44.dp)
-        assertTrue(SheenDimensions.minimumTouchTarget >= 48.dp)
+        assertEquals(SheenDimensions.minimumTouchTarget, 44.dp)
     }
 }

@@ -4,10 +4,12 @@ import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingSecret
+import com.sheen.adb.core.QrPairingMaterial
 import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryEvent
 import com.sheen.adb.core.WirelessDiscoveryMode
 import com.sheen.adb.core.WirelessDiscoverySource
+import com.sheen.adb.core.WirelessDiscoverySourceFailure
 import com.sheen.adb.core.WirelessDiscoverySourceFactory
 import com.sheen.adb.core.WirelessDiscoverySourceObserver
 import com.sheen.adb.core.WirelessDiscoverySourceRequest
@@ -172,6 +174,199 @@ class LanDiscoverySessionManagerTest {
     }
 
     @Test
+    fun `resolved connect selection remains usable after bounded discovery window completes`() = runBlocking {
+        val fixture = Fixture(lanWindowMillis = 50L)
+        val discovered = fixture.discoverOne("legacy-resolved", WirelessServiceType.CONNECT)
+        withTimeout(2.seconds) { discovered.collection.await() }
+
+        val connected = fixture.manager.connectDiscoveredService(discovered.target)
+
+        assertTrue(connected is AdbOperationResult.Success)
+        assertEquals(fixture.clientFactory.openCalls, 1)
+        fixture.close()
+    }
+
+    @Test
+    fun `resolved pairing selection remains usable after local pairing observer completes`() = runBlocking {
+        val fixture = Fixture()
+        val emissions = Channel<AdbOperationResult<WirelessDiscoveryState>>(Channel.UNLIMITED)
+        val collection = async(Dispatchers.Default) {
+            fixture.manager.observeWirelessServices(WirelessDiscoveryMode.LOCAL_PAIRING, 5.seconds)
+                .collect(emissions::send)
+        }
+        val initial = nextSuccess(emissions)
+        val source = fixture.sourceFactory.awaitSource(0)
+        val event = observed(
+            generation = initial.generation,
+            id = "pairing-local-selection",
+            index = 1,
+            type = WirelessServiceType.PAIRING,
+        )
+        source.emit(event)
+        nextSuccess(emissions)
+        collection.cancelAndJoin()
+
+        val paired = fixture.manager.pairDiscoveredService(
+            target = WirelessDiscoveryTarget(initial.generation, event.observation.observationId),
+            attemptId = PairingAttemptId.of("attempt-local-selection"),
+            secret = PairingSecret("2".repeat(6).toCharArray()),
+        )
+
+        assertTrue(paired is AdbOperationResult.Success)
+        assertEquals(fixture.clientFactory.pairCalls, 1)
+        fixture.close()
+    }
+
+    @Test
+    fun `paired local attempt discovers and actively connects the matching debug service`() = runBlocking {
+        val fingerprint = byteArrayOf(4, 2, 4, 2)
+        val fixture = Fixture(pairFingerprint = fingerprint, connectFingerprint = fingerprint)
+        val attemptId = PairingAttemptId.of("attempt-local-auto-connect")
+        val pairing = fixture.discoverOne("pairing-local", WirelessServiceType.PAIRING)
+        assertTrue(
+            fixture.manager.pairDiscoveredService(
+                pairing.target,
+                attemptId,
+                PairingSecret("4".repeat(6).toCharArray()),
+            ) is AdbOperationResult.Success,
+        )
+
+        val connection = async(Dispatchers.Default) {
+            fixture.manager.connectLocalPairedDevice(attemptId, 5.seconds)
+        }
+        val source = fixture.sourceFactory.awaitSource(1)
+        val generation = withTimeout(2.seconds) {
+            while (source.request == null) kotlinx.coroutines.yield()
+            checkNotNull(source.request).generation
+        }
+        source.emit(observed(generation, "connect-local", 1, WirelessServiceType.CONNECT))
+
+        assertTrue(withTimeout(2.seconds) { connection.await() } is AdbOperationResult.Success)
+        assertEquals(fixture.clientFactory.openCalls, 1)
+        fixture.close()
+    }
+
+    @Test
+    fun `paired auto connect waits for dynamic debug service when legacy 5555 appears first`() = runBlocking {
+        val fixture = Fixture()
+        val attemptId = PairingAttemptId.of("attempt-dynamic-connect")
+        val pairing = fixture.discoverOne("pairing-before-dynamic", WirelessServiceType.PAIRING)
+        assertTrue(
+            fixture.manager.pairDiscoveredService(
+                pairing.target,
+                attemptId,
+                PairingSecret("5".repeat(6).toCharArray()),
+            ) is AdbOperationResult.Success,
+        )
+
+        val connection = async(Dispatchers.Default) {
+            fixture.manager.connectLocalPairedDevice(attemptId, 5.seconds)
+        }
+        val source = fixture.sourceFactory.awaitSource(1)
+        val generation = withTimeout(2.seconds) {
+            while (source.request == null) kotlinx.coroutines.yield()
+            checkNotNull(source.request).generation
+        }
+        val legacy = observed(
+            generation = generation,
+            id = "legacy-before-dynamic",
+            index = 1,
+            type = WirelessServiceType.CONNECT,
+        ).let { event ->
+            event.copy(observation = event.observation.copy(port = 5555))
+        }
+        source.emit(legacy)
+        repeat(20) { kotlinx.coroutines.yield() }
+        assertEquals(fixture.clientFactory.openCalls, 0)
+
+        val dynamic = observed(
+            generation = generation,
+            id = "dynamic-after-legacy",
+            index = 2,
+            type = WirelessServiceType.CONNECT,
+        ).let { event ->
+            event.copy(observation = event.observation.copy(addresses = legacy.observation.addresses))
+        }
+        source.emit(dynamic)
+
+        assertTrue(withTimeout(2.seconds) { connection.await() } is AdbOperationResult.Success)
+        assertEquals(fixture.clientFactory.openedEndpoints.single().port, dynamic.observation.port)
+        fixture.close()
+    }
+
+    @Test
+    fun `successful QR attempt discovers and connects the matching debug service`() = runBlocking {
+        val fingerprint = byteArrayOf(4, 3, 2, 1)
+        val fixture = Fixture(pairFingerprint = fingerprint, connectFingerprint = fingerprint)
+        val attemptId = PairingAttemptId.of("attempt-qr-auto-connect")
+        val material = (
+            fixture.manager.createQrPairingAttempt(attemptId) as AdbOperationResult.Success<QrPairingMaterial>
+        ).value
+        val serviceName = checkNotNull(material.payload).substringAfter(";S:").substringBefore(";P:")
+        val pairingObservation = observed(
+            generation = 1L,
+            id = "pairing-qr",
+            index = 10,
+            type = WirelessServiceType.PAIRING,
+        ).observation.copy(serviceName = serviceName)
+
+        assertTrue(
+            fixture.manager.pairQrObservation(attemptId, pairingObservation) is AdbOperationResult.Success,
+        )
+
+        val connection = async(Dispatchers.Default) {
+            fixture.manager.connectLocalPairedDevice(attemptId, 5.seconds)
+        }
+        val source = fixture.sourceFactory.awaitSource(0)
+        val generation = withTimeout(2.seconds) {
+            while (source.request == null) kotlinx.coroutines.yield()
+            checkNotNull(source.request).generation
+        }
+        source.emit(observed(generation, "connect-qr", 10, WirelessServiceType.CONNECT))
+
+        assertTrue(withTimeout(2.seconds) { connection.await() } is AdbOperationResult.Success)
+        assertEquals(fixture.clientFactory.openCalls, 1)
+        fixture.close()
+    }
+
+    @Test
+    fun `QR auto connect retries a transient NSD restart rejection within the total deadline`() = runBlocking {
+        val fixture = Fixture()
+        val attemptId = PairingAttemptId.of("attempt-qr-retry")
+        val material = (
+            fixture.manager.createQrPairingAttempt(attemptId) as AdbOperationResult.Success<QrPairingMaterial>
+        ).value
+        val serviceName = checkNotNull(material.payload).substringAfter(";S:").substringBefore(";P:")
+        val pairingObservation = observed(
+            generation = 1L,
+            id = "pairing-qr-retry",
+            index = 12,
+            type = WirelessServiceType.PAIRING,
+        ).observation.copy(serviceName = serviceName)
+        assertTrue(
+            fixture.manager.pairQrObservation(attemptId, pairingObservation) is AdbOperationResult.Success,
+        )
+        fixture.sourceFactory.enqueueStartResult(
+            WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE),
+        )
+
+        val connection = async(Dispatchers.Default) {
+            fixture.manager.connectLocalPairedDevice(attemptId, 3.seconds)
+        }
+        fixture.sourceFactory.awaitSource(0)
+        val retrySource = fixture.sourceFactory.awaitSource(1)
+        val generation = withTimeout(2.seconds) {
+            while (retrySource.request == null) kotlinx.coroutines.yield()
+            checkNotNull(retrySource.request).generation
+        }
+        retrySource.emit(observed(generation, "connect-qr-retry", 12, WirelessServiceType.CONNECT))
+
+        assertTrue(withTimeout(2.seconds) { connection.await() } is AdbOperationResult.Success)
+        assertEquals(fixture.clientFactory.openCalls, 1)
+        fixture.close()
+    }
+
+    @Test
     fun `different verified fingerprints and unverified observations never merge`() = runBlocking {
         val fixture = Fixture(
             pairFingerprint = byteArrayOf(1, 2, 3),
@@ -304,9 +499,21 @@ class LanDiscoverySessionManagerTest {
 
     private class FakeSourceFactory : WirelessDiscoverySourceFactory {
         val sources = CopyOnWriteArrayList<FakeSource>()
+        private val startResults = ArrayDeque<WirelessDiscoverySourceStartResult>()
 
         override fun create(observer: WirelessDiscoverySourceObserver): WirelessDiscoverySource =
-            FakeSource(observer).also(sources::add)
+            FakeSource(
+                observer = observer,
+                startResult = if (startResults.isEmpty()) {
+                    WirelessDiscoverySourceStartResult.Started
+                } else {
+                    startResults.removeFirst()
+                },
+            ).also(sources::add)
+
+        fun enqueueStartResult(result: WirelessDiscoverySourceStartResult) {
+            startResults.addLast(result)
+        }
 
         suspend fun awaitSource(index: Int): FakeSource {
             withTimeout(2.seconds) {
@@ -318,13 +525,14 @@ class LanDiscoverySessionManagerTest {
 
     private class FakeSource(
         private val observer: WirelessDiscoverySourceObserver,
+        private val startResult: WirelessDiscoverySourceStartResult,
     ) : WirelessDiscoverySource {
         val closeCalls = AtomicInteger(0)
         var request: WirelessDiscoverySourceRequest? = null
 
         override fun start(request: WirelessDiscoverySourceRequest): WirelessDiscoverySourceStartResult {
             this.request = request
-            return WirelessDiscoverySourceStartResult.Started
+            return startResult
         }
 
         fun emit(event: WirelessDiscoveryEvent) = observer.onEvent(event)
@@ -339,9 +547,11 @@ class LanDiscoverySessionManagerTest {
     ) : AdbProtocolClientFactory {
         var openCalls = 0
         var pairCalls = 0
+        val openedEndpoints = mutableListOf<AdbEndpoint>()
 
         override fun open(endpoint: AdbEndpoint): AdbProtocolClient {
             openCalls++
+            openedEndpoints += endpoint
             return FakeClient(connectFingerprint)
         }
 

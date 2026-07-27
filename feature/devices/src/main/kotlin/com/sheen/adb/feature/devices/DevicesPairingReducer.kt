@@ -17,6 +17,7 @@ internal class DevicesPairingReducer {
         return when (event) {
             is DevicesPairingEvent.SelectMethod -> selectMethod(state, event.method)
             DevicesPairingEvent.StartRequested -> start(state)
+            DevicesPairingEvent.StartCodeDiscoveryRequested -> startCodeDiscovery(state)
             is DevicesPairingEvent.QrPrepared -> qrPrepared(state, event.matrix)
             is DevicesPairingEvent.CodeChanged -> codeChanged(state, event.value)
             DevicesPairingEvent.SubmitCode -> submitCode(state)
@@ -77,6 +78,30 @@ internal class DevicesPairingReducer {
         method: PairingMethod,
     ): DevicesPairingReduction {
         if (method == PairingMethod.NONE) return DevicesPairingReduction(DevicesPairingState())
+        if (method == PairingMethod.SIX_DIGIT_CODE &&
+            state.method == PairingMethod.QR &&
+            state.phase == PairingAttemptPhase.WAITING_FOR_TARGET
+        ) {
+            return DevicesPairingReduction(
+                state = state.copy(
+                    method = PairingMethod.SIX_DIGIT_CODE,
+                    phase = PairingAttemptPhase.PREPARING,
+                    codeInput = "",
+                    qrMatrix = null,
+                    failure = null,
+                    codeFallbackAvailable = false,
+                    awaitingSessionReplacementConfirmation = false,
+                    isLocalMode = false,
+                    localDiscoveryStatus = LocalPairingDiscoveryStatus.SEARCHING,
+                    localNotificationState = LocalPairingNotificationState.HIDDEN,
+                    applicationInputAvailable = false,
+                    suggestNativeNotificationStyle = false,
+                    localWindowActive = false,
+                    requiresLocalTargetSelection = false,
+                ),
+                effects = listOf(DevicesPairingEffect.StartPairingPortDiscovery),
+            )
+        }
         return DevicesPairingReduction(
             state.copy(
                 method = method,
@@ -128,11 +153,20 @@ internal class DevicesPairingReducer {
         state: DevicesPairingState,
         status: LocalPairingDiscoveryStatus,
     ): DevicesPairingReduction {
-        if (!state.isLocalMode) return DevicesPairingReduction(state)
+        val isPairingPortScan = !state.isLocalMode &&
+            state.method == PairingMethod.SIX_DIGIT_CODE &&
+            state.phase == PairingAttemptPhase.PREPARING &&
+            state.localDiscoveryStatus == LocalPairingDiscoveryStatus.SEARCHING
+        if (!state.isLocalMode && !isPairingPortScan) return DevicesPairingReduction(state)
         return DevicesPairingReduction(
             state.copy(
+                phase = if (isPairingPortScan && status == LocalPairingDiscoveryStatus.FOUND) {
+                    PairingAttemptPhase.WAITING_FOR_CODE
+                } else {
+                    state.phase
+                },
                 localDiscoveryStatus = status,
-                applicationInputAvailable = true,
+                applicationInputAvailable = state.isLocalMode || status == LocalPairingDiscoveryStatus.FOUND,
                 requiresLocalTargetSelection = status == LocalPairingDiscoveryStatus.AMBIGUOUS,
             ),
         )
@@ -172,7 +206,26 @@ internal class DevicesPairingReducer {
     }
 
     private fun retryLocalMode(state: DevicesPairingState): DevicesPairingReduction {
-        if (!state.isLocalMode) return DevicesPairingReduction(state)
+        if (!state.isLocalMode) {
+            if (state.method != PairingMethod.SIX_DIGIT_CODE ||
+                state.phase != PairingAttemptPhase.EXPIRED ||
+                state.localDiscoveryStatus != LocalPairingDiscoveryStatus.STOPPED
+            ) {
+                return DevicesPairingReduction(state)
+            }
+            return DevicesPairingReduction(
+                state = state.copy(
+                    phase = PairingAttemptPhase.PREPARING,
+                    codeInput = "",
+                    qrMatrix = null,
+                    failure = null,
+                    localDiscoveryStatus = LocalPairingDiscoveryStatus.SEARCHING,
+                    applicationInputAvailable = false,
+                    requiresLocalTargetSelection = false,
+                ),
+                effects = listOf(DevicesPairingEffect.StartPairingPortDiscovery),
+            )
+        }
         val requestNotificationPermission = !state.notificationPermissionRequested
         return DevicesPairingReduction(
             state = state.copy(
@@ -213,7 +266,8 @@ internal class DevicesPairingReducer {
                 qrMatrix = null,
                 failure = DevicesPairingFailure.CANCELLED,
                 localWindowActive = false,
-                localNotificationState = LocalPairingNotificationState.HIDDEN,
+                localDiscoveryStatus = LocalPairingDiscoveryStatus.STOPPED,
+                localNotificationState = LocalPairingNotificationState.RESULT,
                 requiresLocalTargetSelection = false,
             ),
             effects = listOf(DevicesPairingEffect.StopLocalWindow),
@@ -226,6 +280,26 @@ internal class DevicesPairingReducer {
             return DevicesPairingReduction(state.copy(awaitingSessionReplacementConfirmation = true))
         }
         return begin(state, DevicesPairingEffect.Begin(state.method))
+    }
+
+    private fun startCodeDiscovery(state: DevicesPairingState): DevicesPairingReduction {
+        if (state.method != PairingMethod.SIX_DIGIT_CODE) return DevicesPairingReduction(state)
+        if (state.hasActiveSession) {
+            return DevicesPairingReduction(state.copy(awaitingSessionReplacementConfirmation = true))
+        }
+        return DevicesPairingReduction(
+            state = state.copy(
+                phase = PairingAttemptPhase.PREPARING,
+                codeInput = "",
+                qrMatrix = null,
+                failure = null,
+                codeFallbackAvailable = false,
+                awaitingSessionReplacementConfirmation = false,
+                localDiscoveryStatus = LocalPairingDiscoveryStatus.SEARCHING,
+                applicationInputAvailable = false,
+            ),
+            effects = listOf(DevicesPairingEffect.StartPairingPortDiscovery),
+        )
     }
 
     private fun begin(
@@ -268,7 +342,7 @@ internal class DevicesPairingReducer {
         }
         return DevicesPairingReduction(
             state.copy(
-                codeInput = value.filter { it in '0'..'9' }.take(SIX_DIGIT_CODE_LENGTH),
+                codeInput = value.filter { it in '0'..'9' },
                 failure = null,
             ),
         )
@@ -342,7 +416,10 @@ internal class DevicesPairingReducer {
             failure = failure,
             codeFallbackAvailable = codeFallbackAvailable,
             awaitingSessionReplacementConfirmation = false,
-            localDiscoveryStatus = if (state.isLocalMode) {
+            localDiscoveryStatus = if (
+                state.isLocalMode ||
+                state.localDiscoveryStatus == LocalPairingDiscoveryStatus.SEARCHING
+            ) {
                 LocalPairingDiscoveryStatus.STOPPED
             } else {
                 state.localDiscoveryStatus

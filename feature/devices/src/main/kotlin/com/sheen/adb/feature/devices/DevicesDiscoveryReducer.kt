@@ -56,27 +56,29 @@ internal class DevicesDiscoveryReducer {
         snapshot: WirelessDiscoveryState,
     ): DevicesDiscoveryReduction {
         if (snapshot.generation != state.generation) return DevicesDiscoveryReduction(state)
-        val items = snapshot.devices.map { device ->
+        val items = snapshot.devices.mapNotNull { device ->
             val observations = device.observations
             val pairing = observations.firstOrNull { it.serviceType == WirelessServiceType.PAIRING }
             val connect = observations.firstOrNull { it.serviceType == WirelessServiceType.CONNECT }
-            val reachability = observations.reachability()
+                ?: return@mapNotNull null
+            val reachability = listOf(connect).reachability()
             val pairingTarget = pairing.resolvedTarget(snapshot.generation)
             val connectTarget = connect.resolvedTarget(snapshot.generation)
-            val preferredEndpoint = connect ?: pairing ?: observations.first()
+            val verified = device.verifiedDeviceId != null
             DevicesDiscoveryItem(
                 deviceName = device.deviceName,
                 serviceTypes = device.serviceTypes,
                 pairingTarget = pairingTarget,
                 connectTarget = connectTarget,
-                endpointLabel = preferredEndpoint.endpointLabel(),
-                relation = if (device.verifiedDeviceId == null) {
+                endpointLabel = connect.endpointLabel(),
+                relation = if (!verified) {
                     DevicesDiscoveryRelation.UNKNOWN
                 } else {
                     DevicesDiscoveryRelation.VERIFIED
                 },
                 reachability = reachability,
-                selectable = pairingTarget != null || connectTarget != null,
+                selectable = connectTarget != null,
+                requiresPairing = connect.port != LEGACY_ADB_PORT && !verified,
             )
         }
         return DevicesDiscoveryReduction(
@@ -110,7 +112,15 @@ internal class DevicesDiscoveryReducer {
         val selection = state.pendingSelection ?: return DevicesDiscoveryReduction(state)
         val effect = when (selection) {
             is DevicesDiscoverySelection.Pairing -> DevicesDiscoveryEffect.OpenCodePairing(selection.target)
-            is DevicesDiscoverySelection.Connect -> DevicesDiscoveryEffect.Connect(selection.target)
+            is DevicesDiscoverySelection.Connect -> {
+                val item = state.items.firstOrNull { it.connectTarget == selection.target }
+                    ?: return DevicesDiscoveryReduction(state.copy(pendingSelection = null))
+                if (item.requiresPairing) {
+                    DevicesDiscoveryEffect.OpenQrPairing(selection.target)
+                } else {
+                    DevicesDiscoveryEffect.Connect(selection.target)
+                }
+            }
         }
         return DevicesDiscoveryReduction(
             state.copy(pendingSelection = null),
@@ -144,5 +154,9 @@ internal class DevicesDiscoveryReducer {
             is WirelessAddress.Ipv6 -> address.segments.joinToString(":") { it.toString(16) }
         }
         return "$protocol · $rendered · $port"
+    }
+
+    private companion object {
+        const val LEGACY_ADB_PORT = 5_555
     }
 }

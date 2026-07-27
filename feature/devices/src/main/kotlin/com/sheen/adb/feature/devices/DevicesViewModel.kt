@@ -10,6 +10,7 @@ import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.EndpointParseResult
 import com.sheen.adb.core.LocalPairingControllerState
+import com.sheen.adb.core.LocalPairingDiscoveryStatus
 import com.sheen.adb.core.LocalPairingStopReason
 import com.sheen.adb.core.LocalPairingWindowId
 import com.sheen.adb.core.PairingAttemptId
@@ -17,7 +18,12 @@ import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.QrPairingMaterial
 import com.sheen.adb.core.WirelessDiscoveryMode
+import com.sheen.adb.core.WirelessDiscoveryState
 import com.sheen.adb.core.WirelessDiscoveryTarget
+import com.sheen.adb.core.WirelessAddress
+import com.sheen.adb.core.WirelessPairingTargetSelection
+import com.sheen.adb.core.WirelessPairingTargetSelector
+import com.sheen.adb.core.WirelessServiceObservation
 import com.sheen.adb.core.WirelessServiceStatus
 import com.sheen.adb.core.WirelessServiceType
 import com.sheen.adb.data.DeviceProfile
@@ -50,6 +56,7 @@ data class DevicesUiState(
     val pendingRenameProfile: DeviceProfile? = null,
     val renameInput: String = "",
     val notificationPermissionRequestGeneration: Long = 0L,
+    val keepLocalPairingWhileOpeningSettings: Boolean = false,
     val awaitingDiscoverySessionReplacement: Boolean = false,
 )
 
@@ -95,20 +102,52 @@ class DevicesViewModel(
     private var operationGeneration = 0L
     private var activeQrAttemptId: PairingAttemptId? = null
     private var activeLocalWindowId: LocalPairingWindowId? = null
+    private var activeLocalPairingAttemptId: PairingAttemptId? = null
     private var localPairingGeneration = 0L
     private var localSubmission: Job? = null
+    private var localAutoConnectJob: Job? = null
+    private var pairingPortDiscoveryJob: Job? = null
+    private var pairingPortDiscoveryGeneration = 0L
+    private var pairingLaunchJob: Job? = null
+    private var activeQrReplacementRetry = false
     private var discoveryJob: Job? = null
+    private var discoveryPageForeground = false
     private var discoveryCollectionGeneration = 0L
     private var discoveredPairingTarget: WirelessDiscoveryTarget? = null
+    private var selectedPairingConnectObservation: WirelessServiceObservation? = null
+    private var latestLanDiscoveryState: WirelessDiscoveryState? = null
     private var discoveredPairingAttemptId: PairingAttemptId? = null
     private var lastSuccessfulDiscoveredPairingAttemptId: PairingAttemptId? = null
     private var pendingDiscoveryConnectTarget: WirelessDiscoveryTarget? = null
     private var pendingReplacementEndpoint: AdbEndpoint? = null
+    private var lastRecordedSessionId: String? = null
 
     init {
         viewModelScope.launch {
             manager.connectionState.collect { connection ->
-                mutableState.update { it.copy(connectionState = connection) }
+                mutableState.update {
+                    it.copy(
+                        connectionState = connection,
+                        notice = if (connection is AdbConnectionState.Disconnected) null else it.notice,
+                    )
+                }
+                if (connection is AdbConnectionState.Connected && connection.sessionId != lastRecordedSessionId) {
+                    lastRecordedSessionId = connection.sessionId
+                    repository.recordSuccessfulConnection(
+                        host = connection.endpoint.host,
+                        port = connection.endpoint.port,
+                        suggestedName = if (
+                            connection.endpoint.host == "127.0.0.1" || connection.endpoint.host == "::1"
+                        ) {
+                            "本机设备"
+                        } else {
+                            connection.endpoint.host
+                        },
+                        isLocal = connection.endpoint.host == "127.0.0.1" || connection.endpoint.host == "::1",
+                        identityReference = HOST_IDENTITY_REFERENCE,
+                        nowEpochMillis = clock.millis(),
+                    )
+                }
                 val pairingWasActive = hasNonTerminalPairing() || activeLocalWindowId != null
                 reducePairing(
                     DevicesPairingEvent.SessionAvailabilityChanged(
@@ -136,6 +175,7 @@ class DevicesViewModel(
     }
 
     fun onDiscoveryForeground() {
+        discoveryPageForeground = true
         if (discoveryJob?.isActive == true) return
         startLanDiscovery()
     }
@@ -144,7 +184,10 @@ class DevicesViewModel(
 
     fun onDiscoveryPullRefresh() = startLanDiscovery()
 
-    fun onDiscoveryBackground() = stopLanDiscovery(markCancelled = true)
+    fun onDiscoveryBackground() {
+        discoveryPageForeground = false
+        stopLanDiscovery(markCancelled = true)
+    }
 
     fun cancelDiscovery() = stopLanDiscovery(markCancelled = true)
 
@@ -184,7 +227,7 @@ class DevicesViewModel(
                     }
                 }
                 is AdbOperationResult.Failure -> mutableState.update {
-                    it.copy(notice = disconnected.error.userMessage)
+                    it.copy(notice = disconnected.error.technicalCode)
                 }
                 AdbOperationResult.Cancelled -> Unit
             }
@@ -219,24 +262,23 @@ class DevicesViewModel(
 
     private suspend fun connectEndpoint(endpoint: AdbEndpoint, generation: Long) {
         mutableState.update { it.copy(showPairing = false, pairingCode = "", notice = null) }
-        val result = manager.connect(endpoint, CONNECTION_TIMEOUT)
+        val result = manager.connect(
+            endpoint,
+            if (endpoint.port == LEGACY_ADB_TCP_PORT) LEGACY_AUTHORIZATION_TIMEOUT else CONNECTION_TIMEOUT,
+        )
         val active = manager.connectionState.value as? AdbConnectionState.Connected
         if (result is AdbOperationResult.Success && generation == operationGeneration) {
             if (active?.endpoint != endpoint) return
-            repository.recordSuccessfulConnection(
-                host = endpoint.host,
-                port = endpoint.port,
-                suggestedName = if (endpoint.host == "127.0.0.1") "本机设备" else endpoint.host,
-                isLocal = endpoint.host == "127.0.0.1" || endpoint.host == "::1",
-                identityReference = HOST_IDENTITY_REFERENCE,
-                nowEpochMillis = clock.millis(),
-            )
             mutableState.update { it.copy(notice = "连接成功") }
+        } else if (result !is AdbOperationResult.Success && generation == operationGeneration) {
+            resumeLanDiscoveryAfterConnectionAttempt()
         }
     }
 
     fun cancelCurrentOperation() {
         cancelPairingOperation(markCancelled = hasNonTerminalPairing())
+        mutableState.update { it.copy(notice = null) }
+        resumeLanDiscoveryAfterConnectionAttempt()
     }
 
     fun openPairing() {
@@ -252,19 +294,57 @@ class DevicesViewModel(
     }
 
     fun closePairing() {
+        pairingLaunchJob?.cancel()
+        pairingLaunchJob = null
         onPairingPageLeft()
         discoveredPairingTarget = null
         discoveredPairingAttemptId = null
+        selectedPairingConnectObservation = null
         mutableState.update {
-            it.copy(showPairing = false, pairingCode = "", inputError = null)
+            it.copy(
+                showPairing = false,
+                pairingCode = "",
+                inputError = null,
+                keepLocalPairingWhileOpeningSettings = false,
+            )
+        }
+        resumeLanDiscoveryIfForeground()
+    }
+
+    fun beginPairingFromConnectionPage(method: PairingMethod) {
+        require(method != PairingMethod.NONE)
+        launchAfterForegroundDiscoveryStops {
+            selectedPairingConnectObservation = null
+            discoveredPairingTarget = null
+            discoveredPairingAttemptId = null
+            mutableState.update {
+                it.copy(showPairing = true, pairingCode = "", inputError = null, notice = null)
+            }
+            selectPairingMethod(method)
+            if (method == PairingMethod.SIX_DIGIT_CODE) {
+                reducePairing(DevicesPairingEvent.StartCodeDiscoveryRequested)
+            } else {
+                startSelectedPairing()
+            }
         }
     }
 
-    fun enterLocalPairingMode() {
-        mutableState.update {
-            it.copy(showPairing = true, pairingCode = "", inputError = null, notice = null)
+    fun enterLocalPairingMode(openingWirelessSettings: Boolean = false) {
+        launchAfterForegroundDiscoveryStops {
+            mutableState.update {
+                it.copy(
+                    showPairing = true,
+                    pairingCode = "",
+                    inputError = null,
+                    notice = null,
+                    keepLocalPairingWhileOpeningSettings = openingWirelessSettings,
+                )
+            }
+            reducePairing(DevicesPairingEvent.EnterLocalMode)
+            if (openingWirelessSettings) {
+                reducePairing(DevicesPairingEvent.LocalPageLeft(openingWirelessSettings = true))
+            }
         }
-        reducePairing(DevicesPairingEvent.EnterLocalMode)
     }
 
     fun retryLocalPairingMode() {
@@ -277,18 +357,30 @@ class DevicesViewModel(
     }
 
     fun onLocalWirelessSettingsOpened() {
+        mutableState.update { it.copy(keepLocalPairingWhileOpeningSettings = true) }
         reducePairing(DevicesPairingEvent.LocalPageLeft(openingWirelessSettings = true))
     }
 
-    fun updatePairingEndpoint(value: String) = mutableState.update {
-        it.copy(pairingEndpointInput = value, inputError = null)
+    fun onLocalWirelessSettingsReturned() {
+        mutableState.update { it.copy(keepLocalPairingWhileOpeningSettings = false) }
+    }
+
+    fun updatePairingEndpoint(value: String) {
+        if (value != mutableState.value.pairingEndpointInput) {
+            discoveredPairingTarget = null
+            discoveredPairingAttemptId = null
+            selectedPairingConnectObservation = null
+        }
+        mutableState.update { it.copy(pairingEndpointInput = value, inputError = null) }
     }
 
     fun updatePairingCode(value: String) {
-        val sanitized = value.filter { it in '0'..'9' }.take(SIX_DIGIT_CODE_LENGTH)
+        val sanitized = value.filter { it in '0'..'9' }
         mutableState.update { it.copy(pairingCode = sanitized, inputError = null) }
         reducePairing(DevicesPairingEvent.CodeChanged(sanitized))
     }
+
+    fun onPairingImeAction() = Unit
 
     fun pair() {
         if (mutablePairingState.value.isLocalMode) {
@@ -324,12 +416,36 @@ class DevicesViewModel(
     }
 
     internal fun startSelectedPairing() {
+        activeQrReplacementRetry = false
         reducePairing(DevicesPairingEvent.StartRequested)
     }
 
+    internal fun switchPairingMethod(method: PairingMethod) {
+        if (method == mutablePairingState.value.method) return
+        cancelPairingOperation(markCancelled = false)
+        val selected = reducePairing(DevicesPairingEvent.SelectMethod(method))
+        mutableState.update { it.copy(pairingCode = "", inputError = null, notice = null) }
+        if (selected.state.phase == PairingAttemptPhase.IDLE) startSelectedPairing()
+    }
+
     internal fun retryPairing() {
-        val method = mutablePairingState.value.method
+        val pairing = mutablePairingState.value
+        val method = pairing.method
         if (method == PairingMethod.NONE) return
+        if (method == PairingMethod.SIX_DIGIT_CODE) {
+            cancelPairingOperation(markCancelled = false)
+            discoveredPairingTarget = null
+            discoveredPairingAttemptId = null
+            reducePairing(
+                DevicesPairingEvent.SelectMethod(PairingMethod.SIX_DIGIT_CODE),
+                handleEffects = false,
+            )
+            reducePairing(DevicesPairingEvent.StartCodeDiscoveryRequested)
+            return
+        }
+        val isActive = pairing.phase !in TERMINAL_PAIRING_PHASES
+        if (isActive && activeQrReplacementRetry) return
+        activeQrReplacementRetry = isActive
         cancelPairingOperation(markCancelled = false)
         reducePairing(DevicesPairingEvent.SelectMethod(method), handleEffects = false)
         reducePairing(DevicesPairingEvent.StartRequested)
@@ -393,11 +509,12 @@ class DevicesViewModel(
             when (val result = manager.disconnect()) {
                 is AdbOperationResult.Success -> if (generation == operationGeneration) {
                     mutableState.update {
-                        it.copy(pairingCode = "", showPairing = false, notice = "已断开连接")
+                        it.copy(pairingCode = "", showPairing = false, notice = null)
                     }
+                    resumeLanDiscoveryAfterConnectionAttempt()
                 }
                 is AdbOperationResult.Failure -> if (generation == operationGeneration) {
-                    mutableState.update { it.copy(notice = result.error.userMessage) }
+                    mutableState.update { it.copy(notice = result.error.technicalCode) }
                 }
                 AdbOperationResult.Cancelled -> Unit
             }
@@ -455,6 +572,7 @@ class DevicesViewModel(
                             notice = "配对成功。请填写无线调试主页面的调试端口后连接。",
                         )
                     }
+                    resumeLanDiscoveryIfForeground()
                 }
                 is AdbOperationResult.Failure -> reducePairing(
                     terminalPairingEvent(result.error),
@@ -509,6 +627,7 @@ class DevicesViewModel(
             }
             DevicesPairingEffect.CancelCurrent -> cancelPairingOperation(markCancelled = false)
             is DevicesPairingEffect.SubmitCode -> effect.secret.clear()
+            DevicesPairingEffect.StartPairingPortDiscovery -> startPairingPortDiscovery()
             DevicesPairingEffect.StartLocalWindow -> startLocalPairingWindow()
             DevicesPairingEffect.RequestNotificationPermission -> mutableState.update {
                 it.copy(notificationPermissionRequestGeneration = it.notificationPermissionRequestGeneration + 1L)
@@ -534,6 +653,7 @@ class DevicesViewModel(
                     if (collectionGeneration != discoveryCollectionGeneration) return@collect
                     when (result) {
                         is AdbOperationResult.Success -> {
+                            latestLanDiscoveryState = result.value
                             if (coreGeneration == null) {
                                 coreGeneration = result.value.generation
                                 reduceDiscovery(
@@ -586,18 +706,20 @@ class DevicesViewModel(
     private fun handleDiscoveryEffect(effect: DevicesDiscoveryEffect) {
         when (effect) {
             DevicesDiscoveryEffect.OpenManualAddress -> prefillLocalhost()
+            is DevicesDiscoveryEffect.OpenQrPairing -> launchAfterForegroundDiscoveryStops {
+                selectedPairingConnectObservation = latestLanDiscoveryState
+                    ?.services
+                    ?.singleOrNull {
+                        it.observationId == effect.target.observationId &&
+                            it.serviceType == WirelessServiceType.CONNECT &&
+                            latestLanDiscoveryState?.generation == effect.target.generation
+                    }
+                openDiscoveryQrPairing(target = null)
+            }
             is DevicesDiscoveryEffect.OpenCodePairing -> {
-                val attemptId = pairingAttemptIdFactory()
-                discoveredPairingTarget = effect.target
-                discoveredPairingAttemptId = attemptId
-                mutableState.update {
-                    it.copy(showPairing = true, pairingCode = "", inputError = null, notice = null)
+                launchAfterForegroundDiscoveryStops {
+                    openDiscoveryQrPairing(effect.target)
                 }
-                reducePairing(
-                    DevicesPairingEvent.SelectMethod(PairingMethod.SIX_DIGIT_CODE),
-                    handleEffects = false,
-                )
-                reducePairing(DevicesPairingEvent.StartRequested, handleEffects = false)
             }
             is DevicesDiscoveryEffect.Connect -> {
                 pendingDiscoveryConnectTarget = effect.target
@@ -634,11 +756,11 @@ class DevicesViewModel(
                         reducePairing(DevicesPairingEvent.Succeeded, handleEffects = false)
                         mutableState.update {
                             it.copy(
-                                showPairing = false,
                                 pairingCode = "",
-                                notice = "配对成功，请刷新并选择连接服务。",
+                                notice = "配对成功，正在连接调试端口。",
                             )
                         }
+                        connectPairedDevice(attemptId, local = false)
                     }
                     is AdbOperationResult.Failure -> if (generation == operationGeneration) {
                         reducePairing(terminalPairingEvent(result.error), handleEffects = false)
@@ -675,11 +797,14 @@ class DevicesViewModel(
                 mutableState.update {
                     it.copy(
                         awaitingDiscoverySessionReplacement = false,
-                        inputError = result.error.userMessage,
+                        inputError = result.error.technicalCode,
                     )
                 }
+                resumeLanDiscoveryAfterConnectionAttempt()
             }
-            AdbOperationResult.Cancelled -> Unit
+            AdbOperationResult.Cancelled -> if (generation == operationGeneration) {
+                resumeLanDiscoveryAfterConnectionAttempt()
+            }
         }
     }
 
@@ -700,32 +825,145 @@ class DevicesViewModel(
         val attemptId = pairingAttemptIdFactory()
         val windowId = localPairingWindowIdFactory()
         activeLocalWindowId = windowId
+        activeLocalPairingAttemptId = attemptId
         when (val result = manager.localPairingController.start(attemptId, windowId)) {
             is AdbOperationResult.Success -> Unit
             is AdbOperationResult.Failure -> if (isCurrentLocalWindow(generation, windowId)) {
                 activeLocalWindowId = null
+                activeLocalPairingAttemptId = null
                 reducePairing(terminalPairingEvent(result.error), handleEffects = false)
             }
             AdbOperationResult.Cancelled -> if (isCurrentLocalWindow(generation, windowId)) {
                 activeLocalWindowId = null
+                activeLocalPairingAttemptId = null
                 reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
             }
         }
     }
 
+    private fun launchAfterForegroundDiscoveryStops(block: () -> Unit) {
+        pairingLaunchJob?.cancel()
+        val previousDiscovery = discoveryJob
+        discoveryCollectionGeneration++
+        discoveryJob = null
+        if (previousDiscovery == null) {
+            block()
+            return
+        }
+        previousDiscovery.cancel()
+        pairingLaunchJob = viewModelScope.launch {
+            previousDiscovery.cancelAndJoin()
+            block()
+        }
+    }
+
+    private fun openDiscoveryQrPairing(target: WirelessDiscoveryTarget?) {
+        discoveredPairingTarget = target
+        discoveredPairingAttemptId = null
+        mutableState.update {
+            it.copy(showPairing = true, pairingCode = "", inputError = null, notice = null)
+        }
+        reducePairing(
+            DevicesPairingEvent.SelectMethod(PairingMethod.QR),
+            handleEffects = false,
+        )
+        activeQrReplacementRetry = false
+        reducePairing(DevicesPairingEvent.StartRequested)
+    }
+
+    private fun startPairingPortDiscovery() {
+        if (pairingPortDiscoveryJob?.isActive == true) return
+        val generation = ++pairingPortDiscoveryGeneration
+        pairingPortDiscoveryJob = viewModelScope.launch {
+            try {
+                manager.observeWirelessServices(
+                    mode = WirelessDiscoveryMode.LOCAL_PAIRING,
+                    timeout = PAIRING_PORT_DISCOVERY_TIMEOUT,
+                ).first { result ->
+                    if (generation != pairingPortDiscoveryGeneration) return@first true
+                    when (result) {
+                        is AdbOperationResult.Success -> {
+                            when (
+                                val selection = WirelessPairingTargetSelector.select(
+                                    selectedConnect = selectedPairingConnectObservation,
+                                    pairingState = result.value,
+                                )
+                            ) {
+                                is WirelessPairingTargetSelection.Selected -> {
+                                    discoveredPairingTarget = selection.target
+                                    discoveredPairingAttemptId = pairingAttemptIdFactory()
+                                    mutableState.update {
+                                        it.copy(
+                                            pairingEndpointInput = selection.observation.pairingEndpointLabel(),
+                                            inputError = null,
+                                        )
+                                    }
+                                    reducePairing(
+                                        DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.FOUND),
+                                        handleEffects = false,
+                                    )
+                                    true
+                                }
+                                WirelessPairingTargetSelection.Ambiguous -> {
+                                    reducePairing(
+                                        DevicesPairingEvent.LocalDiscoveryChanged(
+                                            LocalPairingDiscoveryStatus.AMBIGUOUS,
+                                        ),
+                                        handleEffects = false,
+                                    )
+                                    false
+                                }
+                                WirelessPairingTargetSelection.Waiting -> false
+                            }
+                        }
+                        is AdbOperationResult.Failure -> {
+                            reducePairing(
+                                if (result.error == AdbError.DiscoveryTimeout) {
+                                    DevicesPairingEvent.Expired
+                                } else {
+                                    terminalPairingEvent(result.error)
+                                },
+                                handleEffects = false,
+                            )
+                            true
+                        }
+                        AdbOperationResult.Cancelled -> {
+                            reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
+                            true
+                        }
+                    }
+                }
+            } catch (_: CancellationException) {
+                // A replacement attempt or overlay dismissal owns the visible state.
+            } finally {
+                if (generation == pairingPortDiscoveryGeneration) pairingPortDiscoveryJob = null
+            }
+        }
+    }
+
+    private fun stopPairingPortDiscovery() {
+        pairingPortDiscoveryGeneration += 1L
+        pairingPortDiscoveryJob?.cancel()
+        pairingPortDiscoveryJob = null
+    }
+
     private fun stopLocalPairingWindow() {
         val windowId = activeLocalWindowId
         activeLocalWindowId = null
+        activeLocalPairingAttemptId = null
         localPairingGeneration++
         localSubmission?.cancel()
         localSubmission = null
+        localAutoConnectJob?.cancel()
+        localAutoConnectJob = null
         if (windowId != null) manager.localPairingController.cancel(windowId)
     }
 
     private fun handleLocalPairingControllerState(controllerState: LocalPairingControllerState) {
         val activeWindowId = activeLocalWindowId ?: return
-        val window = controllerState.window ?: return
-        if (window.windowId != activeWindowId) return
+        val window = controllerState.window
+        if (window != null && window.windowId != activeWindowId) return
+        if (window == null && controllerState.stopReason == null) return
         reducePairing(
             DevicesPairingEvent.LocalDiscoveryChanged(controllerState.discoveryStatus),
             handleEffects = false,
@@ -740,6 +978,7 @@ class DevicesViewModel(
             )
         }
         controllerState.stopReason?.let { reason ->
+            val completedAttemptId = activeLocalPairingAttemptId
             val event = when (reason) {
                 LocalPairingStopReason.SUCCEEDED -> DevicesPairingEvent.Succeeded
                 LocalPairingStopReason.CANCELLED -> DevicesPairingEvent.Cancelled
@@ -752,10 +991,66 @@ class DevicesViewModel(
                 -> DevicesPairingEvent.Failed
             }
             activeLocalWindowId = null
+            activeLocalPairingAttemptId = null
             localPairingGeneration++
             reducePairing(event, handleEffects = false)
             clearPairingCode()
+            if (reason == LocalPairingStopReason.SUCCEEDED && completedAttemptId != null) {
+                connectLocalPairedDevice(completedAttemptId)
+            }
         }
+    }
+
+    private fun connectLocalPairedDevice(attemptId: PairingAttemptId) {
+        connectPairedDevice(attemptId, local = true)
+    }
+
+    private fun connectPairedDevice(
+        attemptId: PairingAttemptId,
+        local: Boolean,
+    ) {
+        localAutoConnectJob?.cancel()
+        mutableState.update {
+            it.copy(
+                notice = if (local) {
+                    "本机配对成功，正在连接本机调试端口…"
+                } else {
+                    "配对成功，正在连接调试端口…"
+                },
+                inputError = null,
+            )
+        }
+        localAutoConnectJob = viewModelScope.launch {
+            when (val result = manager.connectLocalPairedDevice(attemptId)) {
+                is AdbOperationResult.Success -> {
+                    mutableState.update {
+                        it.copy(
+                            showPairing = false,
+                            notice = if (local) "本机无线调试已连接" else "无线调试已连接",
+                        )
+                    }
+                }
+                is AdbOperationResult.Failure -> {
+                    mutableState.update {
+                        it.copy(inputError = result.error.technicalCode, notice = "配对成功，但自动连接失败")
+                    }
+                    resumeLanDiscoveryIfForeground()
+                }
+                AdbOperationResult.Cancelled -> {
+                    mutableState.update { it.copy(notice = "自动连接已取消") }
+                    resumeLanDiscoveryIfForeground()
+                }
+            }
+            localAutoConnectJob = null
+        }
+    }
+
+    private fun resumeLanDiscoveryIfForeground() {
+        if (discoveryPageForeground && discoveryJob?.isActive != true) startLanDiscovery()
+    }
+
+    private fun resumeLanDiscoveryAfterConnectionAttempt() {
+        if (discoveryPageForeground) startLanDiscovery()
     }
 
     private fun isCurrentLocalWindow(
@@ -835,6 +1130,12 @@ class DevicesViewModel(
                     }
                 }
             }
+            if (
+                generation == operationGeneration &&
+                mutablePairingState.value.phase == PairingAttemptPhase.SUCCEEDED
+            ) {
+                connectPairedDevice(attemptId, local = false)
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Throwable) {
@@ -889,8 +1190,10 @@ class DevicesViewModel(
 
     private fun cancelPairingOperation(markCancelled: Boolean) {
         if (markCancelled) reducePairing(DevicesPairingEvent.Cancelled, handleEffects = false)
+        stopPairingPortDiscovery()
         operationGeneration++
         operation?.cancel()
+        operation = null
         clearPairingCode()
     }
 
@@ -926,9 +1229,28 @@ class DevicesViewModel(
 
     private fun clearPairingCode() = mutableState.update { it.copy(pairingCode = "") }
 
+    private fun WirelessServiceObservation.pairingEndpointLabel(): String {
+        val address = addresses.first()
+        val host = when (address) {
+            is WirelessAddress.Ipv4 -> listOf(
+                address.firstOctet,
+                address.secondOctet,
+                address.thirdOctet,
+                address.fourthOctet,
+            ).joinToString(".")
+            is WirelessAddress.Ipv6 -> address.segments.joinToString(":") { it.toString(16) }
+                .let { value -> address.scopeId?.let { "$value%$it" } ?: value }
+                .let { "[$it]" }
+        }
+        return "$host:$port"
+    }
+
     override fun onCleared() {
+        pairingLaunchJob?.cancel()
         stopLanDiscovery(markCancelled = false)
+        stopPairingPortDiscovery()
         stopLocalPairingWindow()
+        localAutoConnectJob?.cancel()
         cancelPairingOperation(markCancelled = hasNonTerminalPairing())
         super.onCleared()
     }
@@ -936,8 +1258,11 @@ class DevicesViewModel(
     companion object {
         const val HOST_IDENTITY_REFERENCE = "android-keystore-host-v1"
         private const val SIX_DIGIT_CODE_LENGTH = 6
+        private const val LEGACY_ADB_TCP_PORT = 5555
         private val CONNECTION_TIMEOUT = 10.seconds
+        private val LEGACY_AUTHORIZATION_TIMEOUT = 30.seconds
         private val QR_PAIRING_TIMEOUT = 120.seconds
+        private val PAIRING_PORT_DISCOVERY_TIMEOUT = 30.seconds
         private val LAN_DISCOVERY_TIMEOUT = 10.seconds
         private val TERMINAL_PAIRING_PHASES = setOf(
             PairingAttemptPhase.SUCCEEDED,

@@ -27,7 +27,7 @@ import org.testng.annotations.Test
 
 internal class LocalPairingCoordinatorTest {
     @Test
-    fun `window defaults to code pairing with five second status and two minute hard deadline`() {
+    fun `pairing port scan stops at thirty seconds but a found port keeps the input window alive`() {
         val fixture = Fixture()
         val started = fixture.coordinator.start(ATTEMPT_ONE, WINDOW_ONE)
 
@@ -36,13 +36,27 @@ internal class LocalPairingCoordinatorTest {
         assertEquals(window.deadlineMillis - window.startedAtMillis, 120_000L)
         assertEquals(fixture.coordinator.state.value.discoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
 
-        fixture.nowMillis = 5_000L
-        fixture.coordinator.onClockAdvanced()
-        assertEquals(fixture.coordinator.state.value.discoveryStatus, LocalPairingDiscoveryStatus.NOT_FOUND)
+        fixture.coordinator.onDiscoveryState(discoveryState(observation("observation-ready")))
+        fixture.nowMillis = 30_000L
+        fixture.coordinator.onDiscoveryTimedOut()
+        assertEquals(fixture.coordinator.state.value.discoveryStatus, LocalPairingDiscoveryStatus.FOUND)
         assertTrue(fixture.coordinator.state.value.window != null)
 
         fixture.nowMillis = 120_000L
         fixture.coordinator.onClockAdvanced()
+        assertEquals(fixture.coordinator.state.value.stopReason, LocalPairingStopReason.DEADLINE_REACHED)
+        assertNull(fixture.coordinator.state.value.window)
+        assertEquals(fixture.stopDiscoveryCalls, 1)
+    }
+
+    @Test
+    fun `pairing port scan with no resolved service terminates at thirty seconds`() {
+        val fixture = Fixture()
+        fixture.coordinator.start(ATTEMPT_ONE, WINDOW_ONE)
+
+        fixture.nowMillis = 30_000L
+        fixture.coordinator.onDiscoveryTimedOut()
+
         assertEquals(fixture.coordinator.state.value.stopReason, LocalPairingStopReason.DEADLINE_REACHED)
         assertNull(fixture.coordinator.state.value.window)
         assertEquals(fixture.stopDiscoveryCalls, 1)
@@ -136,16 +150,17 @@ internal class LocalPairingCoordinatorTest {
     }
 
     @Test
-    fun `service lost and session change are terminal and invalidate the window token`() {
-        val serviceLost = Fixture()
-        serviceLost.startReady(ATTEMPT_ONE, WINDOW_ONE, "observation-lost")
-        serviceLost.coordinator.onDiscoveryState(discoveryState())
-        assertEquals(serviceLost.coordinator.state.value.stopReason, LocalPairingStopReason.SERVICE_LOST)
-        assertNull(serviceLost.coordinator.state.value.window)
-        val staleCode = "0".repeat(6).toCharArray()
-        val staleSubmit = runBlocking { serviceLost.coordinator.submit(WINDOW_ONE, staleCode) }
-        assertFalse(staleSubmit is AdbOperationResult.Success<*>)
-        assertTrue(staleCode.all { it == '\u0000' })
+    fun `transient service loss resumes scanning while session change invalidates the window`() {
+        val transientLoss = Fixture()
+        transientLoss.startReady(ATTEMPT_ONE, WINDOW_ONE, "observation-lost")
+        transientLoss.coordinator.onDiscoveryState(discoveryState())
+        assertEquals(transientLoss.coordinator.state.value.discoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+        assertTrue(transientLoss.coordinator.state.value.window != null)
+        assertNull(transientLoss.coordinator.state.value.stopReason)
+
+        transientLoss.coordinator.onDiscoveryState(discoveryState(observation("observation-recovered")))
+        assertEquals(transientLoss.coordinator.state.value.discoveryStatus, LocalPairingDiscoveryStatus.FOUND)
+        assertTrue(transientLoss.coordinator.state.value.window?.hasLivePairingService == true)
 
         val sessionChanged = Fixture()
         sessionChanged.startReady(ATTEMPT_TWO, WINDOW_TWO, "observation-session")

@@ -2,6 +2,7 @@ package com.sheen.adb.feature.devices
 
 import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingMethod
+import java.io.File
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
@@ -10,6 +11,32 @@ import org.testng.annotations.Test
 import com.sheen.adb.ui.UiLanguage
 
 internal class DevicesPairingPresentationTest {
+    @Test
+    fun `connection actions open the root overlay and QR offers the required transparent code switch`() {
+        val source = File("src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt").readText()
+
+        assertTrue(source.contains("actions.beginPairingFromConnectionPage(PairingMethod.QR)"))
+        assertTrue(source.contains("actions.beginPairingFromConnectionPage(PairingMethod.SIX_DIGIT_CODE)"))
+        assertTrue(source.contains("actions.switchPairingMethod(method)"))
+        assertTrue(source.contains("actions.switchPairingMethod(PairingMethod.SIX_DIGIT_CODE)"))
+        assertTrue(source.contains("TextButton("))
+        assertTrue(source.contains("\"切换配对码配对\""))
+    }
+
+    @Test
+    fun `local pairing click detects wireless debugging then gates scanning behind confirmation`() {
+        val source = File("src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt").readText()
+
+        assertTrue(source.contains("Settings.Global.getInt"))
+        assertTrue(source.contains("\"adb_wifi_enabled\""))
+        assertTrue(source.contains("\"未检测到无线调试"))
+        assertTrue(source.contains("\"无线调试已打开"))
+        assertTrue(source.contains("viewModel.enterLocalPairingMode(openingWirelessSettings = true)"))
+        assertTrue(source.contains("openWirelessSettingsWhenPairingReady"))
+        assertTrue(source.contains("\"停止本机配对\""))
+        assertFalse(source.contains("pairingState.localStatusText(language)"))
+    }
+
     @Test
     fun `method selector always offers QR and six digit code`() {
         val presentation = DevicesPairingState().toPresentation()
@@ -59,17 +86,27 @@ internal class DevicesPairingPresentationTest {
     }
 
     @Test
-    fun `local pairing presentation uses fixed prompts and minimal controls`() {
-        val waiting = DevicesPairingState(
+    fun `local pairing hides code entry until a pairing port is found`() {
+        val scanning = DevicesPairingState(
             method = PairingMethod.SIX_DIGIT_CODE,
             phase = PairingAttemptPhase.WAITING_FOR_CODE,
+            isLocalMode = true,
+            localDiscoveryStatus = com.sheen.adb.core.LocalPairingDiscoveryStatus.SEARCHING,
         ).toPresentation()
 
-        assertTrue(waiting.guidance.contains("\u8bf7\u5f00\u542f\u65e0\u7ebf\u8c03\u8bd5\u3002"))
-        assertTrue(waiting.guidance.contains("\u5df2\u68c0\u6d4b\u5230\u914d\u5bf9\u7aef\u53e3\uff0c\u8bf7\u8f93\u5165\u914d\u5bf9\u7801\uff1a"))
-        assertTrue(waiting.showCodeInputs)
-        assertTrue(waiting.showCancel)
-        assertFalse(waiting.guidance.contains("000000"))
+        assertEquals(scanning.statusText, "正在扫描配对端口")
+        assertFalse(scanning.showCodeInputs)
+        assertTrue(scanning.showCancel)
+
+        val found = DevicesPairingState(
+            method = PairingMethod.SIX_DIGIT_CODE,
+            phase = PairingAttemptPhase.WAITING_FOR_CODE,
+            isLocalMode = true,
+            localDiscoveryStatus = com.sheen.adb.core.LocalPairingDiscoveryStatus.FOUND,
+        ).toPresentation()
+
+        assertTrue(found.showCodeInputs)
+        assertFalse(found.guidance.contains("000000"))
     }
 
     @Test
@@ -125,10 +162,11 @@ internal class DevicesPairingPresentationTest {
             codeInput = "0".repeat(6),
             failure = DevicesPairingFailure.EXPIRED,
             isLocalMode = true,
+            localDiscoveryStatus = com.sheen.adb.core.LocalPairingDiscoveryStatus.STOPPED,
         ).toPresentation()
 
         assertEquals(cancelled.statusText, "本机配对已取消")
-        assertEquals(timedOut.statusText, "本机配对已超时，请重新开始")
+        assertEquals(timedOut.statusText, "未发现配对端口")
         assertFalse(cancelled.showCodeInputs)
         assertFalse(timedOut.showCodeInputs)
         assertFalse(cancelled.toString().contains("000000"))

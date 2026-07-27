@@ -115,7 +115,7 @@ internal object StructuredLogcatParser {
         'W' -> StructuredLogcatLevel.WARN
         'E' -> StructuredLogcatLevel.ERROR
         'F' -> StructuredLogcatLevel.FATAL
-        'A' -> StructuredLogcatLevel.ASSERT
+        'A' -> StructuredLogcatLevel.FATAL
         else -> null
     }
 }

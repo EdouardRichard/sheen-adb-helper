@@ -40,25 +40,25 @@ class AppUiPolicyTest {
     @Test
     fun `v01 shell has exactly six ordered destinations`() {
         assertEquals(
-            Destination.entries.map { it.name },
-            listOf("DEVICES", "FILES", "APPS", "PROCESSES", "SHELL", "LOGCAT"),
+            MainDestination.entries.map { it.name },
+            listOf("CONNECTION", "FILES", "APPLICATIONS", "PROCESSES", "SHELL", "LOGCAT"),
         )
-        assertFalse(Destination.DEVICES.requiresConnection)
-        assertTrue(Destination.entries.drop(1).all { it.requiresConnection })
+        assertEquals(MainDestination.CONNECTION.ordinal, 0)
+        assertTrue(MainDestination.entries.drop(1).isNotEmpty())
     }
 
     @Test
     fun `disconnect returns every dependent destination to connection`() {
-        Destination.entries.drop(1).forEach {
-            assertEquals(destinationAfterConnectionChange(it, connected = false), Destination.DEVICES)
+        MainDestination.entries.drop(1).forEach {
+            assertEquals(destinationAfterConnectionChange(it, connected = false), MainDestination.CONNECTION)
         }
         assertEquals(
-            destinationAfterConnectionChange(Destination.DEVICES, connected = false),
-            Destination.DEVICES,
+            destinationAfterConnectionChange(MainDestination.CONNECTION, connected = false),
+            MainDestination.CONNECTION,
         )
         assertEquals(
-            destinationAfterConnectionChange(Destination.APPS, connected = true),
-            Destination.APPS,
+            destinationAfterConnectionChange(MainDestination.APPLICATIONS, connected = true),
+            MainDestination.APPLICATIONS,
         )
     }
 
@@ -67,7 +67,7 @@ class AppUiPolicyTest {
         val app = source("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt")
         assertTrue(app.contains("SheenBottomNavigation"))
         assertTrue(app.contains("PermanentNavigationDrawer"))
-        assertTrue(app.contains("Destination.entries"))
+        assertTrue(app.contains("MainDestination.entries"))
         assertTrue(app.contains("heightIn(min = SheenDimensions.minimumTouchTarget)"))
         assertTrue(app.contains("if (isMenuEnabled(destination.requiresConnection, connected))"))
         listOf("FilesRoute(", "AppsRoute(", "ProcessesRoute(", "ShellRoute(", "LogcatRoute(").forEach {
@@ -97,7 +97,7 @@ class AppUiPolicyTest {
         assertTrue(activity.contains("filesViewModel.onHostStopped"))
         assertFalse(app.contains("FilesViewModel(container.adbManager)"))
         assertTrue(app.contains("FileTaskSummaryBar"))
-        assertTrue(app.contains("showViewAction = destination != Destination.FILES"))
+        assertTrue(app.contains("showViewAction = pageHostState.current != MainDestination.FILES"))
     }
 
     @Test
@@ -107,13 +107,35 @@ class AppUiPolicyTest {
     }
 
     @Test
+    fun `host start releases the file picker lease only after a stable foreground window`() {
+        val activity = source("src/main/kotlin/com/sheen/adbhelper/MainActivity.kt")
+        val onStart = activity.substringAfter("override fun onStart()")
+            .substringBefore("\n    override fun ")
+
+        assertTrue(onStart.contains("filesViewModel.onHostStarted()"))
+        assertTrue(
+            onStart.contains("lifecycleScope.launch") &&
+                onStart.contains("delay(FILE_PICKER_RETURN_STABILITY_MILLIS)") &&
+                onStart.contains("lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)"),
+            "A transient restart between DocumentsUI and its permission confirmation must not release the picker lease.",
+        )
+        assertTrue(
+            onStart.indexOf("hostForegroundState.value = true") <
+                onStart.indexOf("filesViewModel.onHostStarted()"),
+            "The lease is released only after foreground stability has been observed.",
+        )
+    }
+
+    @Test
     fun `connection shell preserves Compose conversion and disconnect fallback`() {
         val app = source("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt")
         val devices = source(
             "../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt",
         )
         val strings = source("../core/ui/src/main/kotlin/com/sheen/adb/ui/V01Strings.kt")
-        assertTrue(app.contains("contentDescription = \"打开导航菜单\""))
+        assertTrue(app.contains("V01StringKey.MENU"))
+        assertTrue(app.contains("V01StringKey.CONNECTION_ENDPOINT_CONTENT_DESCRIPTION"))
+        assertFalse(app.contains("contentDescription = \"ADB"))
         assertTrue(app.contains("V01StringKey.CONNECTION_ENDPOINT_HINT"))
         assertTrue(app.contains("V01StringKey.TOP_CONNECT"))
         assertTrue(devices.contains("V01StringKey.PAIRING_SCAN"))
@@ -122,9 +144,19 @@ class AppUiPolicyTest {
         assertTrue(devices.contains("V01StringKey.PAIRING_LOCAL"))
         assertTrue(strings.contains("请输入 IP:端口"))
         assertTrue(app.contains("actions::disconnect"))
-        assertTrue(app.contains("destinationAfterConnectionChange(destination, connected)"))
+        assertTrue(app.contains("destinationAfterConnectionChange(pageHostState.current, connected)"))
         assertFalse(devices.contains("WebView"))
         assertFalse(devices.contains("cdn.tailwindcss.com"))
+    }
+
+    @Test
+    fun `connection endpoint field preserves vertical glyph space`() {
+        val app = source("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt")
+        val field = app.substringAfter("BasicTextField(").substringBefore("IconButton(")
+
+        assertTrue(field.contains("height(SheenDimensions.topBarVisualHeight - 8.dp)"))
+        assertTrue(field.contains("padding(horizontal = 12.dp)"))
+        assertFalse(field.contains("vertical = 6.dp"))
     }
 
     @Test

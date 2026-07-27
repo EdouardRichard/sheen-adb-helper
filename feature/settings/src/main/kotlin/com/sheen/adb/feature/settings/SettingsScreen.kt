@@ -27,33 +27,52 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.data.LanguagePreference
+import com.sheen.adb.ui.UiLanguage
 
 @Composable
-fun SettingsRoute(viewModel: SettingsViewModel) {
+fun SettingsRoute(
+    viewModel: SettingsViewModel,
+    language: UiLanguage = UiLanguage.ZH_CN,
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     Column(
         Modifier.verticalScroll(rememberScrollState()).padding(SheenDimensions.screenPadding),
         verticalArrangement = Arrangement.spacedBy(SheenDimensions.itemSpacing),
     ) {
-        Text("设置与隐私", style = MaterialTheme.typography.headlineSmall)
+        Text(
+            SettingsStrings.resolve(language, SettingsStringKey.TITLE),
+            style = MaterialTheme.typography.headlineSmall,
+        )
         Card(Modifier.fillMaxWidth()) {
             Column(Modifier.padding(16.dp)) {
-                Text("语言", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    SettingsStrings.resolve(language, SettingsStringKey.LANGUAGE),
+                    style = MaterialTheme.typography.titleMedium,
+                )
                 LanguageOption(
-                    label = "简体中文",
+                    label = SettingsStrings.resolve(
+                        language,
+                        SettingsStringKey.LANGUAGE_CHINESE,
+                    ),
                     selected = state.language == LanguagePreference.ZH_CN,
                     enabled = !state.isSavingLanguage,
                     onClick = { viewModel.selectLanguage(LanguagePreference.ZH_CN) },
                 )
                 LanguageOption(
-                    label = "English",
+                    label = SettingsStrings.resolve(
+                        language,
+                        SettingsStringKey.LANGUAGE_ENGLISH,
+                    ),
                     selected = state.language == LanguagePreference.EN_US,
                     enabled = !state.isSavingLanguage,
                     onClick = { viewModel.selectLanguage(LanguagePreference.EN_US) },
                 )
-                state.languageError?.let {
-                    Text(it, color = MaterialTheme.colorScheme.error)
+                state.languageMessage?.let { message ->
+                    Text(
+                        SettingsStrings.resolve(language, SettingsStrings.keyFor(message)),
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }

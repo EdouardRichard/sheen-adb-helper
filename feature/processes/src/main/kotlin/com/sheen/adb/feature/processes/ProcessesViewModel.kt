@@ -11,12 +11,15 @@ import com.sheen.adb.core.ProcessTerminationRequest
 import com.sheen.adb.core.ProcessTerminationResult
 import com.sheen.adb.core.ProcessTerminationScope
 import java.util.UUID
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 enum class ProcessesAnalysisStatus {
@@ -42,29 +45,22 @@ data class ProcessesUiState(
     val isLoading: Boolean = false,
     val generation: Long = 0,
     val entries: List<ProcessSnapshotEntry> = emptyList(),
-    val pidQuery: String = "",
-    val processQuery: String = "",
-    val applicationQuery: String = "",
+    val query: String = "",
     val status: ProcessesAnalysisStatus = ProcessesAnalysisStatus.DISCONNECTED,
     val degradedReason: String? = null,
     val error: AdbError? = null,
     val pendingTermination: ProcessTerminationConfirmation? = null,
     val terminationResult: ProcessTerminationResult? = null,
     val terminationRequestCount: Int = 0,
+    val terminationInProgress: Boolean = false,
 ) {
     val visibleEntries: List<ProcessSnapshotEntry>
         get() {
-            val pidNeedle = pidQuery.trim()
-            val processNeedle = processQuery.trim()
-            val applicationNeedle = applicationQuery.trim()
-            return entries.filter { entry ->
-                (pidNeedle.isEmpty() || entry.pid.toString().contains(pidNeedle)) &&
-                    (processNeedle.isEmpty() || entry.processName.contains(processNeedle, ignoreCase = true)) &&
-                    (
-                        applicationNeedle.isEmpty() ||
-                            entry.applicationName.contains(applicationNeedle, ignoreCase = true) ||
-                            entry.applicationPackage?.contains(applicationNeedle, ignoreCase = true) == true
-                        )
+            val needle = query.trim()
+            return if (needle.isEmpty()) {
+                entries
+            } else {
+                entries.filter { it.processName.contains(needle, ignoreCase = true) }
             }
         }
 }
@@ -119,13 +115,32 @@ object ProcessesPolicy {
             pending.entry.identity.observedGeneration == state.generation
     }
 
-    fun acceptSnapshot(current: ProcessesUiState, entries: List<ProcessSnapshotEntry>): Boolean {
-        if (entries.isEmpty()) return true
+    fun acceptSnapshot(
+        current: ProcessesUiState,
+        snapshotSessionId: String,
+        snapshotGeneration: Long,
+        entries: List<ProcessSnapshotEntry>,
+    ): Boolean {
         val sessionId = current.sessionId ?: return false
-        val generations = entries.map { it.identity.observedGeneration }.distinct()
-        return entries.all { it.identity.sessionId == sessionId } &&
-            generations.size == 1 &&
-            generations.single() >= current.generation
+        if (snapshotSessionId != sessionId || snapshotGeneration < current.generation) return false
+        return entries.all {
+            it.identity.sessionId == snapshotSessionId &&
+                it.identity.observedGeneration == snapshotGeneration
+        }
+    }
+
+    fun acceptSnapshot(
+        current: ProcessesUiState,
+        entries: List<ProcessSnapshotEntry>,
+    ): Boolean {
+        if (entries.isEmpty()) return true
+        val generation = entries.first().identity.observedGeneration
+        return acceptSnapshot(
+            current = current,
+            snapshotSessionId = entries.first().identity.sessionId,
+            snapshotGeneration = generation,
+            entries = entries,
+        )
     }
 
     fun confirmedApplicationSet(
@@ -136,20 +151,30 @@ object ProcessesPolicy {
     }.orEmpty()
 }
 
-class ProcessesViewModel(private val manager: AdbSessionManager) : ViewModel() {
+class ProcessesViewModel(
+    private val manager: AdbSessionManager,
+    scope: CoroutineScope? = null,
+    private val delayMillis: suspend (Long) -> Unit = { delay(it) },
+) : ViewModel() {
+    private val executionScope = scope ?: viewModelScope
     private val mutableState = MutableStateFlow(ProcessesUiState())
     val state: StateFlow<ProcessesUiState> = mutableState.asStateFlow()
-    private var operation: Job? = null
-    private var operationGeneration = 0L
+
+    private var pageVisible = false
+    private var appForeground = false
+    private var pollingJob: Job? = null
+    private var manualRefreshJob: Job? = null
+    private var terminationJob: Job? = null
+    private var refreshEpoch = 0L
 
     init {
-        viewModelScope.launch {
+        executionScope.launch {
             manager.connectionState.collect { connection ->
                 val connected = connection as? AdbConnectionState.Connected
                 if (connected?.sessionId != mutableState.value.sessionId || connected == null) {
-                    operationGeneration += 1
-                    operation?.cancel()
-                    operation = null
+                    stopPolling(markCancelled = false)
+                    terminationJob?.cancel()
+                    terminationJob = null
                     mutableState.value = ProcessesPolicy.changedSession(
                         current = mutableState.value,
                         connected = connected != null,
@@ -158,64 +183,43 @@ class ProcessesViewModel(private val manager: AdbSessionManager) : ViewModel() {
                 } else {
                     mutableState.update { it.copy(isConnected = true) }
                 }
+                updatePolling()
             }
         }
     }
 
-    fun updatePidQuery(value: String) = mutableState.update { it.copy(pidQuery = value.take(MAX_QUERY_LENGTH)) }
-    fun updateProcessQuery(value: String) = mutableState.update { it.copy(processQuery = value.take(MAX_QUERY_LENGTH)) }
-    fun updateApplicationQuery(value: String) = mutableState.update {
-        it.copy(applicationQuery = value.take(MAX_QUERY_LENGTH))
+    fun updateQuery(value: String) = mutableState.update {
+        it.copy(query = value.take(MAX_QUERY_LENGTH))
+    }
+
+    fun dismissError() = mutableState.update { it.copy(error = null) }
+
+    fun setForeground(foreground: Boolean) {
+        if (appForeground == foreground) return
+        appForeground = foreground
+        updatePolling()
+    }
+
+    fun onPageVisible(visible: Boolean) {
+        if (pageVisible == visible) return
+        pageVisible = visible
+        updatePolling()
     }
 
     fun refresh() {
-        val expectedSessionId = mutableState.value.sessionId ?: return
-        if (!mutableState.value.isConnected || operation?.isActive == true) return
-        val expectedOperation = ++operationGeneration
-        operation = viewModelScope.launch {
-            mutableState.update {
-                it.copy(isLoading = true, status = ProcessesAnalysisStatus.LOADING, degradedReason = null, error = null)
-            }
-            when (val result = manager.refreshProcesses(expectedSessionId)) {
-                is AdbOperationResult.Success -> mutableState.update { current ->
-                    if (!isCurrent(expectedSessionId, expectedOperation) ||
-                        !ProcessesPolicy.acceptSnapshot(current, result.value)
-                    ) {
-                        current
-                    } else {
-                        val generation = result.value.firstOrNull()?.identity?.observedGeneration
-                            ?: (current.generation + 1)
-                        current.copy(
-                            isLoading = false,
-                            generation = generation,
-                            entries = result.value,
-                            status = ProcessesPolicy.classifyRefresh(current.entries, result.value, null),
-                            error = null,
-                        )
-                    }
-                }
-                is AdbOperationResult.Failure -> mutableState.update { current ->
-                    if (!isCurrent(expectedSessionId, expectedOperation)) current else current.copy(
-                        isLoading = false,
-                        status = ProcessesAnalysisStatus.ERROR,
-                        error = result.error,
-                    )
-                }
-                AdbOperationResult.Cancelled -> mutableState.update { current ->
-                    if (!isCurrent(expectedSessionId, expectedOperation)) current else current.copy(
-                        isLoading = false,
-                        status = ProcessesPolicy.cancelledStatus(),
-                    )
-                }
-            }
-            if (isCurrent(expectedSessionId, expectedOperation)) operation = null
+        if (pollingJob?.isActive == true || manualRefreshJob?.isActive == true) return
+        val sessionId = mutableState.value.sessionId ?: return
+        val epoch = ++refreshEpoch
+        manualRefreshJob = executionScope.launch {
+            refreshOnce(sessionId, epoch)
+            if (refreshEpoch == epoch) manualRefreshJob = null
         }
     }
 
     fun cancel() {
-        operationGeneration += 1
-        operation?.cancel()
-        operation = null
+        stopPolling(markCancelled = true)
+        manualRefreshJob?.cancel()
+        manualRefreshJob = null
         mutableState.update { current ->
             if (!current.isLoading) current else current.copy(
                 isLoading = false,
@@ -225,9 +229,19 @@ class ProcessesViewModel(private val manager: AdbSessionManager) : ViewModel() {
     }
 
     fun requestTermination(entry: ProcessSnapshotEntry) {
-        val state = mutableState.value
-        if (state.sessionId != entry.identity.sessionId || state.generation != entry.identity.observedGeneration) return
-        mutableState.update { it.copy(pendingTermination = ProcessesPolicy.newConfirmation(entry)) }
+        val current = mutableState.value
+        if (current.sessionId != entry.identity.sessionId ||
+            current.generation != entry.identity.observedGeneration
+        ) {
+            return
+        }
+        stopPolling(markCancelled = false)
+        mutableState.update {
+            it.copy(
+                pendingTermination = ProcessesPolicy.newConfirmation(entry),
+                terminationResult = null,
+            )
+        }
     }
 
     fun selectTerminationScope(scope: ProcessTerminationScope) {
@@ -238,11 +252,14 @@ class ProcessesViewModel(private val manager: AdbSessionManager) : ViewModel() {
         }
     }
 
-    fun cancelTermination() = mutableState.update(ProcessesPolicy::cancelConfirmation)
+    fun cancelTermination() {
+        mutableState.update(ProcessesPolicy::cancelConfirmation)
+        updatePolling()
+    }
 
     fun confirmTermination(nonce: String) {
         val current = mutableState.value
-        if (!ProcessesPolicy.canConfirm(current, nonce) || operation?.isActive == true) return
+        if (!ProcessesPolicy.canConfirm(current, nonce) || terminationJob?.isActive == true) return
         val pending = checkNotNull(current.pendingTermination)
         val scope = checkNotNull(pending.scope)
         val session = checkNotNull(current.sessionId)
@@ -251,15 +268,17 @@ class ProcessesViewModel(private val manager: AdbSessionManager) : ViewModel() {
         } else {
             emptySet()
         }
+        stopPolling(markCancelled = false)
         mutableState.update {
             it.copy(
                 pendingTermination = null,
-                isLoading = true,
+                terminationResult = null,
+                terminationInProgress = true,
                 terminationRequestCount = it.terminationRequestCount + 1,
+                error = null,
             )
         }
-        val expectedOperation = ++operationGeneration
-        operation = viewModelScope.launch {
+        terminationJob = executionScope.launch {
             val result = manager.terminateProcess(
                 ProcessTerminationRequest(
                     requestId = nonce,
@@ -272,29 +291,123 @@ class ProcessesViewModel(private val manager: AdbSessionManager) : ViewModel() {
                     forceStopImpactAcknowledged = scope == ProcessTerminationScope.WHOLE_APPLICATION_FORCE_STOP,
                 ),
             )
-            mutableState.update {
-                if (!isCurrent(session, expectedOperation)) it else it.copy(
-                    isLoading = false,
-                    terminationResult = (result as? AdbOperationResult.Success)?.value,
-                    status = if (result is AdbOperationResult.Failure) ProcessesAnalysisStatus.ERROR else it.status,
-                    error = (result as? AdbOperationResult.Failure)?.error,
-                )
+            mutableState.update { latest ->
+                if (latest.sessionId != session) {
+                    latest
+                } else {
+                    latest.copy(
+                        terminationInProgress = false,
+                        terminationResult = (result as? AdbOperationResult.Success)?.value,
+                        status = if (result is AdbOperationResult.Failure) {
+                            ProcessesAnalysisStatus.ERROR
+                        } else {
+                            latest.status
+                        },
+                        error = (result as? AdbOperationResult.Failure)?.error,
+                    )
+                }
             }
-            if (isCurrent(session, expectedOperation)) operation = null
+            terminationJob = null
+            updatePolling()
         }
     }
 
-    private fun isCurrent(expectedSessionId: String, expectedOperation: Long): Boolean =
-        operationGeneration == expectedOperation && mutableState.value.sessionId == expectedSessionId
+    private fun updatePolling() {
+        val shouldPoll = pageVisible && appForeground && mutableState.value.isConnected
+        if (!shouldPoll) {
+            stopPolling(markCancelled = false)
+            return
+        }
+        if (pollingJob?.isActive == true) return
+        val sessionId = mutableState.value.sessionId ?: return
+        val epoch = ++refreshEpoch
+        pollingJob = executionScope.launch {
+            while (isActive && shouldContinuePolling(sessionId, epoch)) {
+                refreshOnce(sessionId, epoch)
+                if (!isActive || !shouldContinuePolling(sessionId, epoch)) break
+                delayMillis(REFRESH_INTERVAL_MILLIS)
+            }
+        }
+    }
+
+    private suspend fun refreshOnce(sessionId: String, epoch: Long) {
+        mutableState.update { current ->
+            if (!isCurrent(sessionId, epoch)) current else current.copy(
+                isLoading = true,
+                status = ProcessesAnalysisStatus.LOADING,
+                degradedReason = null,
+                error = null,
+            )
+        }
+        when (val result = manager.refreshProcesses(sessionId)) {
+            is AdbOperationResult.Success -> mutableState.update { current ->
+                val generation = result.value.firstOrNull()?.identity?.observedGeneration
+                    ?: (current.generation + 1)
+                if (!isCurrent(sessionId, epoch) ||
+                    !ProcessesPolicy.acceptSnapshot(current, sessionId, generation, result.value)
+                ) {
+                    current
+                } else {
+                    current.copy(
+                        isLoading = false,
+                        generation = generation,
+                        entries = result.value,
+                        status = ProcessesPolicy.classifyRefresh(current.entries, result.value, null),
+                        error = null,
+                    )
+                }
+            }
+            is AdbOperationResult.Failure -> mutableState.update { current ->
+                if (!isCurrent(sessionId, epoch)) current else current.copy(
+                    isLoading = false,
+                    status = ProcessesAnalysisStatus.ERROR,
+                    error = result.error,
+                )
+            }
+            AdbOperationResult.Cancelled -> mutableState.update { current ->
+                if (!isCurrent(sessionId, epoch)) current else current.copy(
+                    isLoading = false,
+                    status = ProcessesPolicy.cancelledStatus(),
+                )
+            }
+        }
+    }
+
+    private fun shouldContinuePolling(sessionId: String, epoch: Long): Boolean =
+        pageVisible &&
+            appForeground &&
+            mutableState.value.isConnected &&
+            mutableState.value.sessionId == sessionId &&
+            refreshEpoch == epoch
+
+    private fun isCurrent(sessionId: String, epoch: Long): Boolean =
+        refreshEpoch == epoch && mutableState.value.sessionId == sessionId
+
+    private fun stopPolling(markCancelled: Boolean) {
+        refreshEpoch += 1
+        pollingJob?.cancel()
+        pollingJob = null
+        if (mutableState.value.isLoading) {
+            mutableState.update {
+                it.copy(
+                    isLoading = false,
+                    status = if (markCancelled) ProcessesAnalysisStatus.CANCELLED else it.status,
+                )
+            }
+        }
+    }
 
     override fun onCleared() {
-        operationGeneration += 1
-        operation?.cancel()
-        operation = null
+        stopPolling(markCancelled = false)
+        manualRefreshJob?.cancel()
+        terminationJob?.cancel()
+        manualRefreshJob = null
+        terminationJob = null
         super.onCleared()
     }
 
     private companion object {
         const val MAX_QUERY_LENGTH = 255
+        const val REFRESH_INTERVAL_MILLIS = 5_000L
     }
 }

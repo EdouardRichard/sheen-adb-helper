@@ -210,6 +210,71 @@ class WirelessServiceObservation(
     override fun toString(): String = "WirelessServiceObservation(redacted)"
 }
 
+sealed interface WirelessPairingTargetSelection {
+    data class Selected(
+        val target: WirelessDiscoveryTarget,
+        val observation: WirelessServiceObservation,
+    ) : WirelessPairingTargetSelection
+
+    data object Waiting : WirelessPairingTargetSelection
+
+    data object Ambiguous : WirelessPairingTargetSelection
+}
+
+object WirelessPairingTargetSelector {
+    fun select(
+        selectedConnect: WirelessServiceObservation?,
+        pairingState: WirelessDiscoveryState,
+    ): WirelessPairingTargetSelection {
+        val candidates = pairingState.services.filter {
+            it.serviceType == WirelessServiceType.PAIRING &&
+                it.status == WirelessServiceStatus.RESOLVED &&
+                it.addresses.isNotEmpty()
+        }
+        if (selectedConnect == null) return candidates.toSelection(pairingState.generation)
+        if (
+            selectedConnect.serviceType != WirelessServiceType.CONNECT ||
+            selectedConnect.status != WirelessServiceStatus.RESOLVED ||
+            selectedConnect.addresses.isEmpty()
+        ) {
+            return WirelessPairingTargetSelection.Waiting
+        }
+
+        val verifiedMatches = selectedConnect.verifiedDeviceId?.let { selectedId ->
+            candidates.filter { it.verifiedDeviceId == selectedId }
+        }.orEmpty()
+        if (verifiedMatches.isNotEmpty()) {
+            return verifiedMatches.toSelection(pairingState.generation)
+        }
+
+        val sameAddress = candidates.filter { pairing ->
+            pairing.addresses.any(selectedConnect.addresses::contains)
+        }
+        val aospCodeMatches = sameAddress.filter { pairing ->
+            pairing.serviceName.startsWith(ADB_INSTANCE_PREFIX) &&
+                selectedConnect.serviceName.startsWith("${pairing.serviceName}-")
+        }
+        return when {
+            aospCodeMatches.isNotEmpty() -> aospCodeMatches.toSelection(pairingState.generation)
+            sameAddress.isNotEmpty() -> sameAddress.toSelection(pairingState.generation)
+            else -> WirelessPairingTargetSelection.Waiting
+        }
+    }
+
+    private fun List<WirelessServiceObservation>.toSelection(
+        generation: Long,
+    ): WirelessPairingTargetSelection = when (size) {
+        0 -> WirelessPairingTargetSelection.Waiting
+        1 -> WirelessPairingTargetSelection.Selected(
+            target = WirelessDiscoveryTarget(generation, single().observationId),
+            observation = single(),
+        )
+        else -> WirelessPairingTargetSelection.Ambiguous
+    }
+
+    private const val ADB_INSTANCE_PREFIX = "adb-"
+}
+
 class WirelessDisplayDevice(
     val verifiedDeviceId: VerifiedWirelessDeviceId?,
     observations: List<WirelessServiceObservation>,

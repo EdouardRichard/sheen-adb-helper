@@ -38,6 +38,14 @@ class ProcessSessionManagerTest {
         assertTrue(newerResult.value.isNotEmpty())
         assertTrue(newerResult.value.all { it.identity.sessionId == sessionId })
         assertTrue(newerResult.value.all { it.identity.observedGeneration == 2L })
+        assertTrue(
+            client.commands.none { it == "am get-current-user" || it.startsWith("pm list packages") },
+            "Process refresh must not perform a full application inventory.",
+        )
+        assertTrue(
+            AdbCommands.PROCESS_PSS !in client.commands,
+            "Process refresh must use the ps RSS fallback instead of a full smaps_rollup scan.",
+        )
     }
 
     @Test
@@ -64,6 +72,39 @@ class ProcessSessionManagerTest {
     }
 
     @Test
+    fun `waiting for a previous page command does not consume the process command timeout`() = runBlocking {
+        val client = ProcessClient(blockPageLoad = true, processListDelayMillis = 0)
+        val manager = connectedManager(client)
+        val sessionId = (manager.connectionState.value as AdbConnectionState.Connected).sessionId
+
+        val previousPage = async(Dispatchers.Default) { manager.executeShell("page-load") }
+        assertTrue(client.pageLoadStarted.await(2, TimeUnit.SECONDS))
+        val refresh = async(Dispatchers.Default) {
+            manager.refreshProcesses(sessionId, 100.milliseconds)
+        }
+        delay(200)
+        client.releasePageLoad.countDown()
+
+        assertTrue(previousPage.await() is AdbOperationResult.Success)
+        assertTrue(refresh.await() is AdbOperationResult.Success)
+        assertTrue(manager.connectionState.value is AdbConnectionState.Connected)
+    }
+
+    @Test
+    fun `remote metric fallback applies timeout per child command instead of to the whole sample`() = runBlocking {
+        val client = MissingMetricProcessClient(commandDelayMillis = 300)
+        val manager = DefaultAdbSessionManager(SingleFactory(client), Dispatchers.IO)
+        assertTrue(manager.connect(AdbEndpoint("device.local", 37001)) is AdbOperationResult.Success)
+        val sessionId = (manager.connectionState.value as AdbConnectionState.Connected).sessionId
+
+        val result = manager.refreshProcesses(sessionId, 1.seconds)
+
+        assertTrue(result is AdbOperationResult.Success)
+        assertTrue((result as AdbOperationResult.Success).value.single().cpuPercent != null)
+        assertTrue(manager.connectionState.value is AdbConnectionState.Connected)
+    }
+
+    @Test
     fun `session switch rejects in flight process snapshot`() = runBlocking {
         val first = ProcessClient()
         val second = ProcessClient()
@@ -80,6 +121,23 @@ class ProcessSessionManagerTest {
         assertTrue(current.sessionId != firstSession)
     }
 
+    @Test
+    fun `refresh samples proc counters when rom ps omits cpu while retaining rss`() = runBlocking {
+        val client = MissingMetricProcessClient()
+        val manager = DefaultAdbSessionManager(SingleFactory(client), Dispatchers.IO)
+        assertTrue(manager.connect(AdbEndpoint("device.local", 37001)) is AdbOperationResult.Success)
+        val sessionId = (manager.connectionState.value as AdbConnectionState.Connected).sessionId
+
+        val result = manager.refreshProcesses(sessionId, 5.seconds)
+
+        assertTrue(result is AdbOperationResult.Success)
+        val entry = (result as AdbOperationResult.Success).value.single()
+        assertEquals(entry.cpuPercent, 20.0)
+        assertEquals(entry.pssMiB, 2.0)
+        assertEquals(client.commands.count { it == AdbCommands.PROCESS_COUNTERS }, 2)
+        assertTrue(AdbCommands.PROCESSES_FALLBACK in client.commands)
+    }
+
     private suspend fun connectedManager(client: ProcessClient): DefaultAdbSessionManager {
         val manager = DefaultAdbSessionManager(SingleFactory(client), Dispatchers.IO)
         assertTrue(manager.connect(AdbEndpoint("device.local", 37001)) is AdbOperationResult.Success)
@@ -88,21 +146,33 @@ class ProcessSessionManagerTest {
 
     private class ProcessClient(
         private val blockCounters: Boolean = false,
+        private val blockPageLoad: Boolean = false,
+        private val processListDelayMillis: Long = 250,
     ) : AdbProtocolClient {
         val commands = CopyOnWriteArrayList<String>()
         val commandClosed = AtomicBoolean(false)
         val clientClosed = AtomicBoolean(false)
         val firstCounter = CountDownLatch(1)
         val counterStarted = CountDownLatch(1)
+        val pageLoadStarted = CountDownLatch(1)
+        val releasePageLoad = CountDownLatch(1)
         private val counterCalls = AtomicInteger(0)
+        private val processListCalls = AtomicInteger(0)
 
         override fun execute(command: String): ProtocolShellResponse = scripted(command)
 
         override fun openShellCommand(command: String): ProtocolShellCommand = object : ProtocolShellCommand {
             override fun execute(): ProtocolShellResponse {
-                if (command.startsWith("awk '/^cpu /")) {
+                if (command == "page-load" && blockPageLoad) {
+                    pageLoadStarted.countDown()
+                    releasePageLoad.await(2, TimeUnit.SECONDS)
+                }
+                if (command == AdbCommands.PROCESSES_EXTENDED) {
                     counterStarted.countDown()
-                    if (blockCounters) Thread.sleep(10_000)
+                    if (processListCalls.incrementAndGet() == 1) {
+                        firstCounter.countDown()
+                        if (blockCounters) Thread.sleep(10_000) else Thread.sleep(processListDelayMillis)
+                    }
                 }
                 return scripted(command)
             }
@@ -119,7 +189,8 @@ class ProcessSessionManagerTest {
                 command.startsWith("pm list packages -3 -U") -> "package:com.example.client uid:10123\n"
                 command.startsWith("pm list packages -3 -d") -> ""
                 command == AdbCommands.PROCESSES_EXTENDED ->
-                    "USER PID PPID VSZ RSS S NAME\nu0_a123 101 1 1000 64 S com.example.client\n"
+                    "USER PID PPID VSZ RSS S NAME %CPU STIME\n" +
+                        "u0_a123 101 1 1000 64 S com.example.client 12.5 08:42\n"
                 command.startsWith("awk '/^cpu /") -> {
                     val call = counterCalls.incrementAndGet()
                     firstCounter.countDown()
@@ -136,6 +207,43 @@ class ProcessSessionManagerTest {
         override fun close() {
             clientClosed.set(true)
         }
+    }
+
+    private class MissingMetricProcessClient(
+        private val commandDelayMillis: Long = 0,
+    ) : AdbProtocolClient {
+        val commands = CopyOnWriteArrayList<String>()
+        private val counterCalls = AtomicInteger()
+
+        override fun execute(command: String): ProtocolShellResponse {
+            commands += command
+            if (command in setOf(
+                    AdbCommands.PROCESSES_EXTENDED,
+                    AdbCommands.PROCESSES_FALLBACK,
+                    AdbCommands.PROCESS_COUNTERS,
+                    AdbCommands.CORES,
+                )
+            ) {
+                Thread.sleep(commandDelayMillis)
+            }
+            val stdout = when (command) {
+                AdbCommands.PROCESSES_EXTENDED ->
+                    "USER PID PPID NAME\nu0_a123 101 1 com.example.client\n"
+                AdbCommands.PROCESSES_FALLBACK ->
+                    "USER PID PPID VSZ RSS S NAME\nu0_a123 101 1 1000 2048 S com.example.client\n"
+                AdbCommands.PROCESS_COUNTERS -> if (counterCalls.incrementAndGet() == 1) {
+                    "total 1000\n101 900 100 20\n"
+                } else {
+                    "total 1100\n101 900 115 25\n"
+                }
+                AdbCommands.CORES -> "1\n"
+                else -> ""
+            }
+            return ProtocolShellResponse(stdout, "", 0, streamsSeparated = true, wasTruncated = false)
+        }
+
+        override fun openShellStream(command: String): ProtocolShellStream = error("unused")
+        override fun close() = Unit
     }
 
     private class SingleFactory(private val client: AdbProtocolClient) : AdbProtocolClientFactory {

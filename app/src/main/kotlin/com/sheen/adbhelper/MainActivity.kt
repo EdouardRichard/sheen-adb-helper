@@ -5,13 +5,24 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.lifecycleScope
 import com.sheen.adb.feature.files.FilesViewModel
 import com.sheen.adb.feature.overview.OverviewViewModel
 import com.sheen.adb.ui.SheenTheme
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.getValue
+
+private const val FILE_PICKER_RETURN_STABILITY_MILLIS = 500L
 
 class MainActivity : ComponentActivity() {
+    private val hostForegroundState = MutableStateFlow(false)
+
     private val overviewViewModel by viewModels<OverviewViewModel> {
         val container = (application as SheenApplication).container
         object : ViewModelProvider.Factory {
@@ -34,10 +45,32 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val container = (application as SheenApplication).container
-        setContent { SheenTheme { SheenApp(container, filesViewModel, overviewViewModel) } }
+        setContent {
+            val hostForeground by hostForegroundState.collectAsStateWithLifecycle()
+            SheenTheme {
+                SheenApp(
+                    container = container,
+                    files = filesViewModel,
+                    overview = overviewViewModel,
+                    hostForeground = hostForeground,
+                )
+            }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        hostForegroundState.value = true
+        lifecycleScope.launch {
+            delay(FILE_PICKER_RETURN_STABILITY_MILLIS)
+            if (lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) {
+                filesViewModel.onHostStarted()
+            }
+        }
     }
 
     override fun onStop() {
+        hostForegroundState.value = false
         if (shouldCancelFileTasksOnStop(isChangingConfigurations)) {
             filesViewModel.onHostStopped(isChangingConfigurations = false)
         }

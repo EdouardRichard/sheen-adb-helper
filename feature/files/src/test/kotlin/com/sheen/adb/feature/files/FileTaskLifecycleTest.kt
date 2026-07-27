@@ -13,6 +13,7 @@ import com.sheen.adb.core.RemoteFileTransferReceipt
 import com.sheen.adb.core.RemoteUploadCommitReceipt
 import com.sheen.adb.core.RemoteUploadPlan
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.InputStream
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -30,6 +31,74 @@ import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
 
 class FileTaskLifecycleTest {
+    @Test
+    fun `system picker stop preserves file page session work until the result returns`() {
+        val viewModel = File("src/main/kotlin/com/sheen/adb/feature/files/FilesViewModel.kt").readText()
+        val visibility = viewModel.substringAfter("fun onPageVisible")
+            .substringBefore("\n    fun ")
+        val hostStop = viewModel.substringAfter("fun onHostStopped")
+            .substringBefore("\n    fun ")
+
+        assertTrue(
+            visibility.contains("pickerLifecycleLease") &&
+                visibility.indexOf("pickerLifecycleLease") < visibility.indexOf("cancelLoad()"),
+            "Opening SAF must not cancel an in-flight directory child stream and destabilize the shared Session.",
+        )
+        assertTrue(
+            hostStop.contains("!pickerLifecycleLease") &&
+                hostStop.indexOf("!pickerLifecycleLease") < hostStop.indexOf("cancelActiveTask()"),
+            "The host stop caused by SAF belongs to the picker lease, not to real app background cancellation.",
+        )
+        assertTrue(
+            viewModel.contains("fun onHostStarted()") &&
+                viewModel.contains("pickerLifecycleLease = false"),
+            "The picker lease must be released only when the host Activity actually starts again.",
+        )
+    }
+
+    @Test
+    fun `picker and preparation stay unlocked while io and uncertain cleanup remain locked`() {
+        val picker = FilesUiState(
+            sessionId = "session-one",
+            pickerRequest = FilePickerRequest.UploadSource,
+        )
+        val preparing = stateWithTask(FileTaskStatus.Preparing)
+        val transferring = stateWithTask(FileTaskStatus.Transferring(1L, 10L))
+        val succeeded = stateWithTask(FileTaskStatus.Succeeded)
+        val cleanupFailed = stateWithTask(
+            FileTaskStatus.CleanupFailed(
+                FileTaskError(
+                    category = FileTaskErrorCategory.CLEANUP_FAILED,
+                    userMessage = "safe message",
+                    nextStep = "safe next step",
+                    technicalCode = "CLEANUP_FAILED",
+                ),
+            ),
+        )
+
+        assertFalse(picker.navigationLocked)
+        assertFalse(preparing.navigationLocked)
+        assertTrue(transferring.navigationLocked)
+        assertFalse(succeeded.navigationLocked)
+        assertTrue(cleanupFailed.navigationLocked)
+        assertFalse(cleanupFailed.deliveryState?.cleanupConfirmed == true)
+        assertTrue(cleanupFailed.deliveryState?.resourceUncertain == true)
+    }
+
+    @Test
+    fun `stale terminal result cannot unlock current session transfer`() {
+        val current = stateWithTask(FileTaskStatus.Transferring(4L, 8L))
+        val stale = FileTaskLifecycle.transition(
+            state = current,
+            taskId = "task-one",
+            sessionId = "old-session",
+            status = FileTaskStatus.Succeeded,
+        )
+
+        assertSame(stale, current)
+        assertTrue(stale.navigationLocked)
+    }
+
     @Test
     fun `cancelling an awaiting conflict surfaces staging cleanup failure`() = runBlocking {
         val remote = FakeTransferGateway().apply {
@@ -95,7 +164,8 @@ class FileTaskLifecycleTest {
             "CLEANUP_FAILED",
         )
         val cleanupUi = fileTaskPresentation(stateWithTask(FileTaskStatus.CleanupFailed(cleanupError)))
-        assertEquals(cleanupUi?.errorMessage, "临时文件清理失败")
+        assertEquals(cleanupUi?.errorMessage, "CLEANUP_FAILED")
+        assertEquals(cleanupUi?.errorNextStep, null)
         assertTrue(cleanupUi?.canDismiss == true)
         assertFalse(cleanupUi?.canCancel == true)
     }
@@ -124,6 +194,7 @@ class FileTaskLifecycleTest {
         remote.finishUpload.complete(Unit)
         awaitState { viewModel.state.value.activeTask?.status == FileTaskStatus.Succeeded }
         assertTrue(remote.leaseReleased)
+        awaitState { remote.loadCalls >= 2 }
         scope.cancel()
     }
 
@@ -137,6 +208,7 @@ class FileTaskLifecycleTest {
         awaitState { viewModel.state.value.sessionId == "session" }
         viewModel.requestUpload()
         viewModel.onUploadSourceSelected("source")
+        viewModel.onHostStarted()
         awaitState { viewModel.state.value.activeTask?.status is FileTaskStatus.Transferring }
 
         viewModel.onHostStopped(isChangingConfigurations = true)
@@ -340,6 +412,7 @@ class FileTaskLifecycleTest {
         var conflictExists = false
         var cleanupFailure = false
         var uploadFailure = false
+        var loadCalls = 0
 
         override suspend fun acquireFileLease(sessionId: String): AdbOperationResult<ExclusiveAdbOperationLease> {
             leaseActive = true
@@ -356,8 +429,10 @@ class FileTaskLifecycleTest {
             })
         }
 
-        override suspend fun load(path: String?, sessionId: String): AdbOperationResult<RemoteDirectorySnapshot> =
-            AdbOperationResult.Cancelled
+        override suspend fun load(path: String?, sessionId: String): AdbOperationResult<RemoteDirectorySnapshot> {
+            loadCalls++
+            return AdbOperationResult.Cancelled
+        }
 
         override suspend fun prepareUpload(directory: String, displayName: String, sessionId: String) =
             AdbOperationResult.Success(
@@ -428,6 +503,7 @@ class FileTaskLifecycleTest {
             conflictExists = false
             cleanupFailure = false
             uploadFailure = false
+            loadCalls = 0
         }
     }
 

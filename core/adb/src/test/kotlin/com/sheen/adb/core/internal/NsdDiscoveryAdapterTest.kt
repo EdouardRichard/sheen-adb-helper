@@ -16,6 +16,7 @@ import com.sheen.adb.core.internal.discovery.NsdDiscoveryStartResult
 import com.sheen.adb.core.internal.discovery.NsdNetworkChangeCallbacks
 import com.sheen.adb.core.internal.discovery.NsdNetworkRef
 import com.sheen.adb.core.internal.discovery.NsdPlatformFailure
+import com.sheen.adb.core.internal.discovery.NsdPlatformOverloadPolicy
 import com.sheen.adb.core.internal.discovery.NsdPlatformOperationException
 import com.sheen.adb.core.internal.discovery.NsdPlatformResource
 import com.sheen.adb.core.internal.discovery.NsdResolvedService
@@ -29,6 +30,16 @@ import org.testng.annotations.DataProvider
 import org.testng.annotations.Test
 
 class NsdDiscoveryAdapterTest {
+    @Test
+    fun `Android local domain suffix is normalized for connect service discovery`() {
+        val service = NsdServiceRef(
+            serviceType = "_adb-tls-connect._tcp.local.",
+            serviceName = "connect-service-synthetic-local-domain",
+        )
+
+        assertEquals(service.serviceType, "_adb-tls-connect._tcp")
+    }
+
     @DataProvider(name = "legacyApiLevels")
     fun legacyApiLevels(): Array<Array<Any>> = arrayOf(
         arrayOf(30),
@@ -92,7 +103,11 @@ class NsdDiscoveryAdapterTest {
         assertEquals(bound.adapter.start(request(generation = 330L, apiLevel = 33, network = network)), NsdDiscoveryStartResult.Started)
         assertEquals(bound.platform.discoveries.map { it.network }.toSet(), setOf(network))
         assertEquals(bound.platform.networkChanges.map { it.network }.toSet(), setOf(network))
-        assertTrue(bound.platform.multicastLocks.isEmpty())
+        assertEquals(
+            bound.platform.multicastLocks.size,
+            1,
+            "Network-bound NSD still needs the Wi-Fi multicast lock for cross-device advertisements.",
+        )
 
         bound.platform.discoveryFor(WirelessServiceType.CONNECT).callbacks.onServiceFound(CONNECT_SERVICE)
         assertEquals(bound.platform.resolves.single().network, network)
@@ -120,7 +135,7 @@ class NsdDiscoveryAdapterTest {
         assertEquals(fixture.platform.discoveries.map { it.network }.toSet(), setOf(network))
         assertEquals(fixture.platform.resolves.single().network, network)
         assertEquals(fixture.platform.networkChanges.map { it.network }.toSet(), setOf(network))
-        assertTrue(fixture.platform.multicastLocks.isEmpty())
+        assertEquals(fixture.platform.multicastLocks.size, 1)
         assertEquals(fixture.observedServices.single().addresses, ADDRESSES)
         assertEquals(fixture.observedServices.single().status, WirelessServiceStatus.RESOLVED)
     }
@@ -148,7 +163,25 @@ class NsdDiscoveryAdapterTest {
         assertTrue(
             fixture.scheduler.delays.single() > NsdDiscoveryPolicy.DEFAULT_LAN_DISCOVERY_CUTOFF_MILLIS,
         )
+        assertEquals(fixture.platform.discoveries.map { it.network }.toSet(), setOf(null))
+        assertEquals(fixture.platform.multicastLocks.size, 1)
+        assertTrue(fixture.platform.networkChanges.isEmpty())
         fixture.adapter.stop()
+    }
+
+    @Test
+    fun `API 33 plus local pairing uses the unbound NSD overload while LAN discovery stays network bound`() {
+        listOf(33, 34, 36).forEach { apiLevel ->
+            assertFalse(
+                NsdPlatformOverloadPolicy.useNetworkBoundOverload(apiLevel, network = null),
+                "Local pairing must not require a Network when the policy deliberately starts unbound discovery.",
+            )
+            assertTrue(
+                NsdPlatformOverloadPolicy.useNetworkBoundOverload(apiLevel, NETWORK_GAMMA),
+                "LAN discovery must keep using the network-bound overload on modern Android.",
+            )
+        }
+        assertFalse(NsdPlatformOverloadPolicy.useNetworkBoundOverload(32, NETWORK_GAMMA))
     }
 
     @Test
@@ -182,12 +215,16 @@ class NsdDiscoveryAdapterTest {
                 val pending = fixture.openPendingResolves()
                 val timeout = fixture.scheduler.scheduled.single().resource
                 val networkChange = fixture.platform.networkChanges.single()
-                assertTrue(fixture.platform.multicastLocks.isEmpty())
+                val multicastLock = fixture.platform.multicastLocks.single()
 
                 terminalAction(fixture)
                 terminalAction(fixture)
 
-                pending.assertAllReleased(timeout = timeout, networkChange = networkChange)
+                pending.assertAllReleased(
+                    timeout = timeout,
+                    multicastLock = multicastLock,
+                    networkChange = networkChange,
+                )
                 pending.sendLateCallbacks()
                 assertTrue(fixture.observedServices.isEmpty())
             }
@@ -201,12 +238,16 @@ class NsdDiscoveryAdapterTest {
         val pending = fixture.openPendingResolves()
         val timeout = fixture.scheduler.scheduled.single().resource
         val networkChange = fixture.platform.networkChanges.single()
-        assertTrue(fixture.platform.multicastLocks.isEmpty())
+        val multicastLock = fixture.platform.multicastLocks.single()
 
         networkChange.callbacks.onNetworkChanged(NsdNetworkRef("network-synthetic-replacement"))
         networkChange.callbacks.onNetworkChanged(NsdNetworkRef("network-synthetic-replacement"))
 
-        pending.assertAllReleased(timeout = timeout, networkChange = networkChange)
+        pending.assertAllReleased(
+            timeout = timeout,
+            multicastLock = multicastLock,
+            networkChange = networkChange,
+        )
         pending.sendLateCallbacks()
         assertTrue(fixture.observedServices.isEmpty())
     }
@@ -231,7 +272,7 @@ class NsdDiscoveryAdapterTest {
             pending.pairingDiscovery.callbacks.onDiscoveryFailure(NsdPlatformFailure.DISCOVERY_FAILED)
 
             pending.assertAllReleased(timeout, multicastLock = lock, networkChange = networkChange)
-            if (apiLevel >= 33) assertTrue(fixture.platform.multicastLocks.isEmpty())
+            if (apiLevel >= 33) assertTrue(lock != null)
             assertEquals(fixture.failures, listOf(NsdDiscoveryFailure.PLATFORM_DISCOVERY_FAILED))
             pending.sendLateCallbacks()
             assertTrue(fixture.observedServices.isEmpty())
@@ -239,7 +280,7 @@ class NsdDiscoveryAdapterTest {
     }
 
     @Test
-    fun `resolve failure releases both registrations all pending resolves and reports only a safe structured failure`() {
+    fun `stale resolve failure stays local until the discovery window owns cleanup`() {
         val fixture = fixture()
         fixture.adapter.start(request(generation = 660L, apiLevel = 30))
         val pending = fixture.openPendingResolves()
@@ -249,10 +290,25 @@ class NsdDiscoveryAdapterTest {
         pending.pairingResolve.callbacks.onResolveFailure(NsdPlatformFailure.RESOLVE_FAILED)
         pending.pairingResolve.callbacks.onResolveFailure(NsdPlatformFailure.RESOLVE_FAILED)
 
+        assertTrue(fixture.failures.isEmpty())
+        fixture.scheduler.scheduled.single().action()
         pending.assertAllReleased(timeout = timeout, multicastLock = lock)
-        assertEquals(fixture.failures, listOf(NsdDiscoveryFailure.PLATFORM_RESOLVE_FAILED))
         pending.sendLateCallbacks()
         assertTrue(fixture.observedServices.isEmpty())
+    }
+
+    @Test
+    fun `stale pairing resolution does not suppress an Android 11 plus connect service`() {
+        val fixture = fixture()
+        fixture.adapter.start(request(generation = 663L, apiLevel = 33, network = NETWORK_GAMMA))
+        val pending = fixture.openPendingResolves()
+
+        pending.pairingResolve.callbacks.onResolveFailure(NsdPlatformFailure.RESOLVE_FAILED)
+        pending.connectResolve.callbacks.onResolved(resolvedService(CONNECT_SERVICE, ADDRESSES))
+
+        assertTrue(fixture.failures.isEmpty())
+        assertEquals(fixture.observedServices.single().serviceType, WirelessServiceType.CONNECT)
+        assertEquals(fixture.events.single().generation, 663L)
     }
 
     @Test
@@ -333,10 +389,14 @@ class NsdDiscoveryAdapterTest {
         val oldPending = fixture.openPendingResolves()
         val oldTimeout = fixture.scheduler.scheduled.single().resource
         val oldNetworkChange = fixture.platform.networkChanges.single()
-        assertTrue(fixture.platform.multicastLocks.isEmpty())
+        val oldMulticastLock = fixture.platform.multicastLocks.single()
 
         fixture.adapter.start(request(generation = 701L, apiLevel = 33, network = NETWORK_DELTA))
-        oldPending.assertAllReleased(timeout = oldTimeout, networkChange = oldNetworkChange)
+        oldPending.assertAllReleased(
+            timeout = oldTimeout,
+            multicastLock = oldMulticastLock,
+            networkChange = oldNetworkChange,
+        )
         oldPending.sendLateCallbacks()
 
         assertTrue(fixture.observedServices.isEmpty())

@@ -15,6 +15,46 @@ import org.testng.annotations.Test
 
 class LogcatAnalysisTest {
     @Test
+    fun `fatal and android assert priorities normalize to the fatal severity`() {
+        val fatal = StructuredLogcatParser.parse(
+            sequence = 20,
+            rawText = threadtime('F'),
+            fromStandardError = false,
+        )
+        val androidAssert = StructuredLogcatParser.parse(
+            sequence = 21,
+            rawText = threadtime('A'),
+            fromStandardError = false,
+        )
+
+        assertEquals(fatal.kind, StructuredLogcatKind.PARSED)
+        assertEquals(fatal.level, StructuredLogcatLevel.FATAL)
+        assertEquals(androidAssert.kind, StructuredLogcatKind.PARSED)
+        assertEquals(androidAssert.level, StructuredLogcatLevel.FATAL)
+    }
+
+    @Test
+    fun `unknown priority and unstructured lines never invent a severity`() {
+        val unknownPriority = StructuredLogcatParser.parse(
+            sequence = 22,
+            rawText = threadtime('S'),
+            fromStandardError = false,
+        )
+        val unstructured = StructuredLogcatParser.parse(
+            sequence = 23,
+            rawText = "synthetic marker with words error fatal and warning",
+            fromStandardError = false,
+        )
+
+        assertEquals(unknownPriority.kind, StructuredLogcatKind.UNPARSED)
+        assertNull(unknownPriority.level)
+        assertNull(unknownPriority.tag)
+        assertEquals(unstructured.kind, StructuredLogcatKind.UNPARSED)
+        assertNull(unstructured.level)
+        assertNull(unstructured.tag)
+    }
+
+    @Test
     fun `parses modern threadtime fields without losing raw text`() {
         val raw = "07-23 10:11:12.345  10123  2345  6789 I FixtureTag: synthetic message"
 
@@ -122,4 +162,7 @@ class LogcatAnalysisTest {
         assertTrue(buffer.size < 5)
         assertTrue(buffer.latest(DiagnosticFilterCriteria(), limit = 100).size <= buffer.size)
     }
+
+    private fun threadtime(priority: Char): String =
+        "07-23 10:11:12.345  10123  2345  6789 $priority FixtureTag: synthetic marker"
 }

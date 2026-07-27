@@ -268,6 +268,14 @@ class DevicesPairingReducerTest {
         assertTrue(ordinaryLeave.effects.single() is DevicesPairingEffect.StopLocalWindow)
         assertFalse(ordinaryLeave.state.localWindowActive)
         assertEquals(ordinaryLeave.state.phase, PairingAttemptPhase.CANCELLED)
+        assertEquals(
+            ordinaryLeave.state.localDiscoveryStatus,
+            LocalPairingDiscoveryStatus.STOPPED,
+        )
+        assertEquals(
+            ordinaryLeave.state.localNotificationState,
+            LocalPairingNotificationState.RESULT,
+        )
 
         val inactive = reduce(
             active.copy(localWindowActive = false),
@@ -312,6 +320,104 @@ class DevicesPairingReducerTest {
         assertFalse("java.io.Serializable" in interfaces)
         assertFalse("android.os.Parcelable" in interfaces)
         assertTrue(fieldNames.none { it.contains("payload") || it.contains("secret") })
+    }
+
+    @Test
+    fun `switching a ready QR overlay to code starts one bounded port scan before input`() {
+        val qrSelected = reduce(event = DevicesPairingEvent.SelectMethod(PairingMethod.QR))
+        val qrStarted = reduce(qrSelected.state, DevicesPairingEvent.StartRequested)
+        val qrReady = reduce(
+            qrStarted.state,
+            DevicesPairingEvent.QrPrepared(QrMatrix(1, booleanArrayOf(true))),
+        )
+
+        val switched = reduce(
+            qrReady.state,
+            DevicesPairingEvent.SelectMethod(PairingMethod.SIX_DIGIT_CODE),
+        )
+
+        assertEquals(switched.state.method, PairingMethod.SIX_DIGIT_CODE)
+        assertEquals(switched.state.phase, PairingAttemptPhase.PREPARING)
+        assertEquals(switched.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+        assertEquals(
+            switched.effects.map { it::class.java.simpleName },
+            listOf("StartPairingPortDiscovery"),
+        )
+        assertEquals(switched.state.codeInput, "")
+        assertNull(switched.state.qrMatrix)
+
+        val found = reduce(
+            switched.state,
+            DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.FOUND),
+        )
+        assertEquals(found.state.phase, PairingAttemptPhase.WAITING_FOR_CODE)
+        assertTrue(found.state.applicationInputAvailable)
+        assertTrue(found.effects.isEmpty())
+    }
+
+    @Test
+    fun `port scan timeout stops and waits for one explicit non overlapping retry`() {
+        val scanning = DevicesPairingState(
+            method = PairingMethod.SIX_DIGIT_CODE,
+            phase = PairingAttemptPhase.PREPARING,
+            localDiscoveryStatus = LocalPairingDiscoveryStatus.SEARCHING,
+        )
+
+        val timedOut = reduce(scanning, DevicesPairingEvent.Expired)
+        assertEquals(timedOut.state.phase, PairingAttemptPhase.EXPIRED)
+        assertEquals(timedOut.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.STOPPED)
+        assertTrue(timedOut.effects.single() is DevicesPairingEffect.CancelCurrent)
+
+        val passive = reduce(timedOut.state, DevicesPairingEvent.LocalDiscoveryChanged(LocalPairingDiscoveryStatus.FOUND))
+        assertEquals(passive.state, timedOut.state)
+        assertTrue(passive.effects.isEmpty(), "timeout must not auto-rescan")
+
+        val retried = reduce(timedOut.state, DevicesPairingEvent.RetryLocalMode)
+        assertEquals(retried.state.phase, PairingAttemptPhase.PREPARING)
+        assertEquals(retried.state.localDiscoveryStatus, LocalPairingDiscoveryStatus.SEARCHING)
+        assertEquals(
+            retried.effects.map { it::class.java.simpleName },
+            listOf("StartPairingPortDiscovery"),
+        )
+
+        val duplicateRetry = reduce(retried.state, DevicesPairingEvent.RetryLocalMode)
+        assertEquals(duplicateRetry.state, retried.state)
+        assertTrue(duplicateRetry.effects.isEmpty(), "an active retry must reject a concurrent retry")
+    }
+
+    @Test
+    fun `only exactly six ASCII digits can create one explicit submit effect`() {
+        val waiting = DevicesPairingState(
+            method = PairingMethod.SIX_DIGIT_CODE,
+            phase = PairingAttemptPhase.WAITING_FOR_CODE,
+            localDiscoveryStatus = LocalPairingDiscoveryStatus.FOUND,
+            applicationInputAvailable = true,
+        )
+
+        listOf(
+            "",
+            "12345",
+            "1234567",
+            "１２３４５６",
+            "12a456",
+        ).forEach { input ->
+            val changed = reduce(waiting, DevicesPairingEvent.CodeChanged(input))
+            assertTrue(changed.effects.isEmpty(), "input changes must never submit: $input")
+            val submitted = reduce(changed.state, DevicesPairingEvent.SubmitCode)
+            assertTrue(submitted.effects.isEmpty(), "invalid input must never submit: $input")
+            assertEquals(submitted.state.codeInput, "")
+        }
+
+        val changed = reduce(waiting, DevicesPairingEvent.CodeChanged("123456"))
+        assertTrue(changed.effects.isEmpty(), "six digits enable presentation but do not auto-submit")
+        val submitted = reduce(changed.state, DevicesPairingEvent.SubmitCode)
+        assertEquals(submitted.effects.count { it is DevicesPairingEffect.SubmitCode }, 1)
+        assertEquals(submitted.state.phase, PairingAttemptPhase.PAIRING)
+        assertEquals(submitted.state.codeInput, "")
+
+        val repeated = reduce(submitted.state, DevicesPairingEvent.SubmitCode)
+        assertTrue(repeated.effects.isEmpty(), "rapid repeated Pair must not create another request")
+        assertEquals(repeated.state.codeInput, "")
     }
 
     private fun reduce(

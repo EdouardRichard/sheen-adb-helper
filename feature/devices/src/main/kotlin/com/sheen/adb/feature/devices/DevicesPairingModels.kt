@@ -50,6 +50,7 @@ internal sealed interface DevicesPairingEvent {
     data class SelectMethod(val method: PairingMethod) : DevicesPairingEvent
 
     data object StartRequested : DevicesPairingEvent
+    data object StartCodeDiscoveryRequested : DevicesPairingEvent
 
     class QrPrepared(val matrix: QrMatrix) : DevicesPairingEvent {
         override fun toString(): String = "QrPrepared(redacted)"
@@ -108,6 +109,7 @@ internal interface DevicesPairingEffect {
     ) : DevicesPairingEffect
 
     data object CancelCurrent : DevicesPairingEffect
+    data object StartPairingPortDiscovery : DevicesPairingEffect
     data object StartLocalWindow : DevicesPairingEffect
     data object RequestNotificationPermission : DevicesPairingEffect
     data object KeepLocalWindow : DevicesPairingEffect

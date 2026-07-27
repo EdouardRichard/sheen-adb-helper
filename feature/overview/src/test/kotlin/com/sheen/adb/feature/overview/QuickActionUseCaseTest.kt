@@ -15,6 +15,7 @@ import com.sheen.adb.core.RebootRequest
 import com.sheen.adb.core.ScreenRecordRequest
 import com.sheen.adb.core.ScreenshotCaptureRequest
 import com.sheen.adb.data.ExportDestination
+import java.io.File
 import java.lang.reflect.Proxy
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -171,6 +172,63 @@ class QuickActionUseCaseTest {
 
         forbidden.forEach { assertFalse(signatures.contains(it), "Leaked forbidden type: $it") }
     }
+
+    @Test
+    fun `picker is unlocked while persistent writing and cleanup uncertainty lock navigation`() {
+        val source = quickActionLifecycleSource()
+        listOf(
+            "AWAITING_DESTINATION",
+            "WRITING",
+            "CANCELLING",
+            "CLEANING",
+            "navigationLocked",
+            "cleanupConfirmed",
+            "resourceUncertain",
+        ).forEach { token ->
+            assertTrue(source.contains(token), "missing Overview output-lifecycle token $token")
+        }
+        assertTrue(
+            Regex("AWAITING_DESTINATION[\\s\\S]{0,240}navigationLocked[\\s\\S]{0,80}false")
+                .containsMatchIn(source),
+            "opening, browsing, or cancelling the destination picker must remain unlocked",
+        )
+        assertTrue(
+            Regex("WRITING[\\s\\S]{0,240}navigationLocked[\\s\\S]{0,80}true")
+                .containsMatchIn(source),
+            "the lock must start when persistent output writing starts",
+        )
+    }
+
+    @Test
+    fun `background cancellation keeps ownership until cleanup is known safe`() {
+        val source = quickActionLifecycleSource()
+        listOf(
+            "onHostStopped",
+            "isChangingConfigurations",
+            "cancel",
+            "cleanupConfirmed",
+            "resourceUncertain",
+        ).forEach { token ->
+            assertTrue(source.contains(token), "missing background-cleanup contract $token")
+        }
+        assertTrue(
+            Regex(
+                "isChangingConfigurations[\\s\\S]{0,500}(return|false)[\\s\\S]{0,1000}(cancel|CANCELLING)",
+                RegexOption.IGNORE_CASE,
+            ).containsMatchIn(source),
+            "real backgrounding must cancel active output work without treating configuration change as background",
+        )
+        assertTrue(
+            source.contains("resourceUncertain") && source.contains("navigationLocked"),
+            "uncertain cleanup must retain Overview task ownership and its navigation lock",
+        )
+    }
+
+    private fun quickActionLifecycleSource(): String = listOf(
+        "src/main/kotlin/com/sheen/adb/feature/overview/QuickActionModels.kt",
+        "src/main/kotlin/com/sheen/adb/feature/overview/QuickActionUseCase.kt",
+        "src/main/kotlin/com/sheen/adb/feature/overview/OverviewViewModel.kt",
+    ).joinToString("\n") { path -> File(path).readText() }
 
     private class FakeQuickActionDataGateway : QuickActionDataGateway {
         data class Completion(

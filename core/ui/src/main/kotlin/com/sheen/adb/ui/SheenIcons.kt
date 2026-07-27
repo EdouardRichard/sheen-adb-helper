@@ -81,6 +81,77 @@ object SheenIcons {
     val Folder: ImageVector by lazy { icon("Folder") {
         polygon(2f, 6f, 9f, 6f, 11f, 8f, 22f, 8f, 22f, 20f, 2f, 20f)
     } }
+    val File: ImageVector by lazy { outlineIcon("File") {
+        moveTo(6f, 2f); lineTo(14f, 2f); lineTo(19f, 7f); lineTo(19f, 22f)
+        lineTo(6f, 22f); close()
+        moveTo(14f, 2f); lineTo(14f, 7f); lineTo(19f, 7f)
+    } }
+    val NavigateNext: ImageVector by lazy { outlineIcon("NavigateNext") {
+        moveTo(9f, 5f); lineTo(16f, 12f); lineTo(9f, 19f)
+    } }
+    val Search: ImageVector by lazy { outlineIcon("Search") {
+        circle(10f, 10f, 6f); moveTo(14.5f, 14.5f); lineTo(21f, 21f)
+    } }
+    val Download: ImageVector by lazy { outlineIcon("Download") {
+        moveTo(12f, 3f); lineTo(12f, 15f)
+        moveTo(7f, 10f); lineTo(12f, 15f); lineTo(17f, 10f)
+        moveTo(4f, 19f); lineTo(20f, 19f)
+    } }
+    val UploadToDevice: ImageVector by lazy { outlineIcon("UploadToDevice") {
+        roundedRect(4f, 3f, 20f, 22f, 2f)
+        moveTo(12f, 17f); lineTo(12f, 7f)
+        moveTo(8f, 11f); lineTo(12f, 7f); lineTo(16f, 11f)
+        moveTo(9f, 19f); lineTo(15f, 19f)
+    } }
+    val Disable: ImageVector by lazy { outlineIcon("Disable") {
+        circle(12f, 12f, 9f); moveTo(5.6f, 5.6f); lineTo(18.4f, 18.4f)
+    } }
+    val Enable: ImageVector by lazy { outlineIcon("Enable") {
+        circle(12f, 12f, 9f)
+        moveTo(7.5f, 12f); lineTo(10.5f, 15f); lineTo(17f, 8.5f)
+    } }
+    val ForceStop: ImageVector by lazy { icon("ForceStop") {
+        roundedRect(5f, 5f, 19f, 19f, 2f)
+    } }
+    val Uninstall: ImageVector by lazy { outlineIcon("Uninstall") {
+        moveTo(5f, 7f); lineTo(19f, 7f)
+        moveTo(9f, 7f); lineTo(9f, 4f); lineTo(15f, 4f); lineTo(15f, 7f)
+        roundedRect(7f, 7f, 17f, 21f, 1f)
+        moveTo(10f, 11f); lineTo(10f, 17f); moveTo(14f, 11f); lineTo(14f, 17f)
+    } }
+    val Delete: ImageVector by lazy { outlineIcon("Delete") {
+        moveTo(4f, 7f); lineTo(20f, 7f)
+        moveTo(9f, 7f); lineTo(9f, 4f); lineTo(15f, 4f); lineTo(15f, 7f)
+        moveTo(7f, 7f); lineTo(8f, 21f); lineTo(16f, 21f); lineTo(17f, 7f)
+    } }
+    val ArrowUp: ImageVector by lazy { outlineIcon("ArrowUp") {
+        moveTo(5f, 15f); lineTo(12f, 8f); lineTo(19f, 15f)
+    } }
+    val ArrowDown: ImageVector by lazy { outlineIcon("ArrowDown") {
+        moveTo(5f, 9f); lineTo(12f, 16f); lineTo(19f, 9f)
+    } }
+    val KeyboardReturn: ImageVector by lazy { outlineIcon("KeyboardReturn") {
+        moveTo(20f, 6f); lineTo(20f, 13f)
+        curveTo(20f, 15f, 18f, 17f, 16f, 17f)
+        lineTo(5f, 17f)
+        moveTo(9f, 13f); lineTo(5f, 17f); lineTo(9f, 21f)
+    } }
+    val Filter: ImageVector by lazy { outlineIcon("Filter") {
+        moveTo(3f, 5f); lineTo(21f, 5f); lineTo(14f, 13f)
+        lineTo(14f, 20f); lineTo(10f, 18f); lineTo(10f, 13f); close()
+    } }
+    val Clear: ImageVector by lazy { outlineIcon("Clear") {
+        moveTo(5f, 6f); lineTo(19f, 20f); moveTo(19f, 6f); lineTo(5f, 20f)
+    } }
+    val Stop: ImageVector by lazy { icon("Stop") {
+        roundedRect(6f, 6f, 18f, 18f, 1f)
+    } }
+    val Refresh: ImageVector by lazy { outlineIcon("Refresh") {
+        moveTo(20f, 7f); lineTo(20f, 12f); lineTo(15f, 12f)
+        curveTo(14f, 7f, 8f, 5f, 5f, 9f)
+        moveTo(4f, 17f); lineTo(4f, 12f); lineTo(9f, 12f)
+        curveTo(10f, 17f, 16f, 19f, 19f, 15f)
+    } }
     val Apps: ImageVector by lazy { gridIcon("Apps", 3) }
     val Processes: ImageVector by lazy { icon("Processes") {
         repeat(3) { row -> circle(5f, 6f + row * 6f, 1.4f); rect(9f, 5f + row * 6f, 21f, 7f + row * 6f) }

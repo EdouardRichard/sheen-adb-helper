@@ -11,6 +11,25 @@ enum class QuickActionArtifactFormat {
     MP4,
 }
 
+enum class QuickActionOutputPhase(
+    val navigationLocked: Boolean,
+) {
+    AWAITING_DESTINATION(navigationLocked = false),
+    WRITING(navigationLocked = true),
+    CANCELLING(navigationLocked = true),
+    CLEANING(navigationLocked = true),
+    COMPLETE(navigationLocked = false),
+}
+
+data class QuickActionOutputLifecycle(
+    val phase: QuickActionOutputPhase = QuickActionOutputPhase.COMPLETE,
+    val cleanupConfirmed: Boolean = true,
+    val resourceUncertain: Boolean = false,
+) {
+    val navigationLocked: Boolean
+        get() = phase.navigationLocked || resourceUncertain
+}
+
 data class QuickActionArtifactRef(
     val opaqueId: String,
     val sessionId: String? = null,

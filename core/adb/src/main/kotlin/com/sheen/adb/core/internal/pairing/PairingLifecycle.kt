@@ -5,9 +5,13 @@ import com.sheen.adb.core.PairingAttemptPhase
 import com.sheen.adb.core.PairingAttemptState
 import com.sheen.adb.core.PairingCommandRejection
 import com.sheen.adb.core.PairingCommandResult
+import com.sheen.adb.core.PairingDiscoveryPhase
+import com.sheen.adb.core.PairingDiscoveryState
+import com.sheen.adb.core.PairingEndpointHandle
 import com.sheen.adb.core.PairingFailure
 import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.PairingSecret
+import com.sheen.adb.core.WirelessServiceType
 import java.util.concurrent.CancellationException
 
 internal fun interface MonotonicClock {
@@ -16,6 +20,115 @@ internal fun interface MonotonicClock {
 
 internal fun interface PairingAction {
     fun pair(method: PairingMethod, secret: CharArray)
+}
+
+internal fun interface PairingDiscoverySource {
+    fun start(
+        attemptId: PairingAttemptId,
+        serviceType: WirelessServiceType,
+        onResolved: (PairingEndpointHandle) -> Unit,
+    ): AutoCloseable
+}
+
+internal class PairingDiscoveryWindow(
+    private val nowMillis: () -> Long,
+    private val source: PairingDiscoverySource,
+) : AutoCloseable {
+    private val lock = Any()
+    private var activeSource: AutoCloseable? = null
+    private var generation: Long = 0L
+    private var closed = false
+
+    var state: PairingDiscoveryState = PairingDiscoveryState()
+        private set
+
+    fun start(attemptId: PairingAttemptId): Boolean = synchronized(lock) {
+        if (closed || state.phase != PairingDiscoveryPhase.IDLE) return@synchronized false
+        begin(attemptId)
+    }
+
+    fun retry(attemptId: PairingAttemptId): Boolean = synchronized(lock) {
+        if (closed || state.phase !in RETRYABLE_PHASES || activeSource != null) return@synchronized false
+        begin(attemptId)
+    }
+
+    fun onClockAdvanced() = synchronized(lock) {
+        if (state.phase == PairingDiscoveryPhase.SCANNING && nowMillis() >= state.deadlineMillis) {
+            finish(PairingDiscoveryPhase.TIMED_OUT)
+        }
+    }
+
+    fun cancel() = synchronized(lock) {
+        if (state.phase == PairingDiscoveryPhase.SCANNING) {
+            finish(PairingDiscoveryPhase.CANCELLED)
+        }
+    }
+
+    override fun close() {
+        synchronized(lock) {
+            if (closed) return
+            closed = true
+            generation += 1L
+            activeSource?.close()
+            activeSource = null
+            state = state.copy(
+                phase = PairingDiscoveryPhase.CANCELLED,
+                endpointHandle = null,
+            )
+        }
+    }
+
+    private fun begin(attemptId: PairingAttemptId): Boolean {
+        generation += 1L
+        val ownerGeneration = generation
+        val deadline = nowMillis() + PAIRING_DISCOVERY_WINDOW_MILLIS
+        state = PairingDiscoveryState(
+            attemptId = attemptId,
+            phase = PairingDiscoveryPhase.SCANNING,
+            deadlineMillis = deadline,
+        )
+        activeSource = try {
+            source.start(
+                attemptId = attemptId,
+                serviceType = WirelessServiceType.PAIRING,
+                onResolved = { handle ->
+                    synchronized(lock) {
+                        if (ownerGeneration == generation &&
+                            state.attemptId == attemptId &&
+                            state.phase == PairingDiscoveryPhase.SCANNING
+                        ) {
+                            activeSource?.close()
+                            activeSource = null
+                            state = state.copy(
+                                phase = PairingDiscoveryPhase.RESOLVED,
+                                endpointHandle = handle,
+                            )
+                        }
+                    }
+                },
+            )
+        } catch (_: Exception) {
+            state = state.copy(phase = PairingDiscoveryPhase.FAILED, endpointHandle = null)
+            null
+        }
+        return state.phase == PairingDiscoveryPhase.SCANNING
+    }
+
+    private fun finish(phase: PairingDiscoveryPhase) {
+        generation += 1L
+        activeSource?.close()
+        activeSource = null
+        state = state.copy(phase = phase, endpointHandle = null)
+    }
+
+    private companion object {
+        const val PAIRING_DISCOVERY_WINDOW_MILLIS = 30_000L
+        val RETRYABLE_PHASES = setOf(
+            PairingDiscoveryPhase.TIMED_OUT,
+            PairingDiscoveryPhase.CANCELLED,
+            PairingDiscoveryPhase.FAILED,
+        )
+    }
 }
 
 internal class PairingLifecycle(

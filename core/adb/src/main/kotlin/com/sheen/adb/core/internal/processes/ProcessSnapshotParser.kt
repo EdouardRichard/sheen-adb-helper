@@ -24,7 +24,10 @@ internal object ProcessSnapshotParser {
         val user = idx(listOf("USER", "UID"))
         val pid = idx(listOf("PID"))
         val ppid = idx(listOf("PPID"))
+        val rss = idx(listOf("RSS"))
         val name = idx(listOf("NAME", "CMD", "COMMAND"))
+        val directCpu = idx(listOf("%CPU", "PCPU"))
+        val startMarker = idx(listOf("STIME"))
         return lines.drop(1).mapNotNull { line ->
             val f = line.split(Regex("\\s+"))
             val p = f.getOrNull(pid)?.toIntOrNull()?.takeIf { it > 0 } ?: return@mapNotNull null
@@ -37,10 +40,22 @@ internal object ProcessSnapshotParser {
                 elapsedTotalTicks = elapsedTotalTicks,
                 processorCount = processorCount,
             )
-            val resolvedCpu = sampledCpu.value ?: cpuPercent?.coerceIn(0.0, 100.0)
+            val reportedCpu = f.getOrNull(directCpu)
+                ?.removeSuffix("%")
+                ?.toDoubleOrNull()
+                ?.coerceIn(0.0, 100.0)
+            val resolvedCpu = sampledCpu.value ?: reportedCpu ?: cpuPercent?.coerceIn(0.0, 100.0)
             val pssKiB = pssKiBByPid[p]?.takeIf { it >= 0L }
+                ?: f.getOrNull(rss)?.toLongOrNull()?.takeIf { it >= 0L }
             ProcessSnapshotEntry(
-                identity = ProcessIdentity(sessionId, p, startTimeTicksByPid[p], uidValue, n, generation),
+                identity = ProcessIdentity(
+                    sessionId,
+                    p,
+                    startTimeTicksByPid[p] ?: f.getOrNull(startMarker)?.stableStartMarker(),
+                    uidValue,
+                    n,
+                    generation,
+                ),
                 cpuPercent = resolvedCpu,
                 cpuState = when {
                     resolvedCpu != null -> ProcessFieldState.AVAILABLE
@@ -78,4 +93,7 @@ internal object ProcessSnapshotParser {
     )
 
     private const val KIB_PER_MIB = 1024.0
+
+    private fun String.stableStartMarker(): Long? =
+        takeIf(String::isNotBlank)?.hashCode()?.toLong()?.and(0xFFFF_FFFFL)
 }

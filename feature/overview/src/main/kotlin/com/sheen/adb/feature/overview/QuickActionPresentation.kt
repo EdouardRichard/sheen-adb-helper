@@ -58,6 +58,28 @@ sealed interface QuickActionUiState {
     ) : QuickActionUiState
 }
 
+internal val QuickActionUiState.statusKey: OverviewStringKey?
+    get() = when (this) {
+        QuickActionUiState.Idle,
+        is QuickActionUiState.Confirming,
+        -> null
+        is QuickActionUiState.Running -> when (kind) {
+            QuickActionKind.SCREENSHOT -> OverviewStringKey.CAPTURING_SCREENSHOT
+            QuickActionKind.SCREEN_RECORD -> if (isStopping) {
+                OverviewStringKey.FINALIZING_SCREEN_RECORD
+            } else {
+                OverviewStringKey.SCREEN_RECORDING
+            }
+            QuickActionKind.REBOOT -> OverviewStringKey.REBOOT_REQUESTED
+        }
+        is QuickActionUiState.AwaitingExport -> OverviewStringKey.AWAITING_DESTINATION
+        is QuickActionUiState.Exporting -> OverviewStringKey.SAVE_WRITING
+        is QuickActionUiState.Succeeded -> OverviewStringKey.SAVE_SUCCEEDED
+        is QuickActionUiState.Cancelled -> OverviewStringKey.SAVE_CANCELLED
+        is QuickActionUiState.Failed -> OverviewStringKey.SAVE_FAILED
+        is QuickActionUiState.ResultUnknown -> OverviewStringKey.OUTCOME_UNKNOWN
+    }
+
 sealed interface QuickActionPresentationEvent {
     data class StartRequested(val kind: QuickActionKind, val sessionId: String) :
         QuickActionPresentationEvent

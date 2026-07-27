@@ -124,6 +124,11 @@ internal class BoundedRemoteApkReader(
             .toList()
         val base = paths.singleOrNull { it.substringAfterLast('/') == BASE_APK_NAME }
         if (base != null) return BaseApkPath.Found(base)
+        val singleNamedBase = paths.singleOrNull()?.takeIf { path ->
+            path.endsWith(".apk", ignoreCase = true) &&
+                !path.substringAfterLast('/').startsWith(SPLIT_APK_PREFIX, ignoreCase = true)
+        }
+        if (singleNamedBase != null) return BaseApkPath.Found(singleNamedBase)
         return if (paths.any { it.endsWith(".apk", ignoreCase = true) }) {
             BaseApkPath.SplitOnly
         } else {
@@ -148,6 +153,7 @@ internal class BoundedRemoteApkReader(
     private companion object {
         const val PACKAGE_PREFIX = "package:"
         const val BASE_APK_NAME = "base.apk"
+        const val SPLIT_APK_PREFIX = "split_"
         const val MAX_REMOTE_PATH_CHARS = 4096
         const val MAX_PACKAGE_NAME_CHARS = 255
         val PACKAGE_NAME_PATTERN = Regex("[A-Za-z0-9_.]+")

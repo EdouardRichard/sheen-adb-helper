@@ -67,6 +67,29 @@ class DevicesConnectionViewModelTest {
     }
 
     @Test
+    fun `remote session loss clears stale connection success notice`() = connectionTest {
+        val manager = FakeManager()
+        val endpoint = AdbEndpoint("192.0.2.11", 45_011)
+        manager.connectBehavior = {
+            manager.publish(AdbConnectionState.Connecting(endpoint))
+            manager.publish(AdbConnectionState.Connected(endpoint, "session-remote-loss"))
+            AdbOperationResult.Success(Unit)
+        }
+        val viewModel = viewModel(manager)
+
+        viewModel.updateEndpoint("192.0.2.11:45011")
+        viewModel.connect()
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.notice?.isNotBlank() == true)
+
+        manager.publish(AdbConnectionState.Disconnected())
+        runCurrent()
+
+        assertNull(viewModel.state.value.notice)
+        assertTrue(viewModel.state.value.connectionState is AdbConnectionState.Disconnected)
+    }
+
+    @Test
     fun `invalid endpoint performs zero manager operations`() = connectionTest {
         val manager = FakeManager()
         val viewModel = viewModel(manager)
@@ -130,6 +153,18 @@ class DevicesConnectionViewModelTest {
     }
 
     @Test
+    fun `legacy tcp adb port allows time for RSA authorization`() = connectionTest {
+        val manager = FakeManager()
+        val viewModel = viewModel(manager)
+
+        viewModel.updateEndpoint("192.0.2.55:5555")
+        viewModel.connect()
+        advanceUntilIdle()
+
+        assertEquals(manager.connectTimeouts.single(), encodedDuration(30.seconds))
+    }
+
+    @Test
     fun `rotation background and process recreation derive state from actual Session`() = connectionTest {
         val endpointA = AdbEndpoint("192.0.2.40", 45_040)
         val endpointB = AdbEndpoint("192.0.2.41", 45_041)
@@ -157,6 +192,22 @@ class DevicesConnectionViewModelTest {
     }
 
     @Test
+    fun `every newly connected Session is recorded once regardless of connection entry point`() = connectionTest {
+        val endpoint = AdbEndpoint("192.0.2.42", 45_042)
+        val manager = FakeManager()
+        val repository = FakeRepository()
+        viewModel(manager, repository)
+        runCurrent()
+
+        manager.publish(AdbConnectionState.Connected(endpoint, "session-discovered"))
+        runCurrent()
+        manager.publish(AdbConnectionState.Connected(endpoint, "session-discovered"))
+        runCurrent()
+
+        assertEquals(repository.recordedEndpoints, listOf(endpoint))
+    }
+
+    @Test
     fun `old connection result cannot overwrite a newer Session`() = connectionTest {
         val requested = AdbEndpoint("192.0.2.50", 45_050)
         val current = AdbEndpoint("192.0.2.51", 45_051)
@@ -177,7 +228,7 @@ class DevicesConnectionViewModelTest {
             "session-new",
         )
         assertNull(viewModel.state.value.notice)
-        assertEquals(repository.recordedEndpoints, emptyList<AdbEndpoint>())
+        assertEquals(repository.recordedEndpoints, listOf(current))
         assertEquals(manager.connectEndpoints, listOf(requested))
     }
 
@@ -201,6 +252,20 @@ class DevicesConnectionViewModelTest {
         assertEquals(manager.disconnectTimeouts, listOf(encodedDuration(5.seconds)))
         assertTrue(viewModel.state.value.connectionState is AdbConnectionState.Error)
         assertFalse(viewModel.state.value.notice.orEmpty().contains("已断开"))
+    }
+
+    @Test
+    fun `successful disconnect relies on connection state without a duplicate notice`() = connectionTest {
+        val endpoint = AdbEndpoint("192.0.2.61", 45_061)
+        val manager = FakeManager(AdbConnectionState.Connected(endpoint, "session-disconnect-success"))
+        val viewModel = viewModel(manager)
+        runCurrent()
+
+        viewModel.disconnect()
+        advanceUntilIdle()
+
+        assertTrue(viewModel.state.value.connectionState is AdbConnectionState.Disconnected)
+        assertNull(viewModel.state.value.notice)
     }
 
     private fun connectionTest(block: suspend TestScope.() -> Unit) = runTest {

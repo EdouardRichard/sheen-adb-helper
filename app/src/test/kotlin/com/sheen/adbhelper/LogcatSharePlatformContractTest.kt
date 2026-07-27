@@ -8,7 +8,7 @@ import org.testng.annotations.Test
 
 class LogcatSharePlatformContractTest {
     @Test
-    fun `logcat provider is non exported and limited to share cache directory`() {
+    fun `logcat provider stays constrained while v1 download uses a SAF output directory`() {
         val manifest = String(Files.readAllBytes(Path.of("src/main/AndroidManifest.xml")))
         val paths = String(Files.readAllBytes(Path.of("src/main/res/xml/logcat_share_paths.xml")))
         val app = String(Files.readAllBytes(Path.of("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt")))
@@ -23,9 +23,10 @@ class LogcatSharePlatformContractTest {
         assertTrue(paths.contains("logcat-share/"))
         assertFalse(paths.contains("path=\".\""))
         assertFalse(paths.contains("files-path"))
-        assertTrue(vm.contains("Intent.ACTION_SEND"))
-        assertTrue(vm.contains("Intent.EXTRA_STREAM"))
-        assertTrue(vm.contains("FLAG_GRANT_READ_URI_PERMISSION"))
+        assertTrue(vm.contains("ActivityResultContracts.OpenDocumentTree()"))
+        assertTrue(vm.contains("actions.prepareSaveSelection()"))
+        assertTrue(vm.contains("actions.onSaveTreeSelected"))
+        assertFalse(vm.contains("Intent.ACTION_SEND"))
         assertFalse(app.contains("ACTION_SEND_MULTIPLE"))
     }
 }

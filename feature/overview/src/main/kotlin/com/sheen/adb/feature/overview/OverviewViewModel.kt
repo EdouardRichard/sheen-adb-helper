@@ -42,6 +42,8 @@ class OverviewViewModel(
     private val quickActionReducer = QuickActionPresentationReducer()
     private val mutableQuickActionState = MutableStateFlow<QuickActionUiState>(QuickActionUiState.Idle)
     val quickActionState: StateFlow<QuickActionUiState> = mutableQuickActionState.asStateFlow()
+    private val mutableOutputLifecycle = MutableStateFlow(QuickActionOutputLifecycle())
+    val outputLifecycle: StateFlow<QuickActionOutputLifecycle> = mutableOutputLifecycle.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -60,6 +62,7 @@ class OverviewViewModel(
                     QuickActionPresentationEvent.SessionChanged(connected?.sessionId),
                 )
                 if (changed) {
+                    cancelOutputForCleanup()
                     quickActionJob?.cancel()
                     quickActionStopJob?.cancel()
                 }
@@ -91,6 +94,8 @@ class OverviewViewModel(
             }
         }
     }
+
+    fun dismissError() = mutableState.update { it.copy(error = null) }
 
     fun requestScreenshot() = startCapture(QuickActionKind.SCREENSHOT)
 
@@ -126,35 +131,56 @@ class OverviewViewModel(
     fun exportQuickAction(destination: ExportDestination?) {
         val awaiting = mutableQuickActionState.value as? QuickActionUiState.AwaitingExport ?: return
         val useCase = quickActions ?: return
+        if (destination == null) {
+            markOutputPhase(QuickActionOutputPhase.AWAITING_DESTINATION)
+            return
+        }
         reduceQuickAction(
             QuickActionPresentationEvent.ExportStarted(awaiting.kind, awaiting.sessionId),
         )
+        markOutputPhase(QuickActionOutputPhase.WRITING)
         quickActionJob = viewModelScope.launch {
-            when (val result = useCase.export(awaiting.artifact, destination)) {
-                is QuickActionExportResult.Succeeded -> reduceQuickAction(
-                    QuickActionPresentationEvent.ExportSucceeded(
-                        awaiting.kind,
-                        awaiting.sessionId,
-                        result.destinationName,
-                    ),
+            try {
+                when (val result = useCase.export(awaiting.artifact, destination)) {
+                    is QuickActionExportResult.Succeeded -> reduceQuickAction(
+                        QuickActionPresentationEvent.ExportSucceeded(
+                            awaiting.kind,
+                            awaiting.sessionId,
+                            result.destinationName,
+                        ),
+                    )
+                    QuickActionExportResult.Cancelled -> reduceQuickAction(
+                        QuickActionPresentationEvent.Cancelled(
+                            awaiting.kind,
+                            awaiting.sessionId,
+                            "export-cancelled",
+                        ),
+                    )
+                    is QuickActionExportResult.Failed -> reduceQuickAction(
+                        QuickActionPresentationEvent.Failed(
+                            awaiting.kind,
+                            awaiting.sessionId,
+                            result.reason,
+                            result.technicalCode,
+                        ),
+                    )
+                }
+            } finally {
+                markOutputPhase(
+                    phase = QuickActionOutputPhase.CLEANING,
+                    cleanupConfirmed = false,
+                    resourceUncertain = false,
                 )
-                QuickActionExportResult.Cancelled -> reduceQuickAction(
-                    QuickActionPresentationEvent.Cancelled(
-                        awaiting.kind,
-                        awaiting.sessionId,
-                        "export-cancelled",
-                    ),
-                )
-                is QuickActionExportResult.Failed -> reduceQuickAction(
-                    QuickActionPresentationEvent.Failed(
-                        awaiting.kind,
-                        awaiting.sessionId,
-                        result.reason,
-                        result.technicalCode,
-                    ),
-                )
+                markOutputPhase(QuickActionOutputPhase.COMPLETE)
             }
         }
+    }
+
+    fun onHostStopped(isChangingConfigurations: Boolean) {
+        if (isChangingConfigurations) return
+        if (!mutableOutputLifecycle.value.navigationLocked) return
+        cancelOutputForCleanup()
+        quickActionJob?.cancel()
     }
 
     private fun startWork() {
@@ -303,7 +329,31 @@ class OverviewViewModel(
                     result.technicalCode,
                 )
         }
+        if (event is QuickActionPresentationEvent.ArtifactReady) {
+            markOutputPhase(QuickActionOutputPhase.AWAITING_DESTINATION)
+        }
         reduceQuickAction(event)
+    }
+
+    private fun cancelOutputForCleanup() {
+        if (!mutableOutputLifecycle.value.navigationLocked) return
+        markOutputPhase(
+            phase = QuickActionOutputPhase.CANCELLING,
+            cleanupConfirmed = false,
+            resourceUncertain = true,
+        )
+    }
+
+    private fun markOutputPhase(
+        phase: QuickActionOutputPhase,
+        cleanupConfirmed: Boolean = phase == QuickActionOutputPhase.COMPLETE,
+        resourceUncertain: Boolean = false,
+    ) {
+        mutableOutputLifecycle.value = QuickActionOutputLifecycle(
+            phase = phase,
+            cleanupConfirmed = cleanupConfirmed,
+            resourceUncertain = resourceUncertain,
+        )
     }
 
     private fun reduceQuickAction(event: QuickActionPresentationEvent) {
@@ -320,6 +370,7 @@ class OverviewViewModel(
     }
 
     override fun onCleared() {
+        cancelOutputForCleanup()
         quickActionStopJob?.cancel()
         quickActionJob?.cancel()
         stopWork()

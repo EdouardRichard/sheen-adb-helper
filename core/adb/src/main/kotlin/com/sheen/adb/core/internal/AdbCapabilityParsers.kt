@@ -14,12 +14,12 @@ internal object AdbCommands {
     const val UPTIME = "cat /proc/uptime"
     const val CORES = "getconf _NPROCESSORS_ONLN"
     const val NETWORK = "ip -o addr show scope global"
-    const val PROCESSES_EXTENDED = "ps -A -o USER,PID,PPID,VSZ,RSS,S,NAME"
+    const val PROCESSES_EXTENDED = "ps -A -o USER,PID,PPID,VSZ,RSS,S,NAME,PCPU,STIME"
     const val PROCESSES_FALLBACK = "ps -A"
     val PROCESS_COUNTERS =
         "awk '/^cpu /{s=0; for(i=2;i<=NF;i++) s+=${'$'}i; print \"total\",s; exit}' /proc/stat; " +
             "for d in /proc/[0-9]*; do p=${'$'}{d##*/}; r=${'$'}(cat \"${'$'}d/stat\" 2>/dev/null) || continue; " +
-            "r=${'$'}{r##*) }; set -- ${'$'}r; echo \"${'$'}p ${'$'}20 ${'$'}12 ${'$'}13\"; done"
+            "r=${'$'}{r##*) }; set -- ${'$'}r; echo \"${'$'}p ${'$'}{20} ${'$'}{12} ${'$'}{13}\"; done"
     val PROCESS_PSS =
         "for d in /proc/[0-9]*; do p=${'$'}{d##*/}; " +
             "v=${'$'}(awk '/^Pss:/{print ${'$'}2; exit}' \"${'$'}d/smaps_rollup\" 2>/dev/null); " +

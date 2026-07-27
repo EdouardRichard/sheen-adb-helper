@@ -1,92 +1,99 @@
 package com.sheen.adb.feature.logcat
 
-import com.sheen.adb.core.StructuredLogcatLevel
+import com.sheen.adb.ui.SafeVerbatimPolicy
+import com.sheen.adb.ui.SafeVerbatimText
+import java.io.File
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
-import java.nio.file.Files
-import java.nio.file.Path
 
 class LogcatPresentationTest {
-    @Test
-    fun `screen exposes extraction controls without analysis or pause controls`() {
-        val source = String(
-            Files.readAllBytes(Path.of("src/main/kotlin/com/sheen/adb/feature/logcat/LogcatScreen.kt")),
-        )
-        assertTrue(source.contains("Logcat 日志提取"))
-        assertTrue(source.contains("本版本不提供日志筛选、进程关联或分析"))
-        assertFalse(source.contains("结果等级筛选"))
-        assertFalse(source.contains("清除全部筛选"))
-        assertFalse(source.contains("暂停"))
-    }
-    @Test
-    fun `presentation exposes extraction without analysis controls`() {
-        assertTrue(LogcatPresentationPolicy.controls.isEmpty())
-        assertTrue(LogcatPresentationPolicy.filterSummary(LogcatAnalysisFilter()).contains("提取"))
-    }
+    private val screen =
+        File("src/main/kotlin/com/sheen/adb/feature/logcat/LogcatScreen.kt")
 
     @Test
-    fun `filter summary states AND semantics without echoing sensitive query content`() {
-        val filter = LogcatAnalysisFilter(
-            levels = setOf(StructuredLogcatLevel.INFO, StructuredLogcatLevel.ERROR),
-            tagQuery = "fixture-tag",
-            keyword = "synthetic-message",
-            pidQuery = "123",
-            processQuery = "fixture-process",
-            applicationQuery = "com.example.fixture",
-        )
-
-        val summary = LogcatPresentationPolicy.filterSummary(filter)
-
-        assertTrue(summary.contains("提取"))
-        assertFalse(summary.contains("fixture", ignoreCase = true))
-        assertFalse(summary.contains("com.example", ignoreCase = true))
+    fun `screen follows html utility bar and log surface structure`() {
+        val source = screen.readText()
+        listOf(
+            "height(48.dp)",
+            "OutlinedTextField",
+            "listOf(\"all\", \"debug\", \"info\", \"error\")",
+            "SheenIcons.Delete",
+            "SheenIcons.Download",
+            "LazyColumn",
+            "Color.Black",
+            "horizontalScroll",
+            "padding(16.dp)",
+            "FontFamily.Monospace",
+            "fontSize = 12.sp",
+            "lineHeight = 18.sp",
+        ).forEach { token -> assertTrue(source.contains(token), "missing Logcat HTML token $token") }
+        assertFalse(source.contains("\"fatal\""), "Fatal must not become a fifth toolbar button")
     }
 
     @Test
-    fun `status distinguishes disconnected loading empty truncated degraded and stopped`() {
-        assertEquals(
-            LogcatPresentationPolicy.status(LogcatUiState()),
-            LogcatPresentationStatus.DISCONNECTED,
-        )
-        assertEquals(
-            LogcatPresentationPolicy.status(
-                LogcatUiState(isConnected = true, isCapturing = true, status = LogcatAnalysisStatus.LOADING_PROCESSES),
-            ),
-            LogcatPresentationStatus.LOADING,
-        )
-        assertEquals(
-            LogcatPresentationPolicy.status(LogcatUiState(isConnected = true, status = LogcatAnalysisStatus.READY)),
-            LogcatPresentationStatus.EMPTY,
-        )
-        assertEquals(
-            LogcatPresentationPolicy.status(LogcatUiState(isConnected = true, droppedOldest = true)),
-            LogcatPresentationStatus.TRUNCATED,
-        )
-        assertEquals(
-            LogcatPresentationPolicy.status(LogcatUiState(isConnected = true, parseDegraded = true)),
-            LogcatPresentationStatus.PARSE_DEGRADED,
-        )
-        assertEquals(
-            LogcatPresentationPolicy.status(LogcatUiState(isConnected = true, status = LogcatAnalysisStatus.STOPPED)),
-            LogcatPresentationStatus.STOPPED,
-        )
+    fun `screen represents all collection save and responsive states`() {
+        val source = screen.readText()
+        listOf(
+            "NeverStarted",
+            "Loading",
+            "Content",
+            "Empty",
+            "Error",
+            "Cancelled",
+            "Disconnected",
+            "Unsupported",
+            "OutcomeUnknown",
+            "Progress",
+            "LimitTime",
+            "LimitBytes",
+            "ProcessSecondaryPane",
+            "BoxWithConstraints",
+            "MaterialTheme.colorScheme.surfaceContainerLow",
+        ).forEach { token -> assertTrue(source.contains(token), "missing Logcat state token $token") }
     }
 
     @Test
-    fun `copy and export presentation uses current visible content and explicit user action`() {
-        val state = LogcatUiState(
-            isConnected = true,
-            visibleLines = listOf("synthetic-visible-1", "synthetic-visible-2"),
+    fun `hostile log text is bounded for display without changing raw save identity`() {
+        val raw = "line\u0000\u202E\n" + "payload".repeat(2_000)
+        val saveIdentity = raw.toCharArray().copyOf()
+
+        val display = SafeVerbatimText.render(raw, SafeVerbatimPolicy.SingleLine(512))
+
+        assertEquals(raw.toCharArray().toList(), saveIdentity.toList())
+        assertTrue(display.truncated)
+        assertTrue(display.replacementCount >= 2)
+        assertTrue(display.display.startsWith("\u2066") && display.display.endsWith("\u2069"))
+        assertFalse(display.display.contains('\n'))
+
+        val source = screen.readText()
+        assertTrue(source.contains("SafeVerbatimText"))
+        assertTrue(source.contains("rawWindowSnapshot"))
+        assertFalse(source.contains("visibleRecords.joinToString"), "screen must not export filtered rows")
+    }
+
+    @Test
+    fun `filter text stays visible and log viewport owns one shared horizontal scroll`() {
+        val source = screen.readText()
+        val utilityBar = source.substringAfter("private fun LogcatUtilityBar")
+            .substringBefore("@Composable\nprivate fun LevelButton")
+        val logSurface = source.substringAfter("private fun LogSurface")
+            .substringBefore("@Composable\nprivate fun LogcatStatePanel")
+
+        assertTrue(utilityBar.contains("LocalContentColor.current"))
+        assertTrue(utilityBar.contains("cursorColor"))
+        assertTrue(utilityBar.contains("widthIn(min = 128.dp)"))
+        assertTrue(logSurface.contains("val horizontalScrollState = rememberScrollState()"))
+        assertEquals(
+            logSurface.windowed("rememberScrollState()".length).count { it == "rememberScrollState()" },
+            1,
+            "the log viewport must create exactly one horizontal scroll state",
         )
-
-        val transfer = LogcatPresentationPolicy.visibleTransfer(state)
-
-        assertTrue(transfer.enabled)
-        assertTrue(transfer.requiresExplicitUserAction)
-        assertEquals(transfer.text, "synthetic-visible-1\nsynthetic-visible-2")
-        assertEquals(transfer.recordCount, 2)
-        assertFalse(LogcatPresentationPolicy.visibleTransfer(state.copy(visibleLines = emptyList())).enabled)
+        assertTrue(logSurface.contains("horizontalScroll(horizontalScrollState)"))
+        assertFalse(
+            Regex("itemsIndexed[\\s\\S]*rememberScrollState\\(\\)").containsMatchIn(logSurface),
+            "rows must not own independent horizontal scroll positions",
+        )
     }
 }

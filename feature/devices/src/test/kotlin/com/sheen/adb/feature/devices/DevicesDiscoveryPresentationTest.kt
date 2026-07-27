@@ -156,7 +156,7 @@ class DevicesDiscoveryPresentationTest {
         ).toDiscoveryPresentation()
 
         assertEquals(presentation.items.size, 2)
-        assertTrue(presentation.items.first().relationText.contains("尚未验证关联"))
+        assertTrue(presentation.items.first().relationText.contains("需先配对"))
         assertFalse(presentation.items.first().relationText.contains("已连接"))
         assertTrue(presentation.items.last().statusText.contains("离线"))
         assertTrue(presentation.items.last().actions.isEmpty())
@@ -216,6 +216,46 @@ class DevicesDiscoveryPresentationTest {
             assertFalse(chinese == english)
             assertFalse(english.any { it.code > 127 })
         }
+    }
+
+    @Test
+    fun `rows expose debug ports only and explain pair versus direct routing bilingually`() {
+        val dynamicTarget = target(4L, "dynamic")
+        val dynamic = item(1, generation = 4L).copy(
+            requiresPairing = true,
+            connectTarget = dynamicTarget,
+        )
+        val legacyTarget = target(4L, "legacy")
+        val legacy = item(2, generation = 4L).copy(
+            requiresPairing = false,
+            connectTarget = legacyTarget,
+        )
+
+        val dynamicEnglish = DevicesDiscoveryState(
+            phase = DevicesDiscoveryPhase.CONTENT,
+            generation = 4L,
+            items = listOf(dynamic),
+            pendingSelection = DevicesDiscoverySelection.Connect(dynamicTarget),
+        ).toDiscoveryPresentation(UiLanguage.EN_US)
+        val dynamicChinese = DevicesDiscoveryState(
+            phase = DevicesDiscoveryPhase.CONTENT,
+            generation = 4L,
+            items = listOf(dynamic),
+            pendingSelection = DevicesDiscoverySelection.Connect(dynamicTarget),
+        ).toDiscoveryPresentation(UiLanguage.ZH_CN)
+        val legacyEnglish = DevicesDiscoveryState(
+            phase = DevicesDiscoveryPhase.CONTENT,
+            generation = 4L,
+            items = listOf(legacy),
+            pendingSelection = DevicesDiscoverySelection.Connect(legacyTarget),
+        ).toDiscoveryPresentation(UiLanguage.EN_US)
+
+        assertEquals(dynamicEnglish.items.single().rolesText, "Debugging service")
+        assertFalse(dynamicEnglish.items.single().rolesText.contains("Pairing"))
+        assertTrue(dynamicEnglish.selectionMessage.contains("pair", ignoreCase = true))
+        assertTrue(dynamicChinese.selectionMessage.contains("配对"))
+        assertTrue(legacyEnglish.selectionMessage.contains("connect", ignoreCase = true))
+        assertFalse(legacyEnglish.selectionMessage.contains("pair", ignoreCase = true))
     }
 
     private fun item(

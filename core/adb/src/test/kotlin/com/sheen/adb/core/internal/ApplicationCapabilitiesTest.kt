@@ -1,6 +1,8 @@
 package com.sheen.adb.core.internal
 
 import com.sheen.adb.core.AndroidUidIdentity
+import com.sheen.adb.core.ApplicationAction
+import com.sheen.adb.core.ApplicationClassification
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertFalse
 import org.testng.Assert.assertNull
@@ -8,6 +10,64 @@ import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
 
 class ApplicationCapabilitiesTest {
+    @Test
+    fun `classification preserves ordinary system and unknown instead of guessing`() {
+        assertEquals(
+            ApplicationClassificationResolver.fromSystemFlag(false),
+            ApplicationClassification.ORDINARY,
+        )
+        assertEquals(
+            ApplicationClassificationResolver.fromSystemFlag(true),
+            ApplicationClassification.SYSTEM,
+        )
+        assertEquals(
+            ApplicationClassificationResolver.fromSystemFlag(null),
+            ApplicationClassification.UNKNOWN,
+        )
+    }
+
+    @Test
+    fun `ordinary applications expose extraction and direct mutations`() {
+        assertEquals(
+            ApplicationCapabilityPolicy.allowedActions(ApplicationClassification.ORDINARY),
+            setOf(
+                ApplicationAction.EXTRACT_APK,
+                ApplicationAction.SET_ENABLED,
+                ApplicationAction.FORCE_STOP,
+                ApplicationAction.UNINSTALL,
+            ),
+        )
+    }
+
+    @Test
+    fun `system and unknown applications allow extraction only and reject every direct mutation`() {
+        val restricted = listOf(
+            ApplicationClassification.SYSTEM,
+            ApplicationClassification.UNKNOWN,
+        )
+        val mutations = setOf(
+            ApplicationAction.SET_ENABLED,
+            ApplicationAction.FORCE_STOP,
+            ApplicationAction.UNINSTALL,
+        )
+
+        restricted.forEach { classification ->
+            assertEquals(
+                ApplicationCapabilityPolicy.allowedActions(classification),
+                setOf(ApplicationAction.EXTRACT_APK),
+            )
+            mutations.forEach { action ->
+                assertFalse(
+                    ApplicationCapabilityPolicy.isAllowed(classification, action),
+                    "$classification must defensively reject $action in core",
+                )
+            }
+            assertTrue(
+                ApplicationCapabilityPolicy.isAllowed(classification, ApplicationAction.EXTRACT_APK),
+            )
+        }
+    }
+
     @Test
     fun `current user parser accepts supported output and rejects ambiguous values`() {
         assertEquals(ApplicationParsers.currentUser("0\n"), 0)
@@ -24,11 +84,13 @@ class ApplicationCapabilitiesTest {
         assertTrue(ApplicationParsers.packageNames("") is PackageNamesParse.Empty)
 
         val parsed = ApplicationParsers.packageNames(
-            "package:com.example.alpha uid:10123\n" +
+            "package:android uid:1000\n" +
+                "package:com.example.alpha uid:10123\n" +
                 "package:com.example.alpha uid:10123\n" +
                 "package:org.example.beta\n",
         ) as PackageNamesParse.Success
-        assertEquals(parsed.names, linkedSetOf("com.example.alpha", "org.example.beta"))
+        assertEquals(parsed.names, linkedSetOf("android", "com.example.alpha", "org.example.beta"))
+        assertEquals(parsed.uidsByPackage["android"], 1000)
         assertEquals(parsed.uidsByPackage["com.example.alpha"], 10123)
         assertNull(parsed.uidsByPackage["org.example.beta"])
 
@@ -45,8 +107,9 @@ class ApplicationCapabilitiesTest {
     @Test
     fun `package validation is conservative and command arguments are fixed`() {
         assertTrue(ApplicationParsers.isValidPackageName("com.example_app.client2"))
+        assertTrue(ApplicationParsers.isValidPackageName("android"))
         assertFalse(ApplicationParsers.isValidPackageName(""))
-        assertFalse(ApplicationParsers.isValidPackageName("single"))
+        assertFalse(ApplicationParsers.isValidPackageName("ab"))
         assertFalse(ApplicationParsers.isValidPackageName("com.example;id"))
         assertFalse(ApplicationParsers.isValidPackageName("com.example\nid"))
         assertFalse(ApplicationParsers.isValidPackageName("com." + "a".repeat(260)))

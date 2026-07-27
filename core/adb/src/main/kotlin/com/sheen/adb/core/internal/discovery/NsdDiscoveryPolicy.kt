@@ -158,10 +158,16 @@ interface NsdDiscoveryPlatformGateway {
 
 class NsdDiscoveryPolicy {
     fun decisionFor(request: NsdDiscoveryRequest): NsdDiscoveryDecision? = when {
+        request.mode == WirelessDiscoveryMode.LOCAL_PAIRING -> NsdDiscoveryDecision(
+            network = null,
+            acquireMulticastLock = true,
+            observeNetworkChanges = false,
+            publishAllAddresses = request.apiLevel >= ALL_ADDRESSES_API,
+        )
         request.apiLevel >= NETWORK_BOUND_DISCOVERY_API && request.currentNetwork == null -> null
         request.apiLevel >= NETWORK_BOUND_DISCOVERY_API -> NsdDiscoveryDecision(
             network = request.currentNetwork,
-            acquireMulticastLock = false,
+            acquireMulticastLock = true,
             observeNetworkChanges = true,
             publishAllAddresses = request.apiLevel >= ALL_ADDRESSES_API,
         )
@@ -193,5 +199,12 @@ data class NsdDiscoveryDecision(
     val publishAllAddresses: Boolean,
 )
 
-private fun String.canonicalDnsSdType(): String =
-    if (endsWith('.') && !endsWith("..")) dropLast(1) else this
+internal object NsdPlatformOverloadPolicy {
+    fun useNetworkBoundOverload(apiLevel: Int, network: NsdNetworkRef?): Boolean =
+        apiLevel >= NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API && network != null
+}
+
+private fun String.canonicalDnsSdType(): String {
+    val withoutRootLabel = if (endsWith('.') && !endsWith("..")) dropLast(1) else this
+    return withoutRootLabel.removeSuffix(".local")
+}

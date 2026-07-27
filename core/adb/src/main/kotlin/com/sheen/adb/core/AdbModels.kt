@@ -1,5 +1,6 @@
 package com.sheen.adb.core
 
+import kotlinx.coroutines.flow.Flow
 import kotlin.time.Duration
 
 enum class QuickActionKind {
@@ -131,9 +132,11 @@ enum class AdbOperationStage {
     APPLICATIONS_LIST,
     APPLICATION_FORCE_STOP,
     APPLICATION_SET_ENABLED,
+    APPLICATION_UNINSTALL,
     APPLICATION_VERIFY,
     FILE_TRANSFER,
     APK_EXTRACTION,
+    APK_INSTALL,
     FILE_BROWSER,
     QUICK_ACTION,
     DISCONNECT,
@@ -142,6 +145,7 @@ enum class AdbOperationStage {
 enum class AdbExclusiveOperationKind(val stage: AdbOperationStage) {
     FILE_TRANSFER(AdbOperationStage.FILE_TRANSFER),
     APK_EXTRACTION(AdbOperationStage.APK_EXTRACTION),
+    APK_INSTALL(AdbOperationStage.APK_INSTALL),
     LOGCAT(AdbOperationStage.LOGCAT),
     QUICK_ACTION(AdbOperationStage.QUICK_ACTION),
 }
@@ -550,6 +554,85 @@ data class ShellResult(
 
 enum class ShellOutputMode { SEPARATED, MERGED }
 
+enum class TerminalModifier {
+    CTRL,
+    ALT,
+    CTRL_ALT,
+}
+
+sealed interface TerminalInput {
+    data class Text(val value: String) : TerminalInput
+    data object Submit : TerminalInput
+    data object Escape : TerminalInput
+    data object Tab : TerminalInput
+    data object ArrowUp : TerminalInput
+    data object ArrowDown : TerminalInput
+
+    data class Modified(
+        val modifier: TerminalModifier,
+        val input: TerminalInput,
+    ) : TerminalInput {
+        init {
+            require(input !is Modified) { "Terminal modifiers cannot be nested" }
+            require(input !is Submit) { "A modifier cannot be applied to command submission" }
+        }
+    }
+}
+
+enum class TerminalOutputKind {
+    STDOUT,
+    STDERR,
+    REMOTE_ACTIVE,
+    REMOTE_READY,
+    OUTPUT_CLOSED,
+}
+
+data class TerminalOutputEvent(
+    val expectedSessionId: String,
+    val streamGeneration: Long,
+    val kind: TerminalOutputKind,
+    val text: String = "",
+    val hadDecodingReplacement: Boolean = false,
+)
+
+enum class InteractiveShellCloseReason {
+    USER_REQUEST,
+    PAGE_HIDDEN,
+    APP_BACKGROUNDED,
+    SESSION_CHANGED,
+    DISCONNECTED,
+    CANCELLED,
+    TIMED_OUT,
+    REMOTE_CLOSED,
+    PROTOCOL_ERROR,
+}
+
+sealed interface InteractiveShellResult {
+    data object Accepted : InteractiveShellResult
+    data object Closed : InteractiveShellResult
+    data class TimedOut(val technicalCode: String = "INTERACTIVE_SHELL_TIMEOUT") : InteractiveShellResult
+    data class Cancelled(val technicalCode: String = "INTERACTIVE_SHELL_CANCELLED") : InteractiveShellResult
+    data class Unsupported(val technicalCode: String = "INTERACTIVE_SHELL_UNSUPPORTED") : InteractiveShellResult
+    data class OutcomeUnknown(
+        val technicalCode: String = "INTERACTIVE_SHELL_OUTCOME_UNKNOWN",
+    ) : InteractiveShellResult
+    data class Disconnected(val technicalCode: String = "INTERACTIVE_SHELL_DISCONNECTED") :
+        InteractiveShellResult
+    data class Failed(val technicalCode: String) : InteractiveShellResult
+}
+
+interface InteractiveShellSession {
+    val expectedSessionId: String
+    val streamGeneration: Long
+    val outputEvents: Flow<TerminalOutputEvent>
+
+    suspend fun sendSubmittedCommand(completeCommand: String): InteractiveShellResult
+
+    suspend fun sendTerminalInput(input: TerminalInput): InteractiveShellResult
+
+    suspend fun close(reason: InteractiveShellCloseReason): InteractiveShellResult
+}
+
 data class DeviceOverview(
     val brand: String? = null,
     val manufacturer: String? = null,
@@ -750,6 +833,19 @@ enum class ApplicationField {
     INSTALLER_PACKAGE,
 }
 
+enum class ApplicationClassification {
+    ORDINARY,
+    SYSTEM,
+    UNKNOWN,
+}
+
+enum class ApplicationAction {
+    EXTRACT_APK,
+    SET_ENABLED,
+    FORCE_STOP,
+    UNINSTALL,
+}
+
 data class RemoteApplication(
     val packageName: String,
     val userId: Int,
@@ -759,6 +855,8 @@ data class RemoteApplication(
     val installerPackage: String? = null,
     val isSystem: Boolean,
     val androidUid: Int? = null,
+    val classification: ApplicationClassification =
+        if (isSystem) ApplicationClassification.SYSTEM else ApplicationClassification.ORDINARY,
 ) {
     val uidIdentity: AndroidUidIdentity?
         get() = AndroidUidIdentity.fromRawUid(androidUid)
@@ -770,6 +868,7 @@ data class ApplicationSnapshot(
     val applications: List<RemoteApplication>,
     val unavailableFields: Set<ApplicationField>,
     val degradedReason: String? = null,
+    val generation: Long = 0L,
 )
 
 enum class RemoteFileKind { FILE, DIRECTORY, SYMLINK, OTHER }
@@ -826,6 +925,214 @@ data class FileTransferProgress(
         require(totalBytes == null || totalBytes >= 0L)
     }
 }
+
+enum class ApkComponentRole {
+    BASE,
+    SPLIT,
+}
+
+data class ApkComponent(
+    val componentId: String,
+    val role: ApkComponentRole,
+    val displayName: String,
+    val expectedSizeBytes: Long? = null,
+) {
+    init {
+        require(componentId.isNotBlank())
+        require(displayName.isNotBlank())
+        require(expectedSizeBytes == null || expectedSizeBytes >= 0L)
+    }
+}
+
+data class ApkExtractionRequest(
+    val expectedSessionId: String,
+    val userId: Int,
+    val packageName: String,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(userId >= 0)
+        require(packageName.isNotBlank())
+    }
+}
+
+data class ApkComponentTransferReceipt(
+    val expectedSessionId: String,
+    val componentId: String,
+    val transferredBytes: Long,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(componentId.isNotBlank())
+        require(transferredBytes >= 0L)
+    }
+}
+
+interface ApkExtractionHandle : AutoCloseable {
+    val expectedSessionId: String
+    val components: List<ApkComponent>
+
+    suspend fun transfer(
+        componentId: String,
+        destination: java.io.OutputStream,
+        noProgressTimeout: Duration = kotlin.time.Duration.parse("30s"),
+        progress: (FileTransferProgress) -> Unit = {},
+    ): AdbOperationResult<ApkComponentTransferReceipt>
+
+    override fun close()
+}
+
+enum class ApkSignatureRelation {
+    NOT_INSTALLED,
+    SAME,
+    DIFFERENT,
+    UNKNOWN,
+}
+
+enum class ApkInstallMode {
+    STANDARD,
+    REPLACE,
+    REPLACE_OR_DOWNGRADE,
+    UNINSTALL_THEN_INSTALL,
+}
+
+enum class ApkInstallStage {
+    VALIDATING,
+    STAGING,
+    INSTALLING,
+    VERIFYING,
+    CLEANING,
+}
+
+data class ApkInstallRequest(
+    val expectedSessionId: String,
+    val userId: Int,
+    val displayName: String,
+    val sourceFingerprint: String,
+    val sourceSizeBytes: Long?,
+    val source: () -> java.io.InputStream,
+    val mode: ApkInstallMode,
+    val expectedPackageName: String? = null,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(userId >= 0)
+        require(displayName.isNotBlank())
+        require(sourceFingerprint.isNotBlank())
+        require(sourceSizeBytes == null || sourceSizeBytes >= 0L)
+    }
+}
+
+sealed interface ApkInstallResult {
+    val expectedSessionId: String
+
+    data class VerifiedInstalled(
+        override val expectedSessionId: String,
+        val packageName: String,
+        val privateDataPreserved: Boolean,
+    ) : ApkInstallResult
+
+    data class PackageManagerAccepted(
+        override val expectedSessionId: String,
+        val privateDataPreserved: Boolean,
+    ) : ApkInstallResult
+
+    data class Rejected(
+        override val expectedSessionId: String,
+        val reason: String,
+    ) : ApkInstallResult
+
+    data class OldRemovedNoRollback(
+        override val expectedSessionId: String,
+        val packageName: String,
+        val cause: AdbError,
+    ) : ApkInstallResult
+
+    data class OutcomeUnknown(
+        override val expectedSessionId: String,
+        val stage: ApkInstallStage,
+        val technicalCode: String = "APK_INSTALL_OUTCOME_UNKNOWN",
+    ) : ApkInstallResult
+
+    data class TimedOut(
+        override val expectedSessionId: String,
+        val stage: ApkInstallStage,
+    ) : ApkInstallResult
+
+    data class Cancelled(
+        override val expectedSessionId: String,
+        val mutationStarted: Boolean,
+    ) : ApkInstallResult
+}
+
+enum class ApplicationUninstallStage {
+    PREPARING,
+    UNINSTALLING,
+    VERIFYING,
+}
+
+data class ApplicationUninstallPreparation(
+    val expectedSessionId: String,
+    val userId: Int,
+    val packageName: String,
+    val expectedGeneration: Long,
+    val confirmationNonce: String,
+    val classification: ApplicationClassification,
+)
+
+data class ApplicationUninstallRequest(
+    val expectedSessionId: String,
+    val userId: Int,
+    val packageName: String,
+    val expectedGeneration: Long,
+    val confirmationNonce: String,
+    val deletePrivateDataAcknowledged: Boolean,
+) {
+    init {
+        require(expectedSessionId.isNotBlank())
+        require(userId >= 0)
+        require(packageName.isNotBlank())
+        require(expectedGeneration >= 0L)
+        require(confirmationNonce.isNotBlank())
+    }
+}
+
+sealed interface ApplicationUninstallResult {
+    val expectedSessionId: String
+
+    data class VerifiedRemoved(
+        override val expectedSessionId: String,
+        val packageName: String,
+        val privateData: PrivateDataDeleted = PrivateDataDeleted,
+    ) : ApplicationUninstallResult
+
+    data class SystemBaseRetained(
+        override val expectedSessionId: String,
+        val packageName: String,
+    ) : ApplicationUninstallResult
+
+    data class PolicyRejected(
+        override val expectedSessionId: String,
+        val classification: ApplicationClassification,
+    ) : ApplicationUninstallResult
+
+    data class OutcomeUnknown(
+        override val expectedSessionId: String,
+        val stage: ApplicationUninstallStage,
+    ) : ApplicationUninstallResult
+
+    data class TimedOut(
+        override val expectedSessionId: String,
+        val stage: ApplicationUninstallStage,
+    ) : ApplicationUninstallResult
+
+    data class Rejected(
+        override val expectedSessionId: String,
+        val reason: String,
+    ) : ApplicationUninstallResult
+}
+
+data object PrivateDataDeleted
 
 data class RemoteFileTransferReceipt(
     val sessionId: String,

@@ -19,6 +19,51 @@ class PairingAttemptId private constructor(
     }
 }
 
+class PairingEndpointHandle private constructor(
+    private val token: String,
+    private val reference: Any?,
+) {
+    override fun equals(other: Any?): Boolean =
+        other is PairingEndpointHandle && token == other.token
+
+    override fun hashCode(): Int = token.hashCode()
+
+    override fun toString(): String = "PairingEndpointHandle(redacted)"
+
+    internal fun <T : Any> resolve(type: Class<T>): T? = type.cast(reference)
+
+    companion object {
+        fun opaque(token: String): PairingEndpointHandle {
+            require(token.isNotBlank()) { "Pairing endpoint handle must not be blank." }
+            return PairingEndpointHandle(token, null)
+        }
+
+        internal fun resolved(
+            token: String,
+            reference: Any,
+        ): PairingEndpointHandle {
+            require(token.isNotBlank()) { "Pairing endpoint handle must not be blank." }
+            return PairingEndpointHandle(token, reference)
+        }
+    }
+}
+
+enum class PairingDiscoveryPhase {
+    IDLE,
+    SCANNING,
+    RESOLVED,
+    TIMED_OUT,
+    CANCELLED,
+    FAILED,
+}
+
+data class PairingDiscoveryState(
+    val attemptId: PairingAttemptId? = null,
+    val phase: PairingDiscoveryPhase = PairingDiscoveryPhase.IDLE,
+    val deadlineMillis: Long = 0L,
+    val endpointHandle: PairingEndpointHandle? = null,
+)
+
 class PairingSecret(
     private val chars: CharArray,
 ) {

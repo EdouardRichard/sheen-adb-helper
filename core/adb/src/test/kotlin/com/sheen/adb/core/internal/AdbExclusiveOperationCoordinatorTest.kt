@@ -227,6 +227,7 @@ class AdbExclusiveOperationCoordinatorTest {
             setOf(
                 AdbExclusiveOperationKind.FILE_TRANSFER,
                 AdbExclusiveOperationKind.APK_EXTRACTION,
+                AdbExclusiveOperationKind.APK_INSTALL,
                 AdbExclusiveOperationKind.LOGCAT,
                 AdbExclusiveOperationKind.QUICK_ACTION,
             ),

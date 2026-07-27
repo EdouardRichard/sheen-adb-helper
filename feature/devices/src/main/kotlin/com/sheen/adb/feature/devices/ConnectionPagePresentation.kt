@@ -25,6 +25,16 @@ enum class ConnectionPagePhase {
     FAILED,
 }
 
+enum class DisconnectedPageContentState {
+    Loading,
+    Content,
+    Empty,
+    Error,
+    Cancelled,
+    Disconnected,
+    Unsupported,
+}
+
 data class ConnectionPageState(
     val phase: ConnectionPagePhase,
     val endpoint: AdbEndpoint? = null,
@@ -33,6 +43,14 @@ data class ConnectionPageState(
 )
 
 object ConnectionPagePresentation {
+    internal fun visibleInputError(
+        inputError: String?,
+        connection: AdbConnectionState,
+    ): String? {
+        val connectionTechnicalCode = (connection as? AdbConnectionState.Error)?.error?.technicalCode
+        return inputError?.takeUnless { it == connectionTechnicalCode }
+    }
+
     fun validateEndpoint(raw: String): ConnectionEndpointValidation {
         if (raw.isBlank()) {
             return ConnectionEndpointValidation.Invalid(ConnectionEndpointInputError.EMPTY)
@@ -75,6 +93,28 @@ object ConnectionPagePresentation {
             phase = ConnectionPagePhase.FAILED,
             error = state.error,
         )
+    }
+
+    internal fun disconnectedContentState(
+        connection: AdbConnectionState,
+        discovery: DevicesDiscoveryState,
+    ): DisconnectedPageContentState = when {
+        connection is AdbConnectionState.Error -> DisconnectedPageContentState.Error
+        connection is AdbConnectionState.Connecting ||
+            connection is AdbConnectionState.AwaitingAuthorization ||
+            connection is AdbConnectionState.Pairing ||
+            connection is AdbConnectionState.Disconnecting -> DisconnectedPageContentState.Loading
+        discovery.phase == DevicesDiscoveryPhase.SCANNING -> DisconnectedPageContentState.Loading
+        discovery.phase == DevicesDiscoveryPhase.CONTENT -> DisconnectedPageContentState.Content
+        discovery.phase == DevicesDiscoveryPhase.EMPTY -> DisconnectedPageContentState.Empty
+        discovery.phase == DevicesDiscoveryPhase.CANCELLED -> DisconnectedPageContentState.Cancelled
+        discovery.phase == DevicesDiscoveryPhase.ERROR &&
+            discovery.failure in setOf(
+                DevicesDiscoveryFailure.PERMISSION_UNAVAILABLE,
+                DevicesDiscoveryFailure.NETWORK_UNAVAILABLE,
+            ) -> DisconnectedPageContentState.Unsupported
+        discovery.phase == DevicesDiscoveryPhase.ERROR -> DisconnectedPageContentState.Error
+        else -> DisconnectedPageContentState.Disconnected
     }
 
     private fun String.portTextOrNull(): String? {

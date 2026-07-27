@@ -94,6 +94,25 @@ class ApplicationMetadataLoaderTest {
     }
 
     @Test
+    fun `reader accepts a single named system apk as the installed base component`() = runBlocking {
+        val stat = FakeMetadataSync(statSize = 3)
+        val receive = FakeMetadataSync(payload = byteArrayOf(1, 2, 3))
+        val client = FakeMetadataClient(
+            shellResponse = shell("package:/system/priv-app/ContactPicker/ContactPicker.apk\n"),
+            syncs = ArrayDeque(listOf(stat, receive)),
+        )
+        val reader = BoundedRemoteApkReader(client, { true }, Dispatchers.Default)
+
+        val result = reader.read(RemoteApkReadRequest("com.android.contactspicker", 0, "session-a", 1.seconds))
+
+        assertTrue(result is RemoteApkReadResult.Success)
+        assertEquals(
+            (result as RemoteApkReadResult.Success).remotePath,
+            "/system/priv-app/ContactPicker/ContactPicker.apk",
+        )
+    }
+
+    @Test
     fun `reader closes receive stream on timeout and caller cancellation`() = runBlocking {
         val timeoutStat = FakeMetadataSync(statSize = 1)
         val timeoutReceive = FakeMetadataSync(blockReceive = true)

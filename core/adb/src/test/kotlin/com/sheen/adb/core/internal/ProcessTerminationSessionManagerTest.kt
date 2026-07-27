@@ -188,10 +188,14 @@ class ProcessTerminationSessionManagerTest {
         }
 
         private fun processRows(): String = buildString {
-            append("USER PID PPID VSZ RSS S NAME\n")
-            if (alive.get()) append("u0_a123 101 1 1000 64 S com.example.client\n")
+            append("USER PID PPID VSZ RSS S NAME %CPU STIME\n")
+            if (alive.get()) {
+                append("u0_a123 101 1 1000 64 S com.example.client 1.0 ")
+                    .append(startTime.get())
+                    .append('\n')
+            }
             if (alive.get() && includeSecondary.get()) {
-                append("u0_a123 102 1 1000 64 S com.example.client:worker\n")
+                append("u0_a123 102 1 1000 64 S com.example.client:worker 0.5 901\n")
             }
         }
 

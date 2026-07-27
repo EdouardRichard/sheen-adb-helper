@@ -41,11 +41,12 @@ internal data class DevicesDiscoveryItem(
     val relation: DevicesDiscoveryRelation,
     val reachability: DevicesDiscoveryReachability,
     val selectable: Boolean,
+    val requiresPairing: Boolean = false,
 ) {
     override fun toString(): String =
         "DevicesDiscoveryItem(serviceTypes=$serviceTypes, hasPairingTarget=${pairingTarget != null}, " +
             "hasConnectTarget=${connectTarget != null}, relation=$relation, reachability=$reachability, " +
-            "selectable=$selectable)"
+            "selectable=$selectable, requiresPairing=$requiresPairing)"
 }
 
 internal sealed interface DevicesDiscoverySelection {
@@ -88,6 +89,8 @@ internal sealed interface DevicesDiscoveryEvent {
 
 internal sealed interface DevicesDiscoveryEffect {
     data object OpenManualAddress : DevicesDiscoveryEffect
+
+    data class OpenQrPairing(val target: WirelessDiscoveryTarget) : DevicesDiscoveryEffect
 
     data class OpenCodePairing(val target: WirelessDiscoveryTarget) : DevicesDiscoveryEffect
 

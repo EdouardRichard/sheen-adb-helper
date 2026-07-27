@@ -5,13 +5,19 @@ import com.sheen.adb.core.AdbDiagnosticOutcome
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.LogcatConfig
+import java.io.EOFException
+import java.net.SocketTimeoutException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.system.measureTimeMillis
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
@@ -59,6 +65,49 @@ class DefaultAdbSessionManagerTest {
     }
 
     @Test
+    fun `remote transport loss is detected while idle and publishes disconnected state`() = runBlocking {
+        val client = DisconnectAfterHandshakeClient()
+        val manager = DefaultAdbSessionManager(
+            clientFactory = FakeFactory(client),
+            ioDispatcher = Dispatchers.IO,
+            sessionHealthInterval = 10.milliseconds,
+            sessionHealthTimeout = 50.milliseconds,
+            sessionHealthFailureThreshold = 1,
+        )
+
+        assertTrue(manager.connect(AdbEndpoint("remote.local", 40011)) is AdbOperationResult.Success)
+        manager.connectionState.first { it is AdbConnectionState.Disconnected }
+
+        assertTrue(client.closed.get())
+        assertTrue(manager.connectionState.value is AdbConnectionState.Disconnected)
+    }
+
+    @Test
+    fun `remote transport loss retires session while a feature command is blocked`() = runBlocking {
+        val client = DisconnectDuringFeatureCommandClient()
+        val manager = DefaultAdbSessionManager(
+            clientFactory = FakeFactory(client),
+            ioDispatcher = Dispatchers.IO,
+            sessionHealthInterval = 10.milliseconds,
+            sessionHealthTimeout = 50.milliseconds,
+            sessionHealthFailureThreshold = 1,
+        )
+
+        assertTrue(manager.connect(AdbEndpoint("remote.local", 40012)) is AdbOperationResult.Success)
+        val featureCommand = async(Dispatchers.Default) {
+            manager.executeShell("blocked-feature-command", 5.seconds)
+        }
+        assertTrue(client.featureCommandStarted.await(2, TimeUnit.SECONDS))
+
+        withTimeout(500.milliseconds) {
+            manager.connectionState.first { it is AdbConnectionState.Disconnected }
+        }
+
+        assertTrue(client.closed.get())
+        assertTrue(featureCommand.await() is AdbOperationResult.Failure)
+    }
+
+    @Test
     fun `timeout and cancellation close candidate resources`() = runBlocking {
         val timeoutClient = FakeClient(block = true)
         val timeoutManager = DefaultAdbSessionManager(FakeFactory(timeoutClient), Dispatchers.IO)
@@ -77,6 +126,27 @@ class DefaultAdbSessionManagerTest {
         assertTrue(cancelClient.closed.get())
         val cancelledState = cancelManager.connectionState.value as AdbConnectionState.Disconnected
         assertEquals(com.sheen.adb.core.DisconnectionReason.CONNECT_CANCELLED, cancelledState.reason)
+    }
+
+    @Test
+    fun `cancellation force closes a probe that ignores thread interruption`() = runBlocking {
+        val client = SlowInterruptIgnoringClient()
+        val manager = DefaultAdbSessionManager(FakeFactory(client), Dispatchers.IO)
+        val endpoint = AdbEndpoint("cancel-probe.invalid", 45555)
+        val operation = async(Dispatchers.Default) { manager.connect(endpoint, 5.seconds) }
+        assertTrue(client.started.await(2, TimeUnit.SECONDS))
+
+        val cancelMillis = measureTimeMillis {
+            operation.cancel()
+            operation.join()
+        }
+
+        assertTrue(cancelMillis < 250L, "cancellation took ${cancelMillis}ms")
+        assertTrue(client.closed.get())
+        assertEquals(
+            (manager.connectionState.value as AdbConnectionState.Disconnected).reason,
+            com.sheen.adb.core.DisconnectionReason.CONNECT_CANCELLED,
+        )
     }
 
     @Test
@@ -135,6 +205,18 @@ class DefaultAdbSessionManagerTest {
             (stateAfterCancellation as AdbConnectionState.Connected).sessionId,
             sessionIdBeforeCancellation,
         )
+    }
+
+    @Test
+    fun `probe socket failure is returned instead of escaping the worker`() = runBlocking {
+        val client = ThrowingProbeClient()
+        val manager = DefaultAdbSessionManager(FakeFactory(client), Dispatchers.IO)
+
+        val result = manager.connect(AdbEndpoint("unreachable.invalid", 5555), 30.seconds)
+
+        assertTrue(result is AdbOperationResult.Failure)
+        assertTrue(client.closed.get())
+        assertTrue(manager.connectionState.value is AdbConnectionState.Error)
     }
 
     @Test
@@ -230,6 +312,91 @@ class DefaultAdbSessionManagerTest {
             return ProtocolShellPacket.Exit(0)
         }
         override fun close() { closed.set(true) }
+    }
+
+    private class SlowInterruptIgnoringClient : AdbProtocolClient {
+        val started = CountDownLatch(1)
+        val closed = AtomicBoolean(false)
+
+        override fun execute(command: String): ProtocolShellResponse {
+            started.countDown()
+            val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(750)
+            while (System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(10)
+                } catch (_: InterruptedException) {
+                    // Models a lazy Kadb handshake whose socket is not yet owned by close().
+                }
+            }
+            return ProtocolShellResponse("late\n", "", 0, streamsSeparated = true, wasTruncated = false)
+        }
+
+        override fun openShellStream(command: String): ProtocolShellStream =
+            object : ProtocolShellStream {
+                override fun read(): ProtocolShellPacket = ProtocolShellPacket.Exit(0)
+                override fun close() = Unit
+            }
+
+        override fun close() {
+            closed.set(true)
+        }
+    }
+
+    private class ThrowingProbeClient : AdbProtocolClient {
+        val closed = AtomicBoolean(false)
+
+        override fun execute(command: String): ProtocolShellResponse =
+            throw SocketTimeoutException("synthetic timeout")
+
+        override fun openShellStream(command: String): ProtocolShellStream =
+            error("stream should not be opened")
+
+        override fun close() {
+            closed.set(true)
+        }
+    }
+
+    private class DisconnectAfterHandshakeClient : AdbProtocolClient {
+        val closed = AtomicBoolean(false)
+        private val handshakeComplete = AtomicBoolean(false)
+
+        override fun execute(command: String): ProtocolShellResponse {
+            if (handshakeComplete.compareAndSet(false, true)) {
+                return ProtocolShellResponse("ok\n", "", 0, streamsSeparated = true, wasTruncated = false)
+            }
+            throw EOFException("synthetic remote close")
+        }
+
+        override fun openShellStream(command: String): ProtocolShellStream = error("unused")
+
+        override fun close() {
+            closed.set(true)
+        }
+    }
+
+    private class DisconnectDuringFeatureCommandClient : AdbProtocolClient {
+        val featureCommandStarted = CountDownLatch(1)
+        val closed = AtomicBoolean(false)
+        private val calls = AtomicInteger(0)
+        private val connectionClosed = CountDownLatch(1)
+
+        override fun execute(command: String): ProtocolShellResponse =
+            when (calls.incrementAndGet()) {
+                1 -> ProtocolShellResponse("ok\n", "", 0, streamsSeparated = true, wasTruncated = false)
+                2 -> {
+                    featureCommandStarted.countDown()
+                    check(connectionClosed.await(5, TimeUnit.SECONDS))
+                    throw EOFException("synthetic remote close")
+                }
+                else -> throw EOFException("synthetic remote close")
+            }
+
+        override fun openShellStream(command: String): ProtocolShellStream = error("unused")
+
+        override fun close() {
+            closed.set(true)
+            connectionClosed.countDown()
+        }
     }
 
     private class OneThenBlockingStream : ProtocolShellStream {

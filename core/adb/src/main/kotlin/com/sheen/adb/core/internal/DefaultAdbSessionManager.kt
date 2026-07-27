@@ -10,11 +10,23 @@ import com.sheen.adb.core.AdbExclusiveOperationKind
 import com.sheen.adb.core.AdbOperationResult
 import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.AdbSessionManager
+import com.sheen.adb.core.ApkComponentTransferReceipt
+import com.sheen.adb.core.ApkExtractionHandle
+import com.sheen.adb.core.ApkExtractionRequest
+import com.sheen.adb.core.ApkInstallMode
+import com.sheen.adb.core.ApkInstallRequest
+import com.sheen.adb.core.ApkInstallResult
+import com.sheen.adb.core.ApkInstallStage
 import com.sheen.adb.core.ApplicationField
+import com.sheen.adb.core.ApplicationClassification
 import com.sheen.adb.core.ApplicationMetadataStatus
 import com.sheen.adb.core.ApplicationMetadataUpdate
 import com.sheen.adb.core.ApplicationMutationResult
 import com.sheen.adb.core.ApplicationSnapshot
+import com.sheen.adb.core.ApplicationUninstallPreparation
+import com.sheen.adb.core.ApplicationUninstallRequest
+import com.sheen.adb.core.ApplicationUninstallResult
+import com.sheen.adb.core.ApplicationUninstallStage
 import com.sheen.adb.core.AndroidUidIdentity
 import com.sheen.adb.core.DiagnosticRedactor
 import com.sheen.adb.core.DeviceOverview
@@ -34,6 +46,7 @@ import com.sheen.adb.core.LocalPairingWindow
 import com.sheen.adb.core.LocalPairingWindowId
 import com.sheen.adb.core.PairingAttemptId
 import com.sheen.adb.core.PairingAttemptPhase
+import com.sheen.adb.core.PairingEndpointHandle
 import com.sheen.adb.core.PairingMethod
 import com.sheen.adb.core.PairingSecret
 import com.sheen.adb.core.ProcessSnapshot
@@ -70,6 +83,12 @@ import com.sheen.adb.core.RemoteUploadCommitReceipt
 import com.sheen.adb.core.RemoteUploadPlan
 import com.sheen.adb.core.ShellResult
 import com.sheen.adb.core.ShellOutputMode
+import com.sheen.adb.core.InteractiveShellCloseReason
+import com.sheen.adb.core.InteractiveShellResult
+import com.sheen.adb.core.InteractiveShellSession
+import com.sheen.adb.core.TerminalInput
+import com.sheen.adb.core.TerminalOutputEvent
+import com.sheen.adb.core.TerminalOutputKind
 import com.sheen.adb.core.StructuredLogcatKind
 import com.sheen.adb.core.StructuredLogcatLevel
 import com.sheen.adb.core.StructuredLogcatRecord
@@ -93,6 +112,7 @@ import com.sheen.adb.core.internal.applications.ApplicationMetadataLoadStatus
 import com.sheen.adb.core.internal.applications.ApplicationMetadataLoader
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParseResult
 import com.sheen.adb.core.internal.applications.ApplicationMetadataParser
+import com.sheen.adb.core.internal.applications.ApplicationPackageProtocol
 import com.sheen.adb.core.internal.applications.BoundedRemoteApkReader
 import com.sheen.adb.core.internal.applications.RemoteApkReader
 import com.sheen.adb.core.internal.diagnostics.ProcessAssociation
@@ -111,6 +131,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -125,6 +146,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -132,21 +154,30 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.TimeSource
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 internal class DefaultAdbSessionManager(
     private val clientFactory: AdbProtocolClientFactory,
@@ -166,6 +197,9 @@ internal class DefaultAdbSessionManager(
     ),
     private val localPairingClock: MonotonicClock = MonotonicClock { System.nanoTime() / 1_000_000L },
     private val quickActionProtocol: QuickActionProtocol = DefaultQuickActionProtocol(ioDispatcher),
+    private val sessionHealthInterval: Duration = 5.seconds,
+    private val sessionHealthTimeout: Duration = 3.seconds,
+    private val sessionHealthFailureThreshold: Int = 2,
 ) : AdbSessionManager, Closeable {
     private data class ActiveSession(
         val id: String,
@@ -189,6 +223,20 @@ internal class DefaultAdbSessionManager(
         val sessionId: String,
         val stopRequested: AtomicBoolean = AtomicBoolean(false),
     )
+
+    private data class PendingApplicationUninstall(
+        val preparation: ApplicationUninstallPreparation,
+    )
+
+    private class ActiveInteractiveShell(
+        val expectedSessionId: String,
+        val streamGeneration: Long,
+        val protocol: ProtocolInteractiveShell,
+        val events: Channel<TerminalOutputEvent>,
+    ) {
+        val closed = AtomicBoolean(false)
+        var readerJob: Job? = null
+    }
 
     private sealed interface WirelessDiscoverySignal {
         data class Event(val value: WirelessDiscoveryEvent) : WirelessDiscoverySignal
@@ -300,7 +348,10 @@ internal class DefaultAdbSessionManager(
     private val diagnosticSequence = AtomicLong(0)
     private val wirelessDiscoveryGeneration = AtomicLong(0)
     private val processAnalysisGeneration = AtomicLong(0)
+    private val applicationGeneration = AtomicLong(0)
     private val processRefreshRequestedGeneration = AtomicLong(0)
+    private val interactiveShellGeneration = AtomicLong(0)
+    private val interactiveShellMutex = Mutex()
     private val processTerminationRequestLock = Any()
     private val consumedProcessTerminationRequestIds = linkedSetOf<String>()
     @Volatile
@@ -311,9 +362,13 @@ internal class DefaultAdbSessionManager(
     private var activeScreenRecording: ActiveScreenRecording? = null
     private var activeWirelessDiscovery: ActiveWirelessDiscovery? = null
     private var latestLanDiscoveryState: WirelessDiscoveryState? = null
+    private var latestPairingDiscoveryState: WirelessDiscoveryState? = null
     private val lanPairingAssociations = linkedMapOf<PairingAttemptId, LanPairingAssociation>()
     private val wirelessIdentitySalt = ByteArray(32).also(SecureRandom()::nextBytes)
     private var applicationSnapshot: ApplicationSnapshot? = null
+    private var pendingApplicationUninstall: PendingApplicationUninstall? = null
+    @Volatile
+    private var activeInteractiveShell: ActiveInteractiveShell? = null
     private val applicationMetadataMutex = Mutex()
     private var applicationMetadataLoader: ApplicationMetadataLoader? = null
     private var applicationMetadataLoaderSessionId: String? = null
@@ -324,8 +379,10 @@ internal class DefaultAdbSessionManager(
     private val mutableDiagnosticEvents = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
     override val diagnosticEvents: StateFlow<List<AdbDiagnosticEvent>> = mutableDiagnosticEvents.asStateFlow()
     private val localPairingScope = CoroutineScope(SupervisorJob() + ioDispatcher)
+    private val connectionProbeScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val localPairingDiscoveryLock = Any()
     private var localPairingDiscoveryJob: Job? = null
+    private var sessionHealthJob: Job? = null
     private val localPairingCoordinator = LocalPairingCoordinator(
         clock = localPairingClock,
         notificationPolicy = LocalPairingNotificationPolicy(),
@@ -690,7 +747,7 @@ internal class DefaultAdbSessionManager(
 
         var state = WirelessDiscoveryState(generation = discovery.generation)
         val reducer = WirelessDiscoveryReducer()
-        if (mode == WirelessDiscoveryMode.LAN_FOREGROUND) updateLatestLanDiscoveryState(state)
+        updateLatestDiscoveryState(mode, state)
         var pendingSourceCancellation: CancellationException? = null
         try {
             try {
@@ -797,9 +854,7 @@ internal class DefaultAdbSessionManager(
                         when (signal) {
                             is WirelessDiscoverySignal.Event -> {
                                 state = reducer.reduce(state, signal.value)
-                                if (mode == WirelessDiscoveryMode.LAN_FOREGROUND) {
-                                    updateLatestLanDiscoveryState(state)
-                                }
+                                updateLatestDiscoveryState(mode, state)
                                 emit(AdbOperationResult.Success(state))
                             }
 
@@ -848,7 +903,11 @@ internal class DefaultAdbSessionManager(
             secret.clear()
             return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
         }
-        val endpoint = selection.toPairingEndpoint()
+        val endpointHandle = PairingEndpointHandle.resolved(
+            token = "${target.generation}:${target.observationId.hashCode()}",
+            reference = selection,
+        )
+        val endpoint = endpointHandle.toPairingEndpoint()
         if (endpoint == null) {
             secret.clear()
             return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
@@ -917,6 +976,79 @@ internal class DefaultAdbSessionManager(
             is AdbOperationResult.Failure -> result
             AdbOperationResult.Cancelled -> AdbOperationResult.Cancelled
         }
+    }
+
+    override suspend fun connectLocalPairedDevice(
+        pairingAttemptId: PairingAttemptId,
+        timeout: Duration,
+    ): AdbOperationResult<Unit> {
+        val association = synchronized(wirelessDiscoveryLock) {
+            lanPairingAssociations[pairingAttemptId]
+        } ?: return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+        val pairingAddresses = association.observation.addresses.toSet()
+        val started = TimeSource.Monotonic.markNow()
+        while (started.elapsedNow() < timeout) {
+            currentCoroutineContext().ensureActive()
+            val remaining = timeout - started.elapsedNow()
+            var selected: WirelessServiceObservation? = null
+            var terminalError: AdbError? = null
+            var cancelled = false
+            observeWirelessServices(
+                mode = WirelessDiscoveryMode.LAN_FOREGROUND,
+                timeout = remaining,
+            ).firstOrNull { result ->
+                when (result) {
+                    is AdbOperationResult.Success -> {
+                        selected = result.value.services
+                            .asSequence()
+                            .filter {
+                                it.serviceType == WirelessServiceType.CONNECT &&
+                                    it.status == WirelessServiceStatus.RESOLVED &&
+                                    it.port != LEGACY_ADB_TCP_PORT &&
+                                    it.addresses.any(pairingAddresses::contains)
+                            }
+                            .maxByOrNull(WirelessServiceObservation::lastSeenAt)
+                        selected != null
+                    }
+                    is AdbOperationResult.Failure -> {
+                        terminalError = result.error
+                        true
+                    }
+                    AdbOperationResult.Cancelled -> {
+                        cancelled = true
+                        true
+                    }
+                }
+            }
+            if (cancelled) return AdbOperationResult.Cancelled
+            val observation = selected
+            if (observation != null) {
+                val endpoint = observation.toPairingEndpoint()
+                    ?: return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+                val connectTimeout = timeout - started.elapsedNow()
+                if (connectTimeout <= Duration.ZERO) {
+                    return operationFailure(AdbError.DiscoveryTimeout, null, null)
+                }
+                val connected = connect(endpoint, connectTimeout)
+                if (connected !is AdbOperationResult.Success || association.verifiedDeviceId == null) {
+                    return connected
+                }
+                val connectedIdentity = active?.client?.let { client ->
+                    verifiedIdentity(runCatching { connectedIdentityFingerprint(client) }.getOrNull())
+                }
+                if (connectedIdentity == association.verifiedDeviceId) return connected
+                disconnect()
+                return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
+            }
+            val error = terminalError ?: AdbError.DiscoveryResolutionFailed
+            if (!error.isRetryablePairedConnectDiscoveryFailure()) {
+                return operationFailure(error, null, null)
+            }
+            val retryRemaining = timeout - started.elapsedNow()
+            if (retryRemaining <= Duration.ZERO) break
+            delay(minOf(PAIRED_CONNECT_DISCOVERY_RETRY_DELAY, retryRemaining))
+        }
+        return operationFailure(AdbError.DiscoveryTimeout, null, null)
     }
 
     override suspend fun loadRemoteDirectory(
@@ -1002,28 +1134,48 @@ internal class DefaultAdbSessionManager(
         }
         val forcedSessionClose = AtomicBoolean(false)
         return try {
-            val before = KadbRemoteFileProtocol.stat(session.client, remoteFile.absolutePath, FILE_PREPARE_TIMEOUT)
-            val reliableMetadata = before.hasReliableTransferMetadata()
-            val digestBefore = if (reliableMetadata) null else remoteDigest(session.client, remoteFile.absolutePath)
-                ?: return operationFailure(AdbError.RemoteIntegrityUnavailable, session.endpoint, null)
-            val transferred = KadbRemoteFileProtocol.receive(
-                client = session.client,
-                path = remoteFile.absolutePath,
-                destination = destination,
-                noProgressTimeout = transferNoProgressTimeout,
-                cancellationGrace = transferCancellationGrace,
-                onForcedSessionClose = {
-                    forcedSessionClose.set(true)
-                    runCatching { session.client.close() }
-                },
-            ) { bytes -> progress(FileTransferProgress(bytes, before.size.takeIf { it >= 0L })) }
-            val after = KadbRemoteFileProtocol.stat(session.client, remoteFile.absolutePath, FILE_PREPARE_TIMEOUT)
-            val stable = if (reliableMetadata) {
-                before.sameTransferIdentity(after) && transferred == before.size
-            } else {
+            val forcedClose: () -> Unit = {
+                forcedSessionClose.set(true)
+                runCatching { session.client.close() }
+            }
+            val (transferred, stable) = try {
+                val receipt = KadbRemoteFileProtocol.receiveVerified(
+                    client = session.client,
+                    path = remoteFile.absolutePath,
+                    destination = destination,
+                    noProgressTimeout = transferNoProgressTimeout,
+                    cancellationGrace = transferCancellationGrace,
+                    onForcedSessionClose = forcedClose,
+                ) { bytes ->
+                    progress(FileTransferProgress(bytes, remoteFile.sizeBytes))
+                }
+                receipt.transferredBytes to (
+                    receipt.before.sameTransferIdentity(receipt.after) &&
+                        receipt.transferredBytes == receipt.before.size
+                    )
+            } catch (fallback: ProtocolReceiveDigestFallbackRequired) {
+                val digestBefore = remoteDigest(session.client, remoteFile.absolutePath)
+                    ?: return operationFailure(AdbError.RemoteIntegrityUnavailable, session.endpoint, fallback)
+                val fallbackTransferred = KadbRemoteFileProtocol.receive(
+                    client = session.client,
+                    path = remoteFile.absolutePath,
+                    destination = destination,
+                    noProgressTimeout = transferNoProgressTimeout,
+                    cancellationGrace = transferCancellationGrace,
+                    onForcedSessionClose = forcedClose,
+                ) { bytes ->
+                    progress(FileTransferProgress(bytes, remoteFile.sizeBytes))
+                }
+                val after = KadbRemoteFileProtocol.stat(
+                    session.client,
+                    remoteFile.absolutePath,
+                    FILE_PREPARE_TIMEOUT,
+                )
                 val digestAfter = remoteDigest(session.client, remoteFile.absolutePath)
                     ?: return operationFailure(AdbError.RemoteIntegrityUnavailable, session.endpoint, null)
-                digestBefore == digestAfter && transferred == after.size
+                fallbackTransferred to (
+                    digestBefore == digestAfter && fallbackTransferred == after.size
+                    )
             }
             if (!stable) return operationFailure(AdbError.RemoteSourceChanged, session.endpoint, null)
             if (mutex.withLock { active?.id } != expectedSessionId || !lease.isActive) {
@@ -1473,15 +1625,32 @@ internal class DefaultAdbSessionManager(
                     var ready = false
                     while (!ready) {
                         try {
-                            val probe = runInterruptible(ioDispatcher) {
-                                val opened = clientFactory.open(endpoint)
-                                candidate = opened
-                                opened.execute(CONNECTION_PROBE)
+                            val opened = openAndProbeCancellable(
+                                endpoint = endpoint,
+                                openClient = clientFactory::openForConnectionProbe,
+                            )
+                            val sessionReady = if (opened.probeClient.reusableForSession) {
+                                opened
+                            } else {
+                                withContext(NonCancellable + ioDispatcher) {
+                                    runCatching { opened.probeClient.client.close() }
+                                }
+                                openAndProbeCancellable(
+                                    endpoint = endpoint,
+                                    openClient = {
+                                        AdbConnectionProbeClient(
+                                            client = clientFactory.open(it),
+                                            reusableForSession = true,
+                                        )
+                                    },
+                                )
                             }
+                            candidate = sessionReady.probeClient.client
+                            val probe = sessionReady.response
                             if (probe.exitCode != 0) throw ProtocolProbeException()
                             ready = true
                         } catch (error: Throwable) {
-                            if (!isLegacyAuthorization(error)) throw error
+                            if (!isLegacyAuthorization(error, endpoint)) throw error
                             withContext(NonCancellable + ioDispatcher) { runCatching { candidate?.close() } }
                             candidate = null
                             awaitingAuthorization = true
@@ -1500,6 +1669,7 @@ internal class DefaultAdbSessionManager(
                 active = session
                 adopted = true
                 mutableState.value = AdbConnectionState.Connected(endpoint, session.id)
+                startSessionHealthMonitor(session)
                 appendDiagnostic(AdbOperationStage.CONNECT, AdbDiagnosticOutcome.SUCCEEDED, "ADB_CONNECT_SUCCEEDED", endpoint)
                 AdbOperationResult.Success(Unit)
             } catch (error: TimeoutCancellationException) {
@@ -1527,6 +1697,69 @@ internal class DefaultAdbSessionManager(
                 }
             }
         }
+
+    private suspend fun openAndProbeCancellable(
+        endpoint: AdbEndpoint,
+        openClient: (AdbEndpoint) -> AdbConnectionProbeClient,
+    ): OpenedConnectionProbe {
+            val opened = AtomicReference<AdbProtocolClient?>()
+            val result = AtomicReference<OpenedConnectionProbe?>()
+            val failure = AtomicReference<Throwable?>()
+            val cancellationRequested = AtomicBoolean(false)
+            val worker = connectionProbeScope.launch {
+                try {
+                    val completed = runInterruptible {
+                        val probeClient = openClient(endpoint)
+                        opened.set(probeClient.client)
+                        OpenedConnectionProbe(
+                            probeClient = probeClient,
+                            response = probeClient.client.execute(CONNECTION_PROBE),
+                        )
+                    }
+                    if (cancellationRequested.get()) {
+                        runCatching { completed.probeClient.client.close() }
+                    } else {
+                        result.set(completed)
+                    }
+                } catch (error: Throwable) {
+                    failure.set(error)
+                }
+            }
+            return try {
+                suspendCancellableCoroutine<OpenedConnectionProbe> { continuation ->
+                    continuation.invokeOnCancellation {
+                        cancellationRequested.set(true)
+                        runCatching { opened.get()?.close() }
+                        worker.cancel()
+                    }
+                    worker.invokeOnCompletion { completionError ->
+                        if (!continuation.isActive) return@invokeOnCompletion
+                        val error = failure.get() ?: completionError
+                        if (error != null) {
+                            continuation.resumeWithException(error)
+                        } else {
+                            continuation.resume(checkNotNull(result.get()))
+                        }
+                    }
+                }
+            } catch (error: Throwable) {
+                runCatching { opened.get()?.close() }
+                worker.cancel()
+                withContext(NonCancellable) {
+                    withTimeoutOrNull(CONNECTION_CANCELLATION_GRACE) { worker.join() }
+                }
+                if (cancellationRequested.get()) {
+                    throw CancellationException("Connection probe cancelled", error)
+                }
+                currentCoroutineContext().ensureActive()
+                throw error
+            }
+    }
+
+    private data class OpenedConnectionProbe(
+        val probeClient: AdbConnectionProbeClient,
+        val response: ProtocolShellResponse,
+    )
 
     override suspend fun pair(
         pairingEndpoint: AdbEndpoint,
@@ -1598,24 +1831,20 @@ internal class DefaultAdbSessionManager(
                 previous?.cancelAndJoin()
                 coroutineScope {
                     launch {
-                        delay(LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS)
-                        localPairingCoordinator.onClockAdvanced()
-                    }
-                    launch {
-                        delay(LOCAL_PAIRING_WINDOW_MILLIS)
+                        delay(LOCAL_PAIRING_INPUT_WINDOW_MILLIS)
                         localPairingCoordinator.onClockAdvanced()
                     }
                     launch {
                         observeWirelessServices(
                             mode = WirelessDiscoveryMode.LOCAL_PAIRING,
-                            timeout = 120.seconds,
+                            timeout = 30.seconds,
                         ).collect { result ->
                             when (result) {
                                 is AdbOperationResult.Success -> {
                                     localPairingCoordinator.onDiscoveryState(result.value)
                                 }
                                 is AdbOperationResult.Failure -> when (result.error) {
-                                    AdbError.DiscoveryTimeout -> localPairingCoordinator.onClockAdvanced()
+                                    AdbError.DiscoveryTimeout -> localPairingCoordinator.onDiscoveryTimedOut()
                                     AdbError.DiscoveryPermissionUnavailable,
                                     AdbError.DiscoveryNetworkUnavailable,
                                     AdbError.DiscoveryPlatformFailure,
@@ -1652,17 +1881,29 @@ internal class DefaultAdbSessionManager(
         observation: WirelessServiceObservation,
         secret: PairingSecret,
     ): AdbOperationResult<Unit> {
-        stopLocalPairingDiscovery()
+        val pairingAttemptId = localPairingCoordinator.state.value.window?.attemptId
+        synchronized(localPairingDiscoveryLock) { localPairingDiscoveryJob }?.cancelAndJoin()
         val endpoint = observation.toPairingEndpoint()
         if (endpoint == null) {
             secret.clear()
             return operationFailure(AdbError.DiscoveryResolutionFailed, null, null)
         }
-        return pairWithSecret(
+        val result = pairWithSecret(
             pairingEndpoint = endpoint,
             pairingSecret = secret,
             method = PairingMethod.SIX_DIGIT_CODE,
         )
+        if (result is AdbOperationResult.Success && pairingAttemptId != null) {
+            val verifiedDeviceId = verifiedIdentity(
+                runCatching { pairingIdentityFingerprint(endpoint) }.getOrNull(),
+            )
+            synchronized(wirelessDiscoveryLock) {
+                lanPairingAssociations[pairingAttemptId] =
+                    LanPairingAssociation(observation, verifiedDeviceId)
+                trimLanPairingAssociations()
+            }
+        }
+        return result
     }
 
     override suspend fun createQrPairingAttempt(
@@ -1718,6 +1959,18 @@ internal class DefaultAdbSessionManager(
                 result
             } else {
                 qrResultAfterCompetingTerminal(attemptId, result)
+            }
+            if (finalResult is AdbOperationResult.Success) {
+                val verifiedDeviceId = verifiedIdentity(
+                    runCatching { pairingIdentityFingerprint(endpoint) }.getOrNull(),
+                )
+                synchronized(wirelessDiscoveryLock) {
+                    lanPairingAssociations[attemptId] = LanPairingAssociation(
+                        observation = observation,
+                        verifiedDeviceId = verifiedDeviceId,
+                    )
+                    trimLanPairingAssociations()
+                }
             }
             clearActiveQrAttempt(attemptId)
             finalResult
@@ -1798,6 +2051,9 @@ internal class DefaultAdbSessionManager(
         }
         return runCatching { AdbEndpoint(host, port) }.getOrNull()
     }
+
+    private fun PairingEndpointHandle.toPairingEndpoint(): AdbEndpoint? =
+        resolve(WirelessServiceObservation::class.java)?.toPairingEndpoint()
 
     override suspend fun executeShell(command: String, timeout: Duration): AdbOperationResult<ShellResult> =
         mutex.withLock {
@@ -1992,71 +2248,316 @@ internal class DefaultAdbSessionManager(
                 initialSession?.endpoint,
             )
         }
+        return continueRefreshProcesses(initialSession, expectedSessionId, timeout)
+    }
+
+    override suspend fun openInteractiveShell(
+        expectedSessionId: String,
+        timeout: Duration,
+    ): AdbOperationResult<InteractiveShellSession> = interactiveShellMutex.withLock {
+        mutex.withLock {
+        val currentSession = active
+        if (currentSession?.id != expectedSessionId) {
+            return@withLock failure(
+                AdbError.RemoteClosed(AdbOperationStage.SHELL),
+                currentSession?.endpoint,
+                null,
+            )
+        }
+        if (activeInteractiveShell != null) {
+            return@withLock failure(
+                AdbError.IoFailure(AdbOperationStage.SHELL),
+                currentSession.endpoint,
+                IllegalStateException("INTERACTIVE_SHELL_BUSY"),
+            )
+        }
+
+        var protocol: ProtocolInteractiveShell? = null
+        try {
+            protocol = withTimeout(timeout) {
+                runInterruptible(ioDispatcher) {
+                    ProtocolInteractiveShell(currentSession.client.openInteractiveShell())
+                }
+            }
+            val streamGeneration = interactiveShellGeneration.incrementAndGet()
+            val events = Channel<TerminalOutputEvent>(
+                capacity = INTERACTIVE_SHELL_EVENT_CAPACITY,
+                onBufferOverflow = BufferOverflow.DROP_OLDEST,
+            )
+            val owned = ActiveInteractiveShell(
+                expectedSessionId = expectedSessionId,
+                streamGeneration = streamGeneration,
+                protocol = protocol,
+                events = events,
+            )
+            activeInteractiveShell = owned
+            owned.readerJob = localPairingScope.launch {
+                try {
+                    while (currentCoroutineContext().isActive && !owned.closed.get()) {
+                        when (val packet = runInterruptible(ioDispatcher) { owned.protocol.read() }) {
+                            is ProtocolShellPacket.StandardOutput -> {
+                                if (packet.bytes.isEmpty()) {
+                                    emitInteractiveShellState(
+                                        owned,
+                                        TerminalOutputKind.REMOTE_READY,
+                                    )
+                                } else {
+                                    publishInteractiveShellEvent(
+                                        owned,
+                                        TerminalOutputKind.STDOUT,
+                                        packet.bytes,
+                                    )
+                                }
+                            }
+                            is ProtocolShellPacket.StandardError -> publishInteractiveShellEvent(
+                                owned,
+                                TerminalOutputKind.STDERR,
+                                packet.bytes,
+                            )
+                            is ProtocolShellPacket.Exit -> {
+                                publishInteractiveShellEvent(
+                                    owned,
+                                    TerminalOutputKind.OUTPUT_CLOSED,
+                                    ByteArray(0),
+                                )
+                                break
+                            }
+                        }
+                    }
+                } catch (_: CancellationException) {
+                    // The owner performs deterministic cleanup.
+                } catch (_: Throwable) {
+                    publishInteractiveShellEvent(
+                        owned,
+                        TerminalOutputKind.OUTPUT_CLOSED,
+                        ByteArray(0),
+                    )
+                } finally {
+                    withContext(NonCancellable) {
+                        closeInteractiveShellChild(
+                            owned,
+                            InteractiveShellCloseReason.REMOTE_CLOSED,
+                            cancelReader = false,
+                        )
+                    }
+                }
+            }
+
+            val publicSession = object : InteractiveShellSession {
+                override val expectedSessionId = owned.expectedSessionId
+                override val streamGeneration = owned.streamGeneration
+                override val outputEvents: Flow<TerminalOutputEvent> = owned.events.receiveAsFlow()
+
+                override suspend fun sendSubmittedCommand(
+                    completeCommand: String,
+                ): InteractiveShellResult = interactiveShellWrite(owned, writeStarted = true) {
+                    owned.protocol.sendSubmittedCommand(completeCommand)
+                    emitInteractiveShellState(owned, TerminalOutputKind.REMOTE_ACTIVE)
+                }
+
+                override suspend fun sendTerminalInput(
+                    input: TerminalInput,
+                ): InteractiveShellResult = interactiveShellWrite(owned, writeStarted = true) {
+                    owned.protocol.sendTerminalInput(input)
+                }
+
+                override suspend fun close(
+                    reason: InteractiveShellCloseReason,
+                ): InteractiveShellResult {
+                    closeInteractiveShellChild(owned, reason)
+                    return InteractiveShellResult.Closed
+                }
+            }
+            AdbOperationResult.Success(publicSession)
+        } catch (error: TimeoutCancellationException) {
+            runCatching { protocol?.close() }
+            operationFailure(AdbError.Timeout(AdbOperationStage.SHELL), currentSession.endpoint, error)
+        } catch (error: CancellationException) {
+            runCatching { protocol?.close() }
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            runCatching { protocol?.close() }
+            val mapped = if (error is UnsupportedOperationException) {
+                AdbError.ProtocolIncompatible(AdbOperationStage.SHELL)
+            } else {
+                AdbExceptionMapper.map(error, AdbOperationStage.SHELL)
+            }
+            operationFailure(mapped, currentSession.endpoint, error)
+        }
+        }
+    }
+
+    private suspend fun interactiveShellWrite(
+        owned: ActiveInteractiveShell,
+        writeStarted: Boolean,
+        block: suspend () -> Unit,
+    ): InteractiveShellResult {
+        val currentSessionId = active?.id
+        if (owned.closed.get() ||
+            owned.expectedSessionId != currentSessionId ||
+            owned.streamGeneration != activeInteractiveShell?.streamGeneration
+        ) {
+            return InteractiveShellResult.Disconnected()
+        }
+        return try {
+            block()
+            InteractiveShellResult.Accepted
+        } catch (_: TimeoutCancellationException) {
+            InteractiveShellResult.TimedOut()
+        } catch (_: CancellationException) {
+            InteractiveShellResult.Cancelled()
+        } catch (error: UnsupportedOperationException) {
+            InteractiveShellResult.Unsupported()
+        } catch (error: Throwable) {
+            when (AdbExceptionMapper.interactiveShellTechnicalCode(error, writeStarted)) {
+                AdbExceptionMapper.INTERACTIVE_SHELL_OUTCOME_UNKNOWN ->
+                    InteractiveShellResult.OutcomeUnknown()
+                else -> InteractiveShellResult.Failed(
+                    AdbExceptionMapper.interactiveShellTechnicalCode(error, writeStarted),
+                )
+            }
+        }
+    }
+
+    private fun publishInteractiveShellEvent(
+        owner: ActiveInteractiveShell,
+        kind: TerminalOutputKind,
+        bytes: ByteArray,
+    ) {
+        val event = TerminalOutputEvent(
+            expectedSessionId = owner.expectedSessionId,
+            streamGeneration = owner.streamGeneration,
+            kind = kind,
+            text = bytes.toString(Charsets.UTF_8),
+            hadDecodingReplacement = bytes.toString(Charsets.UTF_8).contains('\uFFFD'),
+        )
+        val currentSessionId = active?.id
+        if (event.expectedSessionId != currentSessionId ||
+            event.streamGeneration != activeInteractiveShell?.streamGeneration
+        ) {
+            return
+        }
+        owner.events.trySend(event)
+    }
+
+    private fun emitInteractiveShellState(
+        owner: ActiveInteractiveShell,
+        kind: TerminalOutputKind,
+    ) = publishInteractiveShellEvent(owner, kind, ByteArray(0))
+
+    private suspend fun closeInteractiveShellChild(
+        owner: ActiveInteractiveShell,
+        reason: InteractiveShellCloseReason,
+        cancelReader: Boolean = true,
+    ) {
+        if (!owner.closed.compareAndSet(false, true)) return
+        if (activeInteractiveShell === owner) activeInteractiveShell = null
+        withContext(NonCancellable + ioDispatcher) {
+            runCatching { owner.protocol.closeInput() }
+            runCatching { owner.protocol.closeOutput() }
+            runCatching { owner.protocol.close() }
+        }
+        owner.events.close()
+        if (cancelReader) owner.readerJob?.cancel()
+        @Suppress("UNUSED_VARIABLE")
+        val closeReason = reason
+    }
+    private suspend fun continueRefreshProcesses(
+        initialSession: ActiveSession,
+        expectedSessionId: String,
+        timeout: Duration,
+    ): AdbOperationResult<List<ProcessSnapshotEntry>> {
         val generation = processAnalysisGeneration.incrementAndGet()
         processRefreshRequestedGeneration.set(generation)
         return try {
-            withTimeout(minOf(timeout, PROCESS_REFRESH_BUDGET)) {
-                val applications = when (val result = listApplications(timeout)) {
-                    is AdbOperationResult.Success -> result.value
+            withTimeout(maxOf(timeout, PROCESS_REFRESH_BUDGET)) {
+                val cachedApplications = mutex.withLock {
+                    applicationSnapshot?.takeIf { it.sessionId == expectedSessionId }
+                }
+                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
+                    return@withTimeout AdbOperationResult.Cancelled
+                }
+                val extendedPsText = when (val result = executeShell(AdbCommands.PROCESSES_EXTENDED, timeout)) {
+                    is AdbOperationResult.Success -> result.value.stdout
                     is AdbOperationResult.Failure -> return@withTimeout result
                     AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
                 }
                 if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
                     return@withTimeout AdbOperationResult.Cancelled
                 }
-                val psText = when (val result = executeShell(AdbCommands.PROCESSES_EXTENDED, timeout)) {
-                    is AdbOperationResult.Success -> result.value.stdout
-                    is AdbOperationResult.Failure -> return@withTimeout result
-                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
-                }
-                val processorCount = when (val result = executeShell(AdbCommands.CORES, timeout)) {
-                    is AdbOperationResult.Success -> result.value.stdout.trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
-                    is AdbOperationResult.Failure -> 1
-                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
-                }
-                val firstText = when (val result = executeShell(AdbCommands.PROCESS_COUNTERS, timeout)) {
-                    is AdbOperationResult.Success -> result.value.stdout
-                    is AdbOperationResult.Failure -> return@withTimeout result
-                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
-                }
-                delay(PROCESS_SAMPLE_INTERVAL)
-                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
-                    return@withTimeout AdbOperationResult.Cancelled
-                }
-                val secondText = when (val result = executeShell(AdbCommands.PROCESS_COUNTERS, timeout)) {
-                    is AdbOperationResult.Success -> result.value.stdout
-                    is AdbOperationResult.Failure -> return@withTimeout result
-                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
-                }
-                val pssText = when (val result = executeShell(AdbCommands.PROCESS_PSS, timeout)) {
-                    is AdbOperationResult.Success -> result.value.stdout
-                    is AdbOperationResult.Failure -> ""
-                    AdbOperationResult.Cancelled -> return@withTimeout AdbOperationResult.Cancelled
-                }
-                if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
-                    return@withTimeout AdbOperationResult.Cancelled
-                }
-                val firstCounters = AdbCapabilityParsers.processCounters(firstText)
-                val secondCounters = AdbCapabilityParsers.processCounters(secondText)
-                val applicationNames = applications.applications.associate { it.packageName to null }
-                val entries = ProcessSnapshotParser.parse(
+                var psText = extendedPsText
+                var parsedEntries = ProcessSnapshotParser.parse(
                     psText = psText,
                     sessionId = expectedSessionId,
                     generation = generation,
-                    firstProcessTicks = firstCounters.mapValues { it.value.cpuTicks },
-                    secondProcessTicks = secondCounters.mapValues { it.value.cpuTicks },
-                    elapsedTotalTicks = cpuTickDelta(firstText, secondText),
-                    processorCount = processorCount,
-                    pssKiBByPid = AdbCapabilityParsers.compactPss(pssText),
-                    startTimeTicksByPid = secondCounters.mapValues { it.value.startTimeTicks },
-                ).map { entry ->
+                )
+                if (parsedEntries.isEmpty() ||
+                    parsedEntries.any { it.cpuPercent == null || it.pssMiB == null }
+                ) {
+                    val fallback = executeShell(AdbCommands.PROCESSES_FALLBACK, timeout)
+                    val fallbackText = (fallback as? AdbOperationResult.Success)?.value?.stdout
+                    if (!fallbackText.isNullOrBlank()) {
+                        val fallbackEntries = ProcessSnapshotParser.parse(
+                            psText = fallbackText,
+                            sessionId = expectedSessionId,
+                            generation = generation,
+                        )
+                        if (fallbackEntries.isNotEmpty()) psText = fallbackText
+                    }
+
+                    val firstCountersText = (executeShell(
+                        AdbCommands.PROCESS_COUNTERS,
+                        timeout,
+                    ) as? AdbOperationResult.Success)?.value?.stdout
+                    delay(PROCESS_COUNTER_SAMPLE_DELAY)
+                    val secondCountersText = (executeShell(
+                        AdbCommands.PROCESS_COUNTERS,
+                        timeout,
+                    ) as? AdbOperationResult.Success)?.value?.stdout
+                    val processorCount = (
+                        executeShell(AdbCommands.CORES, timeout) as? AdbOperationResult.Success
+                    )?.value?.stdout?.trim()?.lineSequence()?.firstOrNull()?.toIntOrNull() ?: 1
+                    val firstCounters = firstCountersText
+                        ?.let(AdbCapabilityParsers::processCounters)
+                        .orEmpty()
+                    val secondCounters = secondCountersText
+                        ?.let(AdbCapabilityParsers::processCounters)
+                        .orEmpty()
+                    val firstTotal = firstCountersText?.let(AdbCapabilityParsers::totalCpuTicks)
+                    val secondTotal = secondCountersText?.let(AdbCapabilityParsers::totalCpuTicks)
+                    parsedEntries = ProcessSnapshotParser.parse(
+                        psText = psText,
+                        sessionId = expectedSessionId,
+                        generation = generation,
+                        firstProcessTicks = firstCounters.mapValues { it.value.cpuTicks },
+                        secondProcessTicks = secondCounters.mapValues { it.value.cpuTicks },
+                        elapsedTotalTicks = if (
+                            firstTotal != null && secondTotal != null && secondTotal >= firstTotal
+                        ) {
+                            secondTotal - firstTotal
+                        } else {
+                            null
+                        },
+                        processorCount = processorCount,
+                        startTimeTicksByPid = secondCounters.mapValues { it.value.startTimeTicks },
+                    )
+                }
+                val applicationNames = cachedApplications
+                    ?.applications
+                    ?.associate { it.packageName to null }
+                    .orEmpty()
+                val entries = parsedEntries.map { entry ->
                     val resolved = ProcessApplicationAssociationResolver.resolve(
                         entry.processName,
                         applicationNames,
                     )
+                    val inferredPackage = entry.processName
+                        .substringBefore(':')
+                        .takeIf(ApplicationParsers::isValidPackageName)
+                        ?.takeIf { entry.identity.uid.orEmpty().matches(APP_PROCESS_USER_PATTERN) }
                     entry.copy(
                         applicationName = resolved?.applicationName ?: "无法解析应用名",
-                        applicationPackage = resolved?.packageName,
+                        applicationPackage = resolved?.packageName ?: inferredPackage,
                     )
                 }
                 if (!isCurrentProcessRefresh(expectedSessionId, generation)) {
@@ -2075,12 +2576,6 @@ internal class DefaultAdbSessionManager(
     private suspend fun isCurrentProcessRefresh(expectedSessionId: String, generation: Long): Boolean =
         processRefreshRequestedGeneration.get() == generation &&
             mutex.withLock { active?.id == expectedSessionId }
-
-    private fun cpuTickDelta(firstText: String, secondText: String): Long? {
-        val first = AdbCapabilityParsers.totalCpuTicks(firstText) ?: return null
-        val second = AdbCapabilityParsers.totalCpuTicks(secondText) ?: return null
-        return (second - first).takeIf { it > 0L }
-    }
 
     override suspend fun terminateProcess(
         request: ProcessTerminationRequest,
@@ -2282,6 +2777,441 @@ internal class DefaultAdbSessionManager(
             }
         }
 
+    override suspend fun openApkExtraction(
+        request: ApkExtractionRequest,
+        timeout: Duration,
+    ): AdbOperationResult<ApkExtractionHandle> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != request.expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_EXTRACTION),
+                session?.endpoint,
+                null,
+            )
+        }
+        if (!ApplicationParsers.isValidPackageName(request.packageName)) {
+            return operationFailure(
+                AdbError.DeviceRejected(AdbOperationStage.APK_EXTRACTION),
+                session.endpoint,
+                null,
+            )
+        }
+        val lease = when (
+            val acquired = acquireExclusiveOperation(
+                AdbExclusiveOperationKind.APK_EXTRACTION,
+                request.expectedSessionId,
+            )
+        ) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return acquired
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        return try {
+            val resolved = ApkExtractionProtocol.discover(
+                client = session.client,
+                userId = request.userId,
+                packageName = request.packageName,
+                timeout = timeout,
+            )
+            if (mutex.withLock { active?.id } != request.expectedSessionId || !lease.isActive) {
+                lease.release()
+                return operationFailure(
+                    AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_EXTRACTION),
+                    session.endpoint,
+                    null,
+                )
+            }
+            AdbOperationResult.Success(
+                createApkExtractionHandle(
+                    session = session,
+                    expectedSessionId = request.expectedSessionId,
+                    resolved = resolved,
+                    lease = lease,
+                ),
+            )
+        } catch (error: TimeoutCancellationException) {
+            lease.release()
+            operationFailure(AdbError.Timeout(AdbOperationStage.APK_EXTRACTION), session.endpoint, error)
+        } catch (_: CancellationException) {
+            lease.release()
+            AdbOperationResult.Cancelled
+        } catch (error: Throwable) {
+            lease.release()
+            operationFailure(
+                AdbError.DeviceRejected(AdbOperationStage.APK_EXTRACTION),
+                session.endpoint,
+                error,
+            )
+        }
+    }
+
+    private fun createApkExtractionHandle(
+        session: ActiveSession,
+        expectedSessionId: String,
+        resolved: List<ResolvedApkComponent>,
+        lease: ExclusiveAdbOperationLease,
+    ): ApkExtractionHandle {
+        val closed = AtomicBoolean(false)
+        val transferMutex = Mutex()
+        val pathsById = resolved.associate { it.publicComponent.componentId to it.remotePath }
+        val publicComponents = resolved.map(ResolvedApkComponent::publicComponent)
+        return object : ApkExtractionHandle {
+            override val expectedSessionId = expectedSessionId
+            override val components = publicComponents
+
+            override suspend fun transfer(
+                componentId: String,
+                destination: OutputStream,
+                noProgressTimeout: Duration,
+                progress: (FileTransferProgress) -> Unit,
+            ): AdbOperationResult<ApkComponentTransferReceipt> = transferMutex.withLock {
+                val path = pathsById[componentId]
+                if (path == null || closed.get() || !lease.isActive ||
+                    mutex.withLock { active?.id } != expectedSessionId
+                ) {
+                    return@withLock operationFailure(
+                        AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_EXTRACTION),
+                        session.endpoint,
+                        null,
+                    )
+                }
+                try {
+                    val transferred = KadbRemoteFileProtocol.receive(
+                        client = session.client,
+                        path = path,
+                        destination = destination,
+                        noProgressTimeout = noProgressTimeout,
+                        cancellationGrace = transferCancellationGrace,
+                        onForcedSessionClose = { runCatching { session.client.close() } },
+                    ) { bytes ->
+                        progress(
+                            FileTransferProgress(
+                                transferredBytes = bytes,
+                                totalBytes = components.firstOrNull { it.componentId == componentId }
+                                    ?.expectedSizeBytes,
+                            ),
+                        )
+                    }
+                    if (!lease.isActive || mutex.withLock { active?.id } != expectedSessionId) {
+                        operationFailure(
+                            AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_EXTRACTION),
+                            session.endpoint,
+                            null,
+                        )
+                    } else {
+                        AdbOperationResult.Success(
+                            ApkComponentTransferReceipt(expectedSessionId, componentId, transferred),
+                        )
+                    }
+                } catch (error: ProtocolNoProgressTimeoutException) {
+                    operationFailure(AdbError.NoProgressTimeout, session.endpoint, error)
+                } catch (_: CancellationException) {
+                    AdbOperationResult.Cancelled
+                } catch (error: Throwable) {
+                    operationFailure(fileTransferError(error), session.endpoint, error)
+                }
+            }
+
+            override fun close() {
+                if (closed.compareAndSet(false, true)) lease.release()
+            }
+        }
+    }
+
+    override suspend fun installApk(
+        request: ApkInstallRequest,
+        progress: (ApkInstallStage) -> Unit,
+        timeout: Duration,
+    ): AdbOperationResult<ApkInstallResult> {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != request.expectedSessionId) {
+            return operationFailure(
+                AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_INSTALL),
+                session?.endpoint,
+                null,
+            )
+        }
+        if (!request.displayName.lowercase().endsWith(".apk") ||
+            request.expectedPackageName?.let(ApplicationParsers::isValidPackageName) == false
+        ) {
+            return AdbOperationResult.Success(
+                ApkInstallResult.Rejected(request.expectedSessionId, "INPUT_NOT_STANDALONE"),
+            )
+        }
+        val lease = when (
+            val acquired = acquireExclusiveOperation(
+                AdbExclusiveOperationKind.APK_INSTALL,
+                request.expectedSessionId,
+            )
+        ) {
+            is AdbOperationResult.Success -> acquired.value
+            is AdbOperationResult.Failure -> return acquired
+            AdbOperationResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
+        val stagedRemotePath = "/data/local/tmp/.sheen-${UUID.randomUUID()}.apk"
+        var mutationStarted = false
+        var cleanupConfirmed = false
+        val outcome = try {
+            withTimeout(timeout) {
+                progress(ApkInstallStage.STAGING)
+                request.source().use { source ->
+                    stageApk(
+                        client = session.client,
+                        stagedRemotePath = stagedRemotePath,
+                        source = source,
+                        sourceSizeBytes = request.sourceSizeBytes,
+                        timeout = timeout,
+                        noProgressTimeout = transferNoProgressTimeout,
+                        progress = {},
+                    )
+                }
+
+                val targetPackage = request.expectedPackageName
+                val packageVersionsBeforeInstall = if (targetPackage == null) {
+                    installedPackageVersionsForVerification(session.client, request.userId, timeout)
+                } else {
+                    null
+                }
+                val packagesBeforeInstall = if (targetPackage == null) {
+                    installedPackageNamesForVerification(session.client, request.userId, timeout)
+                } else {
+                    null
+                }
+                var oldRemoved = false
+                if (request.mode == ApkInstallMode.UNINSTALL_THEN_INSTALL) {
+                    if (targetPackage == null) {
+                        return@withTimeout ApkInstallResult.Rejected(
+                            request.expectedSessionId,
+                            "PACKAGE_IDENTITY_REQUIRED",
+                        )
+                    }
+                    mutationStarted = true
+                    val uninstall = executePackageCommand(
+                        session.client,
+                        ApplicationPackageProtocol.uninstallForUser(request.userId, targetPackage),
+                        timeout,
+                    )
+                    if (!uninstall.commandSucceeded()) {
+                        return@withTimeout ApkInstallResult.Rejected(
+                            request.expectedSessionId,
+                            "UNINSTALL_FAILED",
+                        )
+                    }
+                    oldRemoved = !verifyInstalledPackage(
+                        session.client,
+                        request.userId,
+                        targetPackage,
+                        timeout,
+                    )
+                    if (!oldRemoved) {
+                        return@withTimeout ApkInstallResult.Rejected(
+                            request.expectedSessionId,
+                            "SYSTEM_BASE_RETAINED",
+                        )
+                    }
+                }
+
+                mutationStarted = true
+                progress(ApkInstallStage.INSTALLING)
+                val install = installStagedApk(
+                    client = session.client,
+                    stagedRemotePath = stagedRemotePath,
+                    replaceExisting = request.mode == ApkInstallMode.REPLACE ||
+                        request.mode == ApkInstallMode.REPLACE_OR_DOWNGRADE,
+                    allowDowngrade = request.mode == ApkInstallMode.REPLACE_OR_DOWNGRADE,
+                    timeout = timeout,
+                )
+                if (!install.commandSucceeded()) {
+                    val installError = AdbError.DeviceRejected(AdbOperationStage.APK_INSTALL)
+                    return@withTimeout if (oldRemoved && targetPackage != null) {
+                        ApkInstallResult.OldRemovedNoRollback(
+                            expectedSessionId = request.expectedSessionId,
+                            packageName = targetPackage,
+                            cause = installError,
+                        )
+                    } else {
+                        ApkInstallResult.Rejected(request.expectedSessionId, "INSTALL_FAILED")
+                    }
+                }
+
+                progress(ApkInstallStage.VERIFYING)
+                val verifiedTarget = targetPackage ?: discoverSingleInstalledPackage(
+                    client = session.client,
+                    userId = request.userId,
+                    packageVersionsBeforeInstall = packageVersionsBeforeInstall,
+                    packagesBeforeInstall = packagesBeforeInstall,
+                    timeout = timeout,
+                )
+                if (verifiedTarget == null) {
+                    when (request.mode) {
+                        ApkInstallMode.STANDARD ->
+                            ApkInstallResult.Rejected(request.expectedSessionId, "INSTALL_FAILED")
+                        ApkInstallMode.REPLACE,
+                        ApkInstallMode.REPLACE_OR_DOWNGRADE,
+                        -> ApkInstallResult.PackageManagerAccepted(
+                            expectedSessionId = request.expectedSessionId,
+                            privateDataPreserved = true,
+                        )
+                        ApkInstallMode.UNINSTALL_THEN_INSTALL -> ApkInstallResult.OutcomeUnknown(
+                            request.expectedSessionId,
+                            ApkInstallStage.VERIFYING,
+                        )
+                    }
+                } else if (!verifyInstalledPackage(
+                        session.client,
+                        request.userId,
+                        verifiedTarget,
+                        timeout,
+                    )
+                ) {
+                    ApkInstallResult.OutcomeUnknown(
+                        request.expectedSessionId,
+                        ApkInstallStage.VERIFYING,
+                    )
+                } else {
+                    ApkInstallResult.VerifiedInstalled(
+                        expectedSessionId = request.expectedSessionId,
+                        packageName = verifiedTarget,
+                        privateDataPreserved = request.mode == ApkInstallMode.REPLACE ||
+                            request.mode == ApkInstallMode.REPLACE_OR_DOWNGRADE,
+                    )
+                }
+            }
+        } catch (_: TimeoutCancellationException) {
+            ApkInstallResult.TimedOut(
+                expectedSessionId = request.expectedSessionId,
+                stage = if (mutationStarted) ApkInstallStage.VERIFYING else ApkInstallStage.STAGING,
+            )
+        } catch (_: CancellationException) {
+            ApkInstallResult.Cancelled(request.expectedSessionId, mutationStarted)
+        } catch (error: Throwable) {
+            val technicalCode = apkInstallFailureCode(error, mutationStarted)
+            appendDiagnostic(
+                AdbOperationStage.APK_INSTALL,
+                AdbDiagnosticOutcome.FAILED,
+                technicalCode,
+                session.endpoint,
+                error,
+            )
+            ApkInstallResult.OutcomeUnknown(
+                expectedSessionId = request.expectedSessionId,
+                stage = if (mutationStarted) ApkInstallStage.INSTALLING else ApkInstallStage.STAGING,
+                technicalCode = technicalCode,
+            )
+        } finally {
+            progress(ApkInstallStage.CLEANING)
+            cleanupConfirmed = withContext(NonCancellable) {
+                cleanupStagedApk(session.client, stagedRemotePath)
+            }
+            lease.release()
+        }
+        val cleanupAwareOutcome = if (!cleanupConfirmed &&
+            outcome is ApkInstallResult.VerifiedInstalled
+        ) {
+            ApkInstallResult.OutcomeUnknown(request.expectedSessionId, ApkInstallStage.CLEANING)
+        } else {
+            outcome
+        }
+        return AdbOperationResult.Success(cleanupAwareOutcome)
+    }
+
+    private fun apkInstallFailureCode(error: Throwable, mutationStarted: Boolean): String = when (error) {
+        is ProtocolLocalSourceException -> "APK_SOURCE_READ_FAILED"
+        is ProtocolNoProgressTimeoutException -> "APK_TRANSFER_NO_PROGRESS"
+        is SecurityException -> "APK_SOURCE_PERMISSION_DENIED"
+        else -> AdbExceptionMapper.map(
+            error,
+            if (mutationStarted) AdbOperationStage.APK_INSTALL else AdbOperationStage.FILE_TRANSFER,
+        ).technicalCode
+    }
+
+    private suspend fun discoverSingleInstalledPackage(
+        client: AdbProtocolClient,
+        userId: Int,
+        packageVersionsBeforeInstall: Map<String, Long>?,
+        packagesBeforeInstall: Set<String>?,
+        timeout: Duration,
+    ): String? {
+        val versionsAfter = installedPackageVersionsForVerification(client, userId, timeout)
+        ApplicationPackageProtocol.singleInstalledOrChanged(
+            packageVersionsBeforeInstall,
+            versionsAfter,
+        )?.let { return it }
+        val before = packagesBeforeInstall ?: return null
+        val after = installedPackageNamesForVerification(client, userId, timeout) ?: return null
+        return (after - before).singleOrNull()
+    }
+
+    private suspend fun installedPackageVersionsForVerification(
+        client: AdbProtocolClient,
+        userId: Int,
+        timeout: Duration,
+    ): Map<String, Long>? {
+        val response = executePackageCommand(
+            client,
+            ApplicationPackageProtocol.versionedPackages(userId),
+            timeout,
+        )
+        if (!response.commandSucceeded()) return null
+        return ApplicationPackageProtocol.parseVersionedPackages(response.stdout)
+    }
+
+    private suspend fun installedPackageNamesForVerification(
+        client: AdbProtocolClient,
+        userId: Int,
+        timeout: Duration,
+    ): Set<String>? {
+        val response = executePackageCommand(client, "pm list packages --user $userId", timeout)
+        if (!response.commandSucceeded()) return null
+        return when (val parsed = ApplicationParsers.packageNames(response.stdout)) {
+            is PackageNamesParse.Success -> parsed.names
+            PackageNamesParse.Empty -> emptySet()
+            PackageNamesParse.Malformed,
+            PackageNamesParse.CapacityExceeded,
+            -> null
+        }
+    }
+
+    private suspend fun executePackageCommand(
+        client: AdbProtocolClient,
+        command: String,
+        timeout: Duration,
+    ): ProtocolShellResponse = withTimeout(timeout) {
+        runInterruptible(ioDispatcher) {
+            client.openShellCommand(command).use(ProtocolShellCommand::execute)
+        }
+    }
+
+    private suspend fun verifyInstalledPackage(
+        client: AdbProtocolClient,
+        userId: Int,
+        packageName: String,
+        timeout: Duration,
+    ): Boolean {
+        val response = executePackageCommand(
+            client,
+            ApplicationPackageProtocol.packagePresence(userId, packageName),
+            timeout,
+        )
+        return response.commandSucceeded() &&
+            response.stdout.lineSequence().map(String::trim).any { it == "package:$packageName" }
+    }
+
+    private suspend fun cleanupStagedApk(
+        client: AdbProtocolClient,
+        stagedRemotePath: String,
+    ): Boolean = runCatching {
+        withTimeout(APK_CLEANUP_TIMEOUT) {
+            deleteStagedApk(client, stagedRemotePath, APK_CLEANUP_TIMEOUT)
+        }
+    }.getOrDefault(false)
+
+    private fun ProtocolShellResponse.commandSucceeded(): Boolean =
+        exitCode == 0 &&
+            !stdout.contains("Failure [", ignoreCase = true) &&
+            !stderr.contains("Failure [", ignoreCase = true) &&
+            !stderr.contains("permission denied", ignoreCase = true)
+
     override fun observeApplicationMetadata(
         expectedSessionId: String,
         preferredLocaleTags: List<String>,
@@ -2399,6 +3329,182 @@ internal class DefaultAdbSessionManager(
 
     private class ApplicationMetadataOwnershipLost : RuntimeException()
 
+    override suspend fun prepareApplicationUninstall(
+        expectedSessionId: String,
+        userId: Int,
+        packageName: String,
+        expectedGeneration: Long,
+    ): AdbOperationResult<ApplicationUninstallPreparation> = applicationMutex.withLock {
+        val session = mutex.withLock { active }
+        val snapshot = applicationSnapshot
+        if (session == null || session.id != expectedSessionId ||
+            snapshot == null || snapshot.sessionId != expectedSessionId ||
+            snapshot.userId != userId || snapshot.generation != expectedGeneration
+        ) {
+            return@withLock applicationFailure(
+                AdbError.ApplicationSessionInvalid(AdbOperationStage.APPLICATION_UNINSTALL),
+                session?.endpoint,
+            )
+        }
+        val target = snapshot.applications.singleOrNull { it.packageName == packageName }
+            ?: return@withLock applicationFailure(
+                AdbError.ApplicationPackageNotFound(AdbOperationStage.APPLICATION_UNINSTALL),
+                session.endpoint,
+            )
+        val preparation = ApplicationUninstallPreparation(
+            expectedSessionId = expectedSessionId,
+            userId = userId,
+            packageName = packageName,
+            expectedGeneration = expectedGeneration,
+            confirmationNonce = UUID.randomUUID().toString(),
+            classification = target.classification,
+        )
+        pendingApplicationUninstall = PendingApplicationUninstall(preparation)
+        AdbOperationResult.Success(preparation)
+    }
+
+    override suspend fun uninstallApplication(
+        request: ApplicationUninstallRequest,
+        timeout: Duration,
+    ): AdbOperationResult<ApplicationUninstallResult> = applicationMutex.withLock {
+        val session = mutex.withLock { active }
+        if (session == null || session.id != request.expectedSessionId) {
+            return@withLock applicationFailure(
+                AdbError.ApplicationSessionInvalid(AdbOperationStage.APPLICATION_UNINSTALL),
+                session?.endpoint,
+            )
+        }
+        val preparation = validateUninstallConfirmation(request)
+            ?: return@withLock AdbOperationResult.Success(
+                ApplicationUninstallResult.Rejected(request.expectedSessionId, "CONFIRMATION_INVALID"),
+            )
+        pendingApplicationUninstall = null
+        if (preparation.classification != ApplicationClassification.ORDINARY ||
+            !request.deletePrivateDataAcknowledged
+        ) {
+            return@withLock AdbOperationResult.Success(
+                ApplicationUninstallResult.PolicyRejected(
+                    request.expectedSessionId,
+                    preparation.classification,
+                ),
+            )
+        }
+
+        var dispatched = false
+        try {
+            withTimeout(timeout) {
+                val fresh = loadApplicationSnapshot(session, timeout, remember = true)
+                val snapshot = (fresh as? AdbOperationResult.Success)?.value
+                    ?: return@withTimeout ApplicationUninstallResult.OutcomeUnknown(
+                        request.expectedSessionId,
+                        ApplicationUninstallStage.PREPARING,
+                    )
+                val target = snapshot.applications.singleOrNull {
+                    it.packageName == request.packageName && it.userId == request.userId
+                } ?: return@withTimeout ApplicationUninstallResult.VerifiedRemoved(
+                    request.expectedSessionId,
+                    request.packageName,
+                )
+                if (target.classification != ApplicationClassification.ORDINARY) {
+                    return@withTimeout ApplicationUninstallResult.PolicyRejected(
+                        request.expectedSessionId,
+                        target.classification,
+                    )
+                }
+
+                dispatched = true
+                val response = executePackageCommand(
+                    session.client,
+                    ApplicationPackageProtocol.uninstallForUser(request.userId, request.packageName),
+                    timeout,
+                )
+                if (!response.commandSucceeded()) {
+                    return@withTimeout ApplicationUninstallResult.Rejected(
+                        request.expectedSessionId,
+                        "UNINSTALL_REJECTED",
+                    )
+                }
+                when (
+                    val remaining = verifyApplicationRemoval(
+                        session,
+                        request.expectedSessionId,
+                        request.userId,
+                        request.packageName,
+                        timeout,
+                    )
+                ) {
+                    null -> ApplicationUninstallResult.VerifiedRemoved(
+                        request.expectedSessionId,
+                        request.packageName,
+                    )
+                    else -> if (remaining.classification == ApplicationClassification.SYSTEM) {
+                        ApplicationUninstallResult.SystemBaseRetained(
+                            request.expectedSessionId,
+                            request.packageName,
+                        )
+                    } else {
+                        ApplicationUninstallResult.OutcomeUnknown(
+                            request.expectedSessionId,
+                            ApplicationUninstallStage.VERIFYING,
+                        )
+                    }
+                }
+            }.let { AdbOperationResult.Success(it) }
+        } catch (_: TimeoutCancellationException) {
+            AdbOperationResult.Success(
+                if (dispatched) {
+                    ApplicationUninstallResult.OutcomeUnknown(
+                        request.expectedSessionId,
+                        ApplicationUninstallStage.UNINSTALLING,
+                    )
+                } else {
+                    ApplicationUninstallResult.TimedOut(
+                        request.expectedSessionId,
+                        ApplicationUninstallStage.PREPARING,
+                    )
+                },
+            )
+        } catch (_: CancellationException) {
+            if (dispatched) {
+                AdbOperationResult.Success(
+                    ApplicationUninstallResult.OutcomeUnknown(
+                        request.expectedSessionId,
+                        ApplicationUninstallStage.UNINSTALLING,
+                    ),
+                )
+            } else {
+                AdbOperationResult.Cancelled
+            }
+        }
+    }
+
+    private fun validateUninstallConfirmation(
+        request: ApplicationUninstallRequest,
+    ): ApplicationUninstallPreparation? {
+        val prepared = pendingApplicationUninstall?.preparation ?: return null
+        return prepared.takeIf {
+            it.expectedSessionId == request.expectedSessionId &&
+                it.userId == request.userId &&
+                it.packageName == request.packageName &&
+                it.expectedGeneration == request.expectedGeneration &&
+                it.confirmationNonce == request.confirmationNonce
+        }
+    }
+
+    private suspend fun verifyApplicationRemoval(
+        session: ActiveSession,
+        expectedSessionId: String,
+        userId: Int,
+        packageName: String,
+        timeout: Duration,
+    ): RemoteApplication? {
+        if (mutex.withLock { active?.id } != expectedSessionId) return null
+        val refreshed = loadApplicationSnapshot(session, timeout, remember = true)
+        val snapshot = (refreshed as? AdbOperationResult.Success)?.value ?: return null
+        if (snapshot.sessionId != expectedSessionId || snapshot.userId != userId) return null
+        return snapshot.applications.singleOrNull { it.packageName == packageName }
+    }
+
     override suspend fun forceStopApplication(
         packageName: String,
         expectedSessionId: String,
@@ -2471,37 +3577,37 @@ internal class DefaultAdbSessionManager(
                     ApplicationCommands.setEnabled(fresh.userId, packageName, enabled)
                 }
                 dispatched = true
-                when (val commandResult = executeShell(command, timeout)) {
-                    is AdbOperationResult.Success -> {
-                        val rejection = ApplicationParsers.rejectedOutput(
-                            commandResult.value.stdout,
-                            commandResult.value.stderr,
-                            commandResult.value.exitCode,
+                val commandResponse = executePackageCommand(session.client, command, timeout)
+                val rejection = ApplicationParsers.rejectedOutput(
+                    commandResponse.stdout,
+                    commandResponse.stderr,
+                    commandResponse.exitCode,
+                )
+                if (rejection != null) {
+                    return@withTimeout when (rejection) {
+                        ApplicationCommandRejection.PACKAGE_NOT_FOUND -> applicationFailure(
+                            AdbError.ApplicationPackageNotFound(stage),
+                            session.endpoint,
                         )
-                        if (rejection != null) {
-                            return@withTimeout when (rejection) {
-                                ApplicationCommandRejection.PACKAGE_NOT_FOUND -> applicationFailure(
-                                    AdbError.ApplicationPackageNotFound(stage),
-                                    session.endpoint,
-                                )
-                                ApplicationCommandRejection.POLICY -> applicationFailure(
-                                    AdbError.ApplicationPolicyRejected(stage),
-                                    session.endpoint,
-                                )
-                            }
-                        }
-                    }
-                    is AdbOperationResult.Failure -> {
-                        if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
-                        return@withTimeout unknownMutation(session, stage)
-                    }
-                    AdbOperationResult.Cancelled -> {
-                        if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
-                        return@withTimeout unknownMutation(session, stage)
+                        ApplicationCommandRejection.POLICY -> applicationFailure(
+                            AdbError.ApplicationPolicyRejected(stage),
+                            session.endpoint,
+                        )
                     }
                 }
 
                 if (enabled == null) {
+                    val running = executePackageCommand(
+                        session.client,
+                        "pidof $packageName",
+                        timeout,
+                    ).stdout.trim()
+                    if (running.isNotEmpty()) {
+                        return@withTimeout applicationFailure(
+                            AdbError.ApplicationStateVerifyFailed,
+                            session.endpoint,
+                        )
+                    }
                     appendDiagnostic(stage, AdbDiagnosticOutcome.SUCCEEDED, "ADB_APP_FORCE_STOP_ACCEPTED", session.endpoint)
                     return@withTimeout AdbOperationResult.Success(ApplicationMutationResult.RequestAccepted(session.id))
                 }
@@ -2539,6 +3645,13 @@ internal class DefaultAdbSessionManager(
                 if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
                 unknownMutation(session, stage)
             } else AdbOperationResult.Cancelled
+        } catch (_: Throwable) {
+            if (dispatched) {
+                if (active?.id == session.id) withContext(NonCancellable) { closeSession(session) }
+                unknownMutation(session, stage)
+            } else {
+                applicationFailure(AdbError.RemoteClosed(stage), session.endpoint)
+            }
         }
     }
 
@@ -2573,6 +3686,19 @@ internal class DefaultAdbSessionManager(
             PackageQueryResult.Cancelled -> return AdbOperationResult.Cancelled
         }
         var degradedReason: String? = OPTIONAL_FIELDS_UNAVAILABLE_REASON
+        val system = when (val parsed = querySystemPackageNames(userId, timeout)) {
+            is PackageQueryResult.Names -> parsed
+            PackageQueryResult.Empty -> PackageQueryResult.Names(linkedSetOf(), emptyMap())
+            PackageQueryResult.CapacityExceeded -> return applicationFailure(
+                AdbError.ApplicationListCapacityExceeded,
+                session.endpoint,
+            )
+            PackageQueryResult.Unsupported -> PackageQueryResult.Names(linkedSetOf(), emptyMap()).also {
+                degradedReason = "$OPTIONAL_FIELDS_UNAVAILABLE_REASON; SYSTEM_CLASSIFICATION_UNAVAILABLE"
+            }
+            is PackageQueryResult.OperationFailure -> return parsed.result
+            PackageQueryResult.Cancelled -> return AdbOperationResult.Cancelled
+        }
         val disabled = when (val parsed = queryPackageNames(userId, disabledOnly = true, timeout)) {
             is PackageQueryResult.Names -> parsed.names
             PackageQueryResult.Empty -> linkedSetOf()
@@ -2586,10 +3712,16 @@ internal class DefaultAdbSessionManager(
             is PackageQueryResult.OperationFailure -> return parsed.result
             PackageQueryResult.Cancelled -> return AdbOperationResult.Cancelled
         }
-        val applications = all.names.map { packageName ->
-            val androidUid = all.uidsByPackage[packageName]?.takeIf { rawUid ->
+        val packageNames = linkedSetOf<String>().apply {
+            addAll(all.names)
+            addAll(system.names)
+        }
+        val applications = packageNames.map { packageName ->
+            val androidUid = (all.uidsByPackage[packageName] ?: system.uidsByPackage[packageName])
+                ?.takeIf { rawUid ->
                 AndroidUidIdentity.fromRawUid(rawUid)?.userId == userId
             }
+            val classification = ApplicationClassificationResolver.fromSystemFlag(packageName in system.names)
             RemoteApplication(
                 packageName = packageName,
                 userId = userId,
@@ -2598,8 +3730,9 @@ internal class DefaultAdbSessionManager(
                     packageName in disabled -> RemoteApplicationEnabledState.DISABLED
                     else -> RemoteApplicationEnabledState.ENABLED
                 },
-                isSystem = false,
+                isSystem = classification == ApplicationClassification.SYSTEM,
                 androidUid = androidUid,
+                classification = classification,
             )
         }
         val snapshot = ApplicationSnapshot(
@@ -2608,6 +3741,7 @@ internal class DefaultAdbSessionManager(
             applications = applications,
             unavailableFields = ApplicationField.entries.toSet(),
             degradedReason = degradedReason,
+            generation = applicationGeneration.incrementAndGet(),
         )
         if (remember && mutex.withLock { active?.id } == session.id) applicationSnapshot = snapshot
         appendDiagnostic(
@@ -2664,6 +3798,37 @@ internal class DefaultAdbSessionManager(
         return PackageQueryResult.Unsupported
     }
 
+    private suspend fun querySystemPackageNames(
+        userId: Int,
+        timeout: Duration,
+    ): PackageQueryResult {
+        repeat(2) { index ->
+            when (
+                val result = executeShell(
+                    ApplicationCommands.listSystem(userId, fallback = index == 1),
+                    timeout,
+                )
+            ) {
+                is AdbOperationResult.Success -> if (result.value.exitCode == 0) {
+                    when (val parsed = ApplicationParsers.packageNames(result.value.stdout)) {
+                        is PackageNamesParse.Success -> return PackageQueryResult.Names(
+                            parsed.names,
+                            parsed.uidsByPackage,
+                        )
+                        PackageNamesParse.Empty -> return PackageQueryResult.Empty
+                        PackageNamesParse.CapacityExceeded -> return PackageQueryResult.CapacityExceeded
+                        PackageNamesParse.Malformed -> Unit
+                    }
+                }
+                is AdbOperationResult.Failure -> return PackageQueryResult.OperationFailure(
+                    restagedFailure(result, AdbOperationStage.APPLICATIONS_LIST),
+                )
+                AdbOperationResult.Cancelled -> return PackageQueryResult.Cancelled
+            }
+        }
+        return PackageQueryResult.Unsupported
+    }
+
     private fun isAllowedApplicationTarget(
         session: ActiveSession,
         target: RemoteApplication?,
@@ -2671,7 +3836,13 @@ internal class DefaultAdbSessionManager(
         stateMutation: Boolean,
     ): Boolean {
         if (!ApplicationParsers.isValidPackageName(packageName)) return false
-        if (target == null || target.packageName != packageName || target.isSystem || target.userId < 0) return false
+        if (target == null || target.packageName != packageName || target.userId < 0) return false
+        val action = if (stateMutation) {
+            com.sheen.adb.core.ApplicationAction.SET_ENABLED
+        } else {
+            com.sheen.adb.core.ApplicationAction.FORCE_STOP
+        }
+        if (!ApplicationCapabilityPolicy.isAllowed(target.classification, action)) return false
         if (target.enabledState == RemoteApplicationEnabledState.UNKNOWN) return false
         if (stateMutation && target.enabledState == RemoteApplicationEnabledState.UNKNOWN) return false
         val local = session.endpoint.host.equals("127.0.0.1", true) ||
@@ -2942,13 +4113,22 @@ internal class DefaultAdbSessionManager(
         expectedType: WirelessServiceType,
     ): WirelessServiceObservation? = synchronized(wirelessDiscoveryLock) {
         val discovery = activeWirelessDiscovery
-        if (discovery == null || discovery.mode != WirelessDiscoveryMode.LAN_FOREGROUND ||
-            discovery.generation != target.generation || discovery.isTerminal()
+        if (discovery != null &&
+            (discovery.generation != target.generation ||
+                (expectedType == WirelessServiceType.CONNECT &&
+                    discovery.mode != WirelessDiscoveryMode.LAN_FOREGROUND))
         ) {
             return@synchronized null
         }
-        latestLanDiscoveryState
-            ?.takeIf { it.generation == target.generation }
+        val candidateStates = when (expectedType) {
+            WirelessServiceType.CONNECT -> listOfNotNull(latestLanDiscoveryState)
+            WirelessServiceType.PAIRING -> listOfNotNull(
+                latestPairingDiscoveryState,
+                latestLanDiscoveryState,
+            )
+        }
+        candidateStates
+            .firstOrNull { it.generation == target.generation }
             ?.services
             ?.singleOrNull {
                 it.observationId == target.observationId &&
@@ -2956,6 +4136,21 @@ internal class DefaultAdbSessionManager(
                     it.status == WirelessServiceStatus.RESOLVED &&
                     it.addresses.isNotEmpty()
             }
+    }
+
+    private fun updateLatestDiscoveryState(
+        mode: WirelessDiscoveryMode,
+        state: WirelessDiscoveryState,
+    ) {
+        when (mode) {
+            WirelessDiscoveryMode.LAN_FOREGROUND -> updateLatestLanDiscoveryState(state)
+            WirelessDiscoveryMode.LOCAL_PAIRING -> synchronized(wirelessDiscoveryLock) {
+                val current = latestPairingDiscoveryState
+                if (current == null || state.generation >= current.generation) {
+                    latestPairingDiscoveryState = state
+                }
+            }
+        }
     }
 
     private fun updateLatestLanDiscoveryState(state: WirelessDiscoveryState) {
@@ -3005,6 +4200,15 @@ internal class DefaultAdbSessionManager(
             val oldest = lanPairingAssociations.entries.firstOrNull()?.key ?: return
             lanPairingAssociations.remove(oldest)
         }
+    }
+
+    private fun AdbError.isRetryablePairedConnectDiscoveryFailure(): Boolean = when (this) {
+        AdbError.DiscoveryConflict,
+        AdbError.DiscoveryPlatformFailure,
+        AdbError.DiscoveryResolutionFailed,
+        AdbError.DiscoveryTimeout,
+        -> true
+        else -> false
     }
 
     private fun publishWirelessDiscoveryEvent(
@@ -3093,6 +4297,9 @@ internal class DefaultAdbSessionManager(
     }
 
     override suspend fun disconnect(timeout: Duration): AdbOperationResult<Unit> = mutex.withLock {
+        activeInteractiveShell?.let {
+            closeInteractiveShellChild(it, InteractiveShellCloseReason.DISCONNECTED)
+        }
         localPairingCoordinator.onSessionChanged()
         terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
         val sessionToClose = active
@@ -3163,8 +4370,20 @@ internal class DefaultAdbSessionManager(
 
     override fun close() {
         if (closed.compareAndSet(false, true)) {
+            sessionHealthJob?.cancel()
+            sessionHealthJob = null
+            activeInteractiveShell?.let { shell ->
+                activeInteractiveShell = null
+                shell.closed.set(true)
+                shell.readerJob?.cancel()
+                runCatching { shell.protocol.closeInput() }
+                runCatching { shell.protocol.closeOutput() }
+                runCatching { shell.protocol.close() }
+                shell.events.close()
+            }
             localPairingCoordinator.close()
             localPairingScope.cancel()
+            connectionProbeScope.cancel()
             qrPairingCoordinator.close()
             activeQrAttemptId = null
             terminateActiveWirelessDiscovery(AdbError.DiscoveryManagerClosed)
@@ -3188,6 +4407,8 @@ internal class DefaultAdbSessionManager(
     }
 
     private fun closeActiveIfPresent() {
+        sessionHealthJob?.cancel()
+        sessionHealthJob = null
         val session = active ?: return
         active = null
         applicationSnapshot = null
@@ -3208,6 +4429,8 @@ internal class DefaultAdbSessionManager(
 
     private suspend fun closeSession(session: ActiveSession) {
         if (active?.id == session.id) {
+            sessionHealthJob?.cancel()
+            sessionHealthJob = null
             active = null
             applicationSnapshot = null
             clearApplicationMetadata()
@@ -3222,6 +4445,75 @@ internal class DefaultAdbSessionManager(
             "ADB_SESSION_CLOSED",
             session.endpoint,
         )
+    }
+
+    private fun startSessionHealthMonitor(session: ActiveSession) {
+        require(sessionHealthFailureThreshold > 0)
+        sessionHealthJob?.cancel()
+        sessionHealthJob = connectionProbeScope.launch {
+            var consecutiveFailures = 0
+            while (currentCoroutineContext().isActive) {
+                delay(sessionHealthInterval)
+                if (active?.id != session.id) return@launch
+                val operationBusy = synchronized(exclusiveOperationLock) {
+                    activeExclusiveOperation != null
+                }
+                if (operationBusy || activeInteractiveShell != null) continue
+                val healthy = probeSessionHealth(session)
+                consecutiveFailures = if (healthy) 0 else consecutiveFailures + 1
+                if (consecutiveFailures < sessionHealthFailureThreshold) continue
+                retireUnhealthySession(session)
+                return@launch
+            }
+        }
+    }
+
+    private suspend fun probeSessionHealth(session: ActiveSession): Boolean {
+        if (active?.id != session.id) return false
+        var commandStream: ProtocolShellCommand? = null
+        return try {
+            val response = withTimeout(sessionHealthTimeout) {
+                runInterruptible(ioDispatcher) {
+                    session.client.openShellCommand(CONNECTION_PROBE)
+                        .also { commandStream = it }
+                        .execute()
+                }
+            }
+            active?.id == session.id && response.exitCode == 0
+        } catch (_: TimeoutCancellationException) {
+            false
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Throwable) {
+            false
+        } finally {
+            withContext(NonCancellable + ioDispatcher) { runCatching { commandStream?.close() } }
+        }
+    }
+
+    private suspend fun retireUnhealthySession(session: ActiveSession) {
+        if (active?.id != session.id) return
+        // Closing the transport first releases an in-flight feature command that may currently
+        // own the session mutex. Otherwise the health monitor cannot publish Disconnected until
+        // that command's full timeout expires.
+        withContext(NonCancellable + ioDispatcher) { runCatching { session.client.close() } }
+        mutex.withLock {
+            if (active?.id != session.id) return@withLock
+            sessionHealthJob = null
+            active = null
+            applicationSnapshot = null
+            clearApplicationMetadata()
+            clearProcessAnalysis()
+            terminateActiveWirelessDiscovery(AdbError.DiscoverySessionChanged)
+            invalidateExclusiveOperation(session.id)
+            mutableState.value = AdbConnectionState.Disconnected()
+            appendDiagnostic(
+                AdbOperationStage.DISCONNECT,
+                AdbDiagnosticOutcome.RESOURCE_CLOSED,
+                "ADB_REMOTE_SESSION_CLOSED",
+                session.endpoint,
+            )
+        }
     }
 
     private suspend fun invalidateForcedTransferSession(session: ActiveSession) = mutex.withLock {
@@ -3308,8 +4600,11 @@ internal class DefaultAdbSessionManager(
 
     private class ProtocolProbeException : Exception()
 
-    private fun isLegacyAuthorization(error: Throwable): Boolean =
-        generateSequence(error) { it.cause }.take(8).any { it.javaClass.simpleName == "AdbAuthException" }
+    private fun isLegacyAuthorization(error: Throwable, endpoint: AdbEndpoint): Boolean =
+        generateSequence(error) { it.cause }.take(8).any {
+            it.javaClass.simpleName == "AdbAuthException" ||
+                (endpoint.port == LEGACY_ADB_TCP_PORT && it is ProtocolConnectionHandshakeTimeoutException)
+        }
 
     private class LineChunkDecoder {
         private var pending = ""
@@ -3325,20 +4620,25 @@ internal class DefaultAdbSessionManager(
     }
 
     private companion object {
+        const val INTERACTIVE_SHELL_EVENT_CAPACITY = 128
         const val CONNECTION_PROBE = "echo sheen-session-ready"
         const val MAX_DIAGNOSTIC_EVENTS = 100
         const val AUTHORIZATION_RETRY_MILLIS = 1_000L
+        const val LEGACY_ADB_TCP_PORT = 5555
+        val APP_PROCESS_USER_PATTERN = Regex("^u\\d+_a\\d+$")
         const val SELF_PACKAGE_NAME = "com.sheen.adbhelper"
         const val OPTIONAL_FIELDS_UNAVAILABLE_REASON =
             "设备基础包列表可用；版本号、版本名和安装器字段未通过跨 ROM 可靠性验证，已明确省略"
-        val PROCESS_REFRESH_BUDGET = 5.seconds
-        val PROCESS_SAMPLE_INTERVAL = 500.milliseconds
+        val PROCESS_REFRESH_BUDGET = 30.seconds
+        val PROCESS_COUNTER_SAMPLE_DELAY = 250.milliseconds
         const val MAX_CONSUMED_PROCESS_REQUESTS = 128
         val FILE_PREPARE_TIMEOUT = 5.seconds
+        val APK_CLEANUP_TIMEOUT = 5.seconds
         const val DEFAULT_REMOTE_FILE_MODE = 0x81A4
         const val MAX_AUTO_RENAME_ATTEMPTS = 1_000
-        const val LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS = 5_000L
-        const val LOCAL_PAIRING_WINDOW_MILLIS = 120_000L
+        const val LOCAL_PAIRING_INPUT_WINDOW_MILLIS = 120_000L
+        val CONNECTION_CANCELLATION_GRACE = 100.milliseconds
+        val PAIRED_CONNECT_DISCOVERY_RETRY_DELAY = 250.milliseconds
         const val MAX_LAN_PAIRING_ASSOCIATIONS = 16
         val QR_TERMINAL_PHASES = setOf(
             PairingAttemptPhase.SUCCEEDED,

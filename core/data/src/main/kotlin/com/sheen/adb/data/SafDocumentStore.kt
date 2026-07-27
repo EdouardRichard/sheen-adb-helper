@@ -60,6 +60,12 @@ data class SafStagedTarget(
     val availableBytes: Long?,
 )
 
+data class SafPreparedDirectory(
+    val parentTreeId: String,
+    val directoryId: String,
+    val displayName: String,
+)
+
 internal interface SafDocumentBackend {
     fun sourceMetadata(documentId: String): SafDocumentMetadata?
     fun metadata(documentId: String): SafDocumentMetadata?
@@ -153,9 +159,55 @@ class SafDocumentStore internal constructor(
         )
     }
 
+    fun prepareDirectory(
+        treeId: String,
+        displayName: String,
+    ): SafStoreResult<SafPreparedDirectory> = safely {
+        if (!isSafeDisplayName(displayName)) {
+            return@safely SafStoreResult.Failure(SafStoreError.PROVIDER_UNSUPPORTED)
+        }
+        val tree = backend.metadata(treeId) ?: return@safely SafStoreResult.Failure(SafStoreError.NOT_FOUND)
+        if (SafCapability.CREATE !in tree.capabilities) {
+            return@safely SafStoreResult.Failure(SafStoreError.PROVIDER_UNSUPPORTED)
+        }
+        val existing = backend.children(treeId).mapTo(mutableSetOf()) { it.displayName }
+        val finalName = if (displayName in existing) {
+            autoRenamedName(displayName, existing)
+                ?: return@safely SafStoreResult.Failure(SafStoreError.CONFLICT)
+        } else {
+            displayName
+        }
+        val directoryId = backend.create(treeId, DIRECTORY_MIME_TYPE, finalName)
+            ?: return@safely SafStoreResult.Failure(SafStoreError.PROVIDER_UNSUPPORTED)
+        val directory = backend.metadata(directoryId)
+        if (directory == null || SafCapability.CREATE !in directory.capabilities) {
+            backend.delete(directoryId)
+            return@safely SafStoreResult.Failure(SafStoreError.PROVIDER_UNSUPPORTED)
+        }
+        SafStoreResult.Success(
+            SafPreparedDirectory(
+                parentTreeId = treeId,
+                directoryId = directoryId,
+                displayName = finalName,
+            ),
+        )
+    }
+
     fun openTarget(target: SafStagedTarget): OutputStream =
         backend.openOutput(target.temporary.documentId)
             ?: throw IllegalStateException("target unavailable")
+
+    fun verifyTarget(
+        target: SafStagedTarget,
+        expectedSizeBytes: Long?,
+    ): SafStoreResult<SafDocumentMetadata> = safely {
+        val current = backend.metadata(target.temporary.documentId)
+            ?: return@safely SafStoreResult.Failure(SafStoreError.NOT_FOUND)
+        if (expectedSizeBytes != null && current.sizeBytes != expectedSizeBytes) {
+            return@safely SafStoreResult.Failure(SafStoreError.SOURCE_CHANGED)
+        }
+        SafStoreResult.Success(current)
+    }
 
     fun commit(
         target: SafStagedTarget,
@@ -310,7 +362,11 @@ private class AndroidSafDocumentBackend(
 
     override fun children(treeId: String): List<SafDocumentMetadata> {
         val tree = Uri.parse(treeId)
-        val parentId = DocumentsContract.getTreeDocumentId(tree)
+        val parentId = if (DocumentsContract.isDocumentUri(context, tree)) {
+            DocumentsContract.getDocumentId(tree)
+        } else {
+            DocumentsContract.getTreeDocumentId(tree)
+        }
         val children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, parentId)
         return resolver.query(children, PROJECTION, null, null, null)?.use { cursor ->
             buildList {

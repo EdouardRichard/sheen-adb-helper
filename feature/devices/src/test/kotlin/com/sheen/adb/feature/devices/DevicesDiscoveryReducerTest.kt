@@ -38,7 +38,7 @@ class DevicesDiscoveryReducerTest {
     }
 
     @Test
-    fun `only equal verified identity merges pairing and connect while matching name and address stay unknown`() {
+    fun `only debug services are visible while verified pairing metadata may enrich the same row`() {
         val identity = VerifiedWirelessDeviceId("verified-synthetic")
         val sharedAddress = WirelessAddress.Ipv4(192, 0, 2, 30)
         val snapshot = WirelessDiscoveryState(
@@ -57,13 +57,17 @@ class DevicesDiscoveryReducerTest {
         )
 
         assertEquals(result.state.phase, DevicesDiscoveryPhase.CONTENT)
-        assertEquals(result.state.items.size, 3)
+        assertEquals(result.state.items.size, 2)
         val merged = result.state.items.single { it.relation == DevicesDiscoveryRelation.VERIFIED }
         assertEquals(merged.serviceTypes, setOf(WirelessServiceType.PAIRING, WirelessServiceType.CONNECT))
         assertTrue(merged.pairingTarget != null)
         assertTrue(merged.connectTarget != null)
-        assertEquals(result.state.items.count { it.relation == DevicesDiscoveryRelation.UNKNOWN }, 2)
-        assertTrue(result.state.items.filter { it.relation == DevicesDiscoveryRelation.UNKNOWN }.all { it.serviceTypes.size == 1 })
+        assertEquals(result.state.items.count { it.relation == DevicesDiscoveryRelation.UNKNOWN }, 1)
+        assertEquals(
+            result.state.items.single { it.relation == DevicesDiscoveryRelation.UNKNOWN }.serviceTypes,
+            setOf(WirelessServiceType.CONNECT),
+        )
+        assertTrue(result.state.items.none { it.connectTarget == null }, "pairing-only services must never become visible rows")
         assertFalse(result.state.toString().contains("192.0.2.30"))
         assertFalse(result.state.toString().contains("synthetic-service"))
     }
@@ -93,34 +97,49 @@ class DevicesDiscoveryReducerTest {
     }
 
     @Test
-    fun `target selection always requires explicit confirmation and emits only project owned effects`() {
+    fun `unknown dynamic debug service pairs while verified and legacy debug services connect`() {
+        val identity = VerifiedWirelessDeviceId("verified-route")
         val snapshot = WirelessDiscoveryState(
             generation = 5L,
             services = listOf(
                 observation("pair", WirelessServiceType.PAIRING, port = 43_001),
-                observation("connect", WirelessServiceType.CONNECT, port = 43_002),
+                observation("dynamic", WirelessServiceType.CONNECT, port = 43_002),
+                observation("verified", WirelessServiceType.CONNECT, identity, port = 43_003),
+                observation("legacy", WirelessServiceType.CONNECT, port = 5_555),
             ),
         )
         val content = reduce(
             DevicesDiscoveryState(phase = DevicesDiscoveryPhase.SCANNING, generation = 5L),
             DevicesDiscoveryEvent.Snapshot(snapshot),
         ).state
-        val pairingItem = content.items.single { WirelessServiceType.PAIRING in it.serviceTypes }
-        val connectItem = content.items.single { WirelessServiceType.CONNECT in it.serviceTypes }
+        assertEquals(content.items.size, 3)
+        val dynamic = content.items.single { it.endpointLabel.endsWith("43002") }
+        assertTrue(dynamic.requiresPairing)
+        val dynamicPending = reduce(content, DevicesDiscoveryEvent.SelectConnect(dynamic.connectTarget!!))
+        assertTrue(dynamicPending.effects.isEmpty())
+        assertEquals(
+            reduce(dynamicPending.state, DevicesDiscoveryEvent.ConfirmSelection)
+                .effects.single(),
+            DevicesDiscoveryEffect.OpenQrPairing(dynamic.connectTarget),
+        )
 
-        val pairingPending = reduce(content, DevicesDiscoveryEvent.SelectPairing(pairingItem.pairingTarget!!))
-        assertTrue(pairingPending.state.pendingSelection is DevicesDiscoverySelection.Pairing)
-        assertTrue(pairingPending.effects.isEmpty())
-        val pairingConfirmed = reduce(pairingPending.state, DevicesDiscoveryEvent.ConfirmSelection)
-        assertTrue(pairingConfirmed.effects.single() is DevicesDiscoveryEffect.OpenCodePairing)
+        val verified = content.items.single { it.endpointLabel.endsWith("43003") }
+        assertFalse(verified.requiresPairing)
+        val verifiedPending = reduce(content, DevicesDiscoveryEvent.SelectConnect(verified.connectTarget!!))
+        assertTrue(
+            reduce(verifiedPending.state, DevicesDiscoveryEvent.ConfirmSelection)
+                .effects.single() is DevicesDiscoveryEffect.Connect,
+        )
 
-        val connectPending = reduce(content, DevicesDiscoveryEvent.SelectConnect(connectItem.connectTarget!!))
-        assertTrue(connectPending.state.pendingSelection is DevicesDiscoverySelection.Connect)
-        assertTrue(connectPending.effects.isEmpty())
-        val connectConfirmed = reduce(connectPending.state, DevicesDiscoveryEvent.ConfirmSelection)
-        assertTrue(connectConfirmed.effects.single() is DevicesDiscoveryEffect.Connect)
+        val legacy = content.items.single { it.endpointLabel.endsWith("5555") }
+        assertFalse(legacy.requiresPairing)
+        val legacyPending = reduce(content, DevicesDiscoveryEvent.SelectConnect(legacy.connectTarget!!))
+        assertTrue(
+            reduce(legacyPending.state, DevicesDiscoveryEvent.ConfirmSelection)
+                .effects.single() is DevicesDiscoveryEffect.Connect,
+        )
 
-        val dismissed = reduce(connectPending.state, DevicesDiscoveryEvent.DismissSelection)
+        val dismissed = reduce(dynamicPending.state, DevicesDiscoveryEvent.DismissSelection)
         assertNull(dismissed.state.pendingSelection)
         assertTrue(dismissed.effects.isEmpty())
     }

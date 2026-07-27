@@ -26,6 +26,7 @@ import com.sheen.adb.core.WirelessServiceType
 import java.net.Inet4Address
 import java.net.Inet6Address
 import java.net.InetAddress
+import java.net.NetworkInterface
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executor
 
@@ -43,6 +44,9 @@ private class AndroidNsdWirelessDiscoverySource(
     private val monitor = Any()
     private var adapter: AndroidNsdDiscoveryAdapter? = null
     private var gateway: AndroidNsdDiscoveryPlatformGateway? = null
+    private var legacyScanner: NsdPlatformResource? = null
+    private var activeGeneration: Long? = null
+    private var activeMode: WirelessDiscoveryMode? = null
     private var closed = false
 
     override fun start(request: WirelessDiscoverySourceRequest): WirelessDiscoverySourceStartResult {
@@ -59,10 +63,13 @@ private class AndroidNsdWirelessDiscoverySource(
                     policy = NsdDiscoveryPolicy(),
                     scheduler = AndroidNsdScheduler(),
                     observer = object : NsdDiscoveryObserver {
-                        override fun onEvent(event: WirelessDiscoveryEvent) = observer.onEvent(event)
+                        override fun onEvent(event: WirelessDiscoveryEvent) = publishIfCurrent(event)
 
                         override fun onFailure(failure: NsdDiscoveryFailure) {
-                            observer.onFailure(failure.toSourceFailure())
+                            val legacyFallbackActive = synchronized(monitor) {
+                                activeMode == WirelessDiscoveryMode.LAN_FOREGROUND && legacyScanner != null
+                            }
+                            if (!legacyFallbackActive) observer.onFailure(failure.toSourceFailure())
                         }
                     },
                 ).also { adapter = it }
@@ -78,6 +85,32 @@ private class AndroidNsdWirelessDiscoverySource(
             return WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
         }
         val (platform, activeAdapter) = components
+        synchronized(monitor) {
+            legacyScanner?.cancel()
+            legacyScanner = null
+            activeGeneration = request.generation
+            activeMode = request.mode
+        }
+        val legacyStarted = if (LegacyAdbDiscoveryIntegrationPolicy.shouldStart(request.mode)) {
+            val candidates = LegacyAdbSubnetPolicy.candidates(platform.currentLegacySubnets())
+            if (candidates.isEmpty()) {
+                false
+            } else {
+                val resource = LegacyAdb5555Scanner().start(request.generation, candidates) { observation ->
+                    publishIfCurrent(WirelessDiscoveryEvent.ServiceObserved(request.generation, observation))
+                }
+                val closeNow = synchronized(monitor) {
+                    if (closed) true else {
+                        legacyScanner = resource
+                        false
+                    }
+                }
+                if (closeNow) resource.cancel()
+                !closeNow
+            }
+        } else {
+            false
+        }
         val result = try {
             activeAdapter.start(
                 NsdDiscoveryRequest(
@@ -100,22 +133,38 @@ private class AndroidNsdWirelessDiscoverySource(
             activeAdapter.close()
             return WirelessDiscoverySourceStartResult.Rejected(WirelessDiscoverySourceFailure.PLATFORM_FAILURE)
         }
-        return result
+        return if (legacyStarted && result is WirelessDiscoverySourceStartResult.Rejected) {
+            WirelessDiscoverySourceStartResult.Started
+        } else {
+            result
+        }
     }
 
     override fun close() {
-        val adapterToClose = synchronized(monitor) {
+        val (adapterToClose, scannerToClose) = synchronized(monitor) {
             if (closed) {
-                null
+                null to null
             } else {
                 closed = true
-                adapter.also {
-                    adapter = null
-                    gateway = null
-                }
+                activeGeneration = null
+                activeMode = null
+                val currentAdapter = adapter
+                val currentScanner = legacyScanner
+                adapter = null
+                gateway = null
+                legacyScanner = null
+                currentAdapter to currentScanner
             }
         }
+        scannerToClose?.cancel()
         adapterToClose?.close()
+    }
+
+    private fun publishIfCurrent(event: WirelessDiscoveryEvent) {
+        val accepted = synchronized(monitor) {
+            !closed && event.generation == activeGeneration
+        }
+        if (accepted) observer.onEvent(event)
     }
 
     private fun NsdDiscoveryStartResult.toSourceResult(): WirelessDiscoverySourceStartResult = when (this) {
@@ -161,7 +210,7 @@ class AndroidNsdDiscoveryAdapter(
                 session.track(platform.registerNetworkChangeCallback(requireNotNull(decision.network), networkCallbacks(session)))
                 if (!isActive(session)) return rejectedTerminal(session)
             }
-            for (serviceType in NsdDiscoveryPolicy.APPROVED_SERVICE_TYPES) {
+            for (serviceType in approvedServiceTypesFor(request.mode)) {
                 session.track(platform.discover(serviceType, decision.network, discoveryCallbacks(session, serviceType)))
                 if (!isActive(session)) return rejectedTerminal(session)
             }
@@ -192,6 +241,14 @@ class AndroidNsdDiscoveryAdapter(
             rejectedTerminal(session)
         }
     }
+
+    private fun approvedServiceTypesFor(mode: WirelessDiscoveryMode): Set<String> =
+        when (mode) {
+            WirelessDiscoveryMode.LAN_FOREGROUND -> NsdDiscoveryPolicy.APPROVED_SERVICE_TYPES
+            WirelessDiscoveryMode.LOCAL_PAIRING -> NsdDiscoveryPolicy.APPROVED_SERVICE_TYPES.filterTo(linkedSetOf()) {
+                WirelessServiceType.fromDnsSdType(it) == WirelessServiceType.PAIRING
+            }
+        }
 
     fun stop() = synchronized(monitor) { end(active) }
 
@@ -271,6 +328,11 @@ class AndroidNsdDiscoveryAdapter(
         }
 
         override fun onResolveFailure(failure: NsdPlatformFailure) {
+            if (failure == NsdPlatformFailure.RESOLVE_FAILED) {
+                // DNS-SD records can expire independently. Keep the foreground scan alive so
+                // a stale pairing record cannot suppress a valid Android 11+ connect service.
+                return
+            }
             val mapped = failure.asResolveFailure()
             val shouldNotifyFailure = synchronized(monitor) {
                 isActive(session) && failLocked(session, mapped)
@@ -420,9 +482,44 @@ internal class AndroidNsdDiscoveryPlatformGateway(
     @SuppressLint("MissingPermission") // The app manifest declares ACCESS_NETWORK_STATE; SecurityException is mapped by the source.
     fun currentNetwork(): NsdNetworkRef? =
         if (apiLevel < NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) null
-        else connectivityManager.activeNetwork?.let { network ->
+        else connectivityManager?.activeNetwork?.let { network ->
             synchronized(monitor) { rememberNetwork(network) }
         }
+
+    @SuppressLint("MissingPermission")
+    fun currentLegacySubnets(): List<LegacyAdbSubnet> {
+        val manager = connectivityManager ?: return emptyList()
+        val networks = buildList {
+            manager.activeNetwork?.let(::add)
+            addAll(manager.allNetworks)
+        }.distinct()
+        val androidNetworks = networks
+            .asSequence()
+            .mapNotNull(manager::getLinkProperties)
+            .flatMap { properties -> properties.linkAddresses.asSequence() }
+            .mapNotNull { link ->
+                val address = link.address as? Inet4Address ?: return@mapNotNull null
+                LegacyAdbSubnet(address, link.prefixLength).takeIf { address.isSiteLocalAddress }
+            }
+            .toList()
+        val rawInterfaces = runCatching {
+            NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        }.getOrDefault(emptyList())
+        val localInterfaces = rawInterfaces
+            .asSequence()
+            .flatMap { networkInterface ->
+                runCatching { networkInterface.interfaceAddresses.asSequence() }
+                    .getOrDefault(emptySequence())
+            }
+            .mapNotNull { link ->
+                val address = link.address as? Inet4Address ?: return@mapNotNull null
+                LegacyAdbSubnet(address, link.networkPrefixLength.toInt())
+                    .takeIf { address.isSiteLocalAddress }
+            }
+            .toList()
+        return (androidNetworks + localInterfaces)
+            .distinctBy { subnet -> subnet.address.hostAddress to subnet.prefixLength }
+    }
 
     override fun acquireMulticastLock(): NsdPlatformResource = platformOperation {
         val lock = wifiManager.createMulticastLock("sheen-adb-discovery")
@@ -470,7 +567,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
                 callbacks.onDiscoveryFailure(NsdPlatformFailure.DISCOVERY_FAILED)
             }
         }
-        if (apiLevel >= NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) {
+        if (NsdPlatformOverloadPolicy.useNetworkBoundOverload(apiLevel, network)) {
             nsdManager.discoverServices(
                 serviceType,
                 NsdManager.PROTOCOL_DNS_SD,
@@ -499,9 +596,10 @@ internal class AndroidNsdDiscoveryPlatformGateway(
         val info = synchronized(monitor) {
             discoveredServices[service]?.info
         } ?: throw NsdPlatformOperationException(NsdPlatformFailure.OPERATION_FAILED)
-        if (apiLevel >= NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) {
+        if (NsdPlatformOverloadPolicy.useNetworkBoundOverload(apiLevel, network)) {
             info.setNetwork(requireNetwork(network))
         }
+
         val listener = object : NsdManager.ResolveListener {
             override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 callbacks.onResolveFailure(NsdPlatformFailure.RESOLVE_FAILED)
@@ -515,7 +613,7 @@ internal class AndroidNsdDiscoveryPlatformGateway(
                 callbacks.onResolved(resolved)
             }
         }
-        if (apiLevel >= NsdDiscoveryPolicy.NETWORK_BOUND_DISCOVERY_API) {
+        if (NsdPlatformOverloadPolicy.useNetworkBoundOverload(apiLevel, network)) {
             nsdManager.resolveService(info, callbackExecutor, listener)
         } else {
             nsdManager.resolveService(info, listener)

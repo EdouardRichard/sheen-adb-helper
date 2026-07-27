@@ -17,7 +17,9 @@ android {
 
 dependencies {
     implementation(project(":core:adb"))
+    implementation(project(":core:data"))
     implementation(project(":core:ui"))
+    implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.kotlinx.coroutines.android)

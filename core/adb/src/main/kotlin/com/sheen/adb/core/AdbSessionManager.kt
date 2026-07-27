@@ -214,6 +214,12 @@ interface AdbSessionManager : AutoCloseable {
         timeout: Duration = 30.seconds,
     ): AdbOperationResult<ShellResult>
 
+    suspend fun openInteractiveShell(
+        expectedSessionId: String,
+        timeout: Duration = 15.seconds,
+    ): AdbOperationResult<InteractiveShellSession> =
+        AdbOperationResult.Failure(AdbError.ApplicationSessionInvalid(AdbOperationStage.SHELL))
+
     suspend fun loadDeviceOverview(timeout: Duration = 20.seconds): AdbOperationResult<DeviceOverview>
 
     suspend fun refreshDynamicMetrics(timeout: Duration = 10.seconds): AdbOperationResult<DynamicDeviceMetrics>
@@ -240,6 +246,33 @@ interface AdbSessionManager : AutoCloseable {
         AdbOperationResult.Failure(AdbError.ApplicationSessionInvalid(AdbOperationStage.PROCESSES))
 
     suspend fun listApplications(timeout: Duration = 15.seconds): AdbOperationResult<ApplicationSnapshot>
+
+    suspend fun openApkExtraction(
+        request: ApkExtractionRequest,
+        timeout: Duration = 15.seconds,
+    ): AdbOperationResult<ApkExtractionHandle> =
+        AdbOperationResult.Failure(AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_EXTRACTION))
+
+    suspend fun installApk(
+        request: ApkInstallRequest,
+        progress: (ApkInstallStage) -> Unit = {},
+        timeout: Duration = 120.seconds,
+    ): AdbOperationResult<ApkInstallResult> =
+        AdbOperationResult.Failure(AdbError.SessionInvalid(AdbExclusiveOperationKind.APK_INSTALL))
+
+    suspend fun prepareApplicationUninstall(
+        expectedSessionId: String,
+        userId: Int,
+        packageName: String,
+        expectedGeneration: Long,
+    ): AdbOperationResult<ApplicationUninstallPreparation> =
+        AdbOperationResult.Failure(AdbError.ApplicationSessionInvalid(AdbOperationStage.APPLICATION_UNINSTALL))
+
+    suspend fun uninstallApplication(
+        request: ApplicationUninstallRequest,
+        timeout: Duration = 30.seconds,
+    ): AdbOperationResult<ApplicationUninstallResult> =
+        AdbOperationResult.Failure(AdbError.ApplicationSessionInvalid(AdbOperationStage.APPLICATION_UNINSTALL))
 
     fun observeApplicationMetadata(
         expectedSessionId: String,
@@ -272,6 +305,12 @@ interface AdbSessionManager : AutoCloseable {
         expectedPairingAttemptId: PairingAttemptId? = null,
         timeout: Duration = 15.seconds,
     ): AdbOperationResult<WirelessDiscoveryState> =
+        AdbOperationResult.Failure(AdbError.DiscoveryResolutionFailed)
+
+    suspend fun connectLocalPairedDevice(
+        pairingAttemptId: PairingAttemptId,
+        timeout: Duration = 30.seconds,
+    ): AdbOperationResult<Unit> =
         AdbOperationResult.Failure(AdbError.DiscoveryResolutionFailed)
 
     suspend fun loadRemoteDirectory(

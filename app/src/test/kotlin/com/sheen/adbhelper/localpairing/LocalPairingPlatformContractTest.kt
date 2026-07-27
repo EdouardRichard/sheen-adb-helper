@@ -162,7 +162,8 @@ internal class LocalPairingPlatformContractTest {
             ),
         )
 
-        assertTrue(source.contains("请开启无线调试。"))
+        assertTrue(source.contains("正在扫描配对端口。"))
+        assertFalse(source.contains("请开启无线调试。"))
         assertTrue(source.contains("已检测到配对端口，请输入配对码："))
         assertTrue(source.contains("停止"))
         assertTrue(source.contains("ACTION_STOP"))

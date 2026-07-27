@@ -56,11 +56,12 @@ class ApplicationSessionManagerTest {
         assertTrue(accepted is AdbOperationResult.Success)
         assertTrue((accepted as AdbOperationResult.Success).value is ApplicationMutationResult.RequestAccepted)
         assertEquals(client.commands.count { it == "am force-stop --user 0 com.example.client" }, 1)
+        assertEquals(client.commands.count { it == "pidof com.example.client" }, 1)
         assertTrue(client.commands.none { it.startsWith("kill ") })
     }
 
     @Test
-    fun `disable verifies post state and rejects stale session`() = runBlocking {
+    fun `disable then enable verifies both post states and rejects stale session`() = runBlocking {
         var disabled = false
         val client = ScriptedClient { command ->
             when (command) {
@@ -68,6 +69,7 @@ class ApplicationSessionManagerTest {
                 "pm list packages -3 -U --user 0" -> response("package:com.example.client uid:10123\n")
                 "pm list packages -3 -d --user 0" -> response(if (disabled) "package:com.example.client\n" else "")
                 "pm disable-user --user 0 com.example.client" -> response("Package com.example.client new state: disabled-user\n").also { disabled = true }
+                "pm enable --user 0 com.example.client" -> response("Package com.example.client new state: enabled\n").also { disabled = false }
                 else -> response("ok\n")
             }
         }
@@ -78,6 +80,11 @@ class ApplicationSessionManagerTest {
         assertTrue(result is AdbOperationResult.Success)
         val verified = (result as AdbOperationResult.Success).value as ApplicationMutationResult.Verified
         assertEquals(verified.application.enabledState, RemoteApplicationEnabledState.DISABLED)
+
+        val enabled = manager.setApplicationEnabled("com.example.client", true, snapshot.sessionId)
+        assertTrue(enabled is AdbOperationResult.Success)
+        val enabledApplication = (enabled as AdbOperationResult.Success).value as ApplicationMutationResult.Verified
+        assertEquals(enabledApplication.application.enabledState, RemoteApplicationEnabledState.ENABLED)
 
         val stale = manager.setApplicationEnabled("com.example.client", true, "old-session")
         assertTrue(stale is AdbOperationResult.Failure)
@@ -255,6 +262,7 @@ class ApplicationSessionManagerTest {
             "am get-current-user" -> response("0\n")
             "pm list packages -3 -U --user 0" -> response("package:com.example.client uid:10123\n")
             "pm list packages -3 -d --user 0" -> response("")
+            "pidof com.example.client" -> response("")
             else -> response("ok\n")
         }
     }

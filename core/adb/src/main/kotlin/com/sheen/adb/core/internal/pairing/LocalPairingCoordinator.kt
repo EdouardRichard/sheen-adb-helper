@@ -162,17 +162,14 @@ internal class LocalPairingCoordinator(
         val now = clock.nowMillis()
         if (now >= current.deadlineMillis) {
             finish(current.windowId, LocalPairingStopReason.DEADLINE_REACHED)
-            return
         }
-        if (now - current.startedAtMillis >= LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS) {
-            synchronized(lock) {
-                val latest = mutableState.value
-                if (latest.window?.windowId == current.windowId && selectedObservation == null &&
-                    latest.discoveryStatus == LocalPairingDiscoveryStatus.SEARCHING
-                ) {
-                    mutableState.value = latest.copy(discoveryStatus = LocalPairingDiscoveryStatus.NOT_FOUND)
-                }
-            }
+    }
+
+    fun onDiscoveryTimedOut() {
+        val current = synchronized(lock) { mutableState.value }
+        val window = current.window ?: return
+        if (current.discoveryStatus != LocalPairingDiscoveryStatus.FOUND) {
+            finish(window.windowId, LocalPairingStopReason.DEADLINE_REACHED)
         }
     }
 
@@ -180,7 +177,6 @@ internal class LocalPairingCoordinator(
         val resolved = discovery.services.filter {
             it.serviceType == WirelessServiceType.PAIRING && it.status == WirelessServiceStatus.RESOLVED
         }
-        var lostWindowId: LocalPairingWindowId? = null
         synchronized(lock) {
             val controllerState = mutableState.value
             val window = controllerState.window ?: return
@@ -188,7 +184,19 @@ internal class LocalPairingCoordinator(
             if (selected != null) {
                 val refreshed = resolved.singleOrNull { it.observationId == selected.observationId }
                 if (refreshed == null && resolved.size <= 1) {
-                    lostWindowId = window.windowId
+                    selectedObservation = null
+                    val updatedWindow = window.copy(hasLivePairingService = false)
+                    val decision = notificationPolicy.decide(
+                        updatedWindow,
+                        clock.nowMillis(),
+                        deviceUnlocked,
+                        notificationCapability,
+                    )
+                    mutableState.value = controllerState.copy(
+                        window = updatedWindow.copy(notificationState = decision.state),
+                        discoveryStatus = LocalPairingDiscoveryStatus.SEARCHING,
+                        notificationDecision = decision,
+                    )
                 } else if (resolved.size > 1) {
                     selectedObservation = null
                     val updatedWindow = window.copy(hasLivePairingService = false)
@@ -209,15 +217,7 @@ internal class LocalPairingCoordinator(
                 return@synchronized
             }
             val (status, observation) = when (resolved.size) {
-                0 -> {
-                    val elapsed = clock.nowMillis() - window.startedAtMillis
-                    val status = if (elapsed >= LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS) {
-                        LocalPairingDiscoveryStatus.NOT_FOUND
-                    } else {
-                        LocalPairingDiscoveryStatus.SEARCHING
-                    }
-                    status to null
-                }
+                0 -> LocalPairingDiscoveryStatus.SEARCHING to null
                 1 -> LocalPairingDiscoveryStatus.FOUND to resolved.single()
                 else -> LocalPairingDiscoveryStatus.AMBIGUOUS to null
             }
@@ -235,7 +235,6 @@ internal class LocalPairingCoordinator(
                 notificationDecision = decision,
             )
         }
-        lostWindowId?.let { finish(it, LocalPairingStopReason.SERVICE_LOST) }
     }
 
     fun onDiscoveryUnsupported() {
@@ -335,7 +334,6 @@ internal class LocalPairingCoordinator(
     }
 
     private companion object {
-        const val LOCAL_DISCOVERY_INITIAL_RESULT_MILLIS = 5_000L
         const val LOCAL_PAIRING_WINDOW_MILLIS = 120_000L
     }
 }

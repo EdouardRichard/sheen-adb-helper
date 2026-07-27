@@ -25,6 +25,58 @@ import org.testng.annotations.Test
 
 class FilesReducerTest {
     @Test
+    fun `one thousand entries sort directories first then known time descending stably`() {
+        val entries = (0 until 1_000).map { index ->
+            FileBrowserEntry(
+                absolutePath = "/sdcard/item-$index",
+                name = "item-$index",
+                kind = if (index % 3 == 0) RemoteFileKind.DIRECTORY else RemoteFileKind.FILE,
+                linkResolution = RemoteLinkResolution.NOT_A_LINK,
+                targetKind = null,
+                sizeBytes = index.toLong(),
+                modifiedEpochSeconds = if (index % 11 == 0) null else (index % 17).toLong(),
+            )
+        }
+
+        val first = sortFileEntries(entries)
+        repeat(10) { assertEquals(sortFileEntries(entries), first) }
+        assertEquals(first.size, 1_000)
+        assertTrue(first.takeWhile { it.kind == RemoteFileKind.DIRECTORY }.all { it.kind == RemoteFileKind.DIRECTORY })
+        assertFalse(
+            first.dropWhile { it.kind == RemoteFileKind.DIRECTORY }
+                .any { it.kind == RemoteFileKind.DIRECTORY },
+        )
+        first.groupBy { it.kind == RemoteFileKind.DIRECTORY }.values.forEach { group ->
+            val knownTimes = group.mapNotNull(FileBrowserEntry::modifiedEpochSeconds)
+            assertEquals(knownTimes, knownTimes.sortedDescending())
+            val firstUnknown = group.indexOfFirst { it.modifiedEpochSeconds == null }
+            if (firstUnknown >= 0) {
+                assertTrue(group.drop(firstUnknown).all { it.modifiedEpochSeconds == null })
+            }
+        }
+        val equalTimeSource = entries.filter { it.kind == RemoteFileKind.FILE && it.modifiedEpochSeconds == 5L }
+        val equalTimeSorted = first.filter { it.kind == RemoteFileKind.FILE && it.modifiedEpochSeconds == 5L }
+        assertEquals(equalTimeSorted, equalTimeSource)
+    }
+
+    @Test
+    fun `session change clears path snapshot selection and scroll anchor`() {
+        val old = FilesUiState(
+            sessionId = "old-session",
+            browser = FilesBrowserState.Empty("/sdcard", emptyList()),
+            selectedPath = "/sdcard/item",
+            scrollAnchor = FileScrollAnchor("/sdcard/item", 12),
+        )
+
+        val switched = FileTaskLifecycle.changeSession(old, "new-session")
+
+        assertEquals(switched.sessionId, "new-session")
+        assertTrue(switched.browser is FilesBrowserState.Initial)
+        assertEquals(switched.selectedPath, null)
+        assertEquals(switched.scrollAnchor, null)
+    }
+
+    @Test
     fun `browser starts at shared storage and supports root breadcrumbs refresh and selection`() {
         var state = FilesUiState(sessionId = "s")
         state = FilesReducer.reduce(state, FilesAction.OpenSharedStorage)

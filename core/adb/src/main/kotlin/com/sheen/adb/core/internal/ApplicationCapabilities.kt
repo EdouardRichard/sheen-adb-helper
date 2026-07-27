@@ -1,5 +1,34 @@
 package com.sheen.adb.core.internal
 
+import com.sheen.adb.core.ApplicationAction
+import com.sheen.adb.core.ApplicationClassification
+
+internal object ApplicationClassificationResolver {
+    fun fromSystemFlag(isSystem: Boolean?): ApplicationClassification = when (isSystem) {
+        false -> ApplicationClassification.ORDINARY
+        true -> ApplicationClassification.SYSTEM
+        null -> ApplicationClassification.UNKNOWN
+    }
+}
+
+internal object ApplicationCapabilityPolicy {
+    private val ordinaryActions = setOf(
+        ApplicationAction.EXTRACT_APK,
+        ApplicationAction.SET_ENABLED,
+        ApplicationAction.FORCE_STOP,
+        ApplicationAction.UNINSTALL,
+    )
+    private val restrictedActions = setOf(ApplicationAction.EXTRACT_APK)
+
+    fun allowedActions(classification: ApplicationClassification): Set<ApplicationAction> =
+        if (classification == ApplicationClassification.ORDINARY) ordinaryActions else restrictedActions
+
+    fun isAllowed(
+        classification: ApplicationClassification,
+        action: ApplicationAction,
+    ): Boolean = action in allowedActions(classification)
+}
+
 internal object ApplicationCommands {
     const val CURRENT_USER = "am get-current-user"
     const val CURRENT_USER_FALLBACK = "cmd activity get-current-user"
@@ -9,6 +38,9 @@ internal object ApplicationCommands {
 
     fun listDisabledThirdParty(userId: Int, fallback: Boolean = false): String =
         "${if (fallback) "cmd package" else "pm"} list packages -3 -d --user $userId"
+
+    fun listSystem(userId: Int, fallback: Boolean = false): String =
+        "${if (fallback) "cmd package" else "pm"} list packages -s -U --user $userId"
 
     fun forceStop(userId: Int, packageName: String): String =
         "am force-stop --user $userId $packageName"
@@ -30,7 +62,7 @@ internal sealed interface PackageNamesParse {
 internal object ApplicationParsers {
     private const val MAX_APPLICATIONS = 20_000
     private const val MAX_PACKAGE_NAME_LENGTH = 255
-    private val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)*$")
     private val labelledCurrentUser = Regex("^Current user:\\s*(\\d+)$", RegexOption.IGNORE_CASE)
 
     fun currentUser(text: String): Int? {

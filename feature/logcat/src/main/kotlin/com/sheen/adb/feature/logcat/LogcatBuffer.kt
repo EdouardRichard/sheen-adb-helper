@@ -136,6 +136,13 @@ data class LogcatAnalysisFilter(
         ).count { it }
 }
 
+enum class LogcatDisplayLevel(val label: String) {
+    ALL("all"),
+    DEBUG("debug"),
+    INFO("info"),
+    ERROR("error"),
+}
+
 internal class LogcatAnalysisWindow(
     private val sessionId: String,
     private val processGeneration: Long,
@@ -146,6 +153,10 @@ internal class LogcatAnalysisWindow(
     private val buffer = StructuredLogcatBuffer(maxLines, maxBytes)
     private val visibleRecords = ArrayDeque<StructuredLogcatRecord>()
     var filter: LogcatAnalysisFilter = LogcatAnalysisFilter()
+        private set
+    var displayLevel: LogcatDisplayLevel = LogcatDisplayLevel.ALL
+        private set
+    var textFilter: String = ""
         private set
     private var paused = false
 
@@ -168,6 +179,16 @@ internal class LogcatAnalysisWindow(
         if (!paused) refresh()
     }
 
+    fun updateDisplayLevel(value: LogcatDisplayLevel) {
+        displayLevel = value
+        if (!paused) refresh()
+    }
+
+    fun updateTextFilter(value: String) {
+        textFilter = value
+        if (!paused) refresh()
+    }
+
     fun pause() {
         paused = true
     }
@@ -185,10 +206,16 @@ internal class LogcatAnalysisWindow(
     fun reset() {
         clear()
         filter = LogcatAnalysisFilter()
+        displayLevel = LogcatDisplayLevel.ALL
+        textFilter = ""
         paused = false
     }
 
     fun snapshot(): List<StructuredLogcatRecord> = visibleRecords.toList()
+
+    fun rawSnapshot(): List<StructuredLogcatRecord> = buffer.snapshot()
+
+    fun visibleSnapshot(): List<StructuredLogcatRecord> = visibleRecords.toList()
 
     fun visibleText(): String = visibleRecords.joinToString("\n") { it.rawText }
 
@@ -211,12 +238,36 @@ internal class LogcatAnalysisWindow(
         val pidNeedle = filter.pidQuery.trim()
         val processNeedle = filter.processQuery.trim()
         val applicationNeedle = filter.applicationQuery.trim()
-        return (filter.levels.isEmpty() || record.level in filter.levels) &&
+        val fullTextNeedle = textFilter.trim()
+        return displayLevel.matches(record.level) &&
+            (fullTextNeedle.isEmpty() || record.rawText.contains(fullTextNeedle, ignoreCase = true)) &&
+            (filter.levels.isEmpty() || record.level in filter.levels) &&
             (tagNeedle.isEmpty() || record.tag?.contains(tagNeedle, ignoreCase = true) == true) &&
             (keywordNeedle.isEmpty() || record.rawText.contains(keywordNeedle, ignoreCase = true)) &&
             (pidNeedle.isEmpty() || record.pid?.toString()?.contains(pidNeedle) == true) &&
             (processNeedle.isEmpty() || record.processName?.contains(processNeedle, ignoreCase = true) == true) &&
             (applicationNeedle.isEmpty() || record.applicationAssociation.matchesVerified(applicationNeedle))
+    }
+}
+
+private fun LogcatDisplayLevel.matches(level: StructuredLogcatLevel?): Boolean = when (this) {
+    LogcatDisplayLevel.ALL -> true
+    LogcatDisplayLevel.DEBUG -> level != null && level != StructuredLogcatLevel.VERBOSE
+    LogcatDisplayLevel.INFO -> when (level) {
+        StructuredLogcatLevel.INFO,
+        StructuredLogcatLevel.WARN,
+        StructuredLogcatLevel.ERROR,
+        StructuredLogcatLevel.FATAL,
+        StructuredLogcatLevel.ASSERT,
+        -> true
+        else -> false
+    }
+    LogcatDisplayLevel.ERROR -> when (level) {
+        StructuredLogcatLevel.ERROR,
+        StructuredLogcatLevel.FATAL,
+        StructuredLogcatLevel.ASSERT,
+        -> true
+        else -> false
     }
 }
 

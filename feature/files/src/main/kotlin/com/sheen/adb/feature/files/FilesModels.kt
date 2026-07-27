@@ -40,9 +40,20 @@ data class FilesUiState(
     val activeTask: FileTask? = null,
     val browser: FilesBrowserState = FilesBrowserState.Initial,
     val selectedPath: String? = null,
+    val scrollAnchor: FileScrollAnchor? = null,
     val pendingConflict: PendingFileConflict? = null,
     val pickerRequest: FilePickerRequest? = null,
 )
+
+data class FileScrollAnchor(
+    val absolutePath: String,
+    val offset: Int,
+) {
+    init {
+        require(absolutePath.isNotBlank())
+        require(offset >= 0)
+    }
+}
 
 sealed interface FilePickerRequest {
     data object UploadSource : FilePickerRequest
@@ -68,6 +79,59 @@ data class FileTaskPresentation(
 
 val FilesUiState.taskSummary: FileTaskSummary?
     get() = activeTask?.let { FileTaskSummary(it.kind, it.status) }
+
+enum class FileDeliveryPhase {
+    PREPARING,
+    TRANSFERRING,
+    WRITING,
+    VERIFYING,
+    TERMINAL,
+}
+
+data class FileDeliveryState(
+    val taskId: String,
+    val sessionId: String,
+    val kind: FileTaskKind,
+    val phase: FileDeliveryPhase,
+    val ioStarted: Boolean,
+    val cleanupConfirmed: Boolean,
+    val resourceUncertain: Boolean,
+)
+
+val FilesUiState.deliveryState: FileDeliveryState?
+    get() = activeTask?.let { task ->
+        val status = task.status
+        FileDeliveryState(
+            taskId = task.taskId,
+            sessionId = task.sessionId,
+            kind = task.kind,
+            phase = when (status) {
+                FileTaskStatus.Preparing,
+                FileTaskStatus.AwaitingConflict,
+                -> FileDeliveryPhase.PREPARING
+                is FileTaskStatus.Transferring -> FileDeliveryPhase.TRANSFERRING
+                FileTaskStatus.Committing -> FileDeliveryPhase.WRITING
+                FileTaskStatus.Verifying -> FileDeliveryPhase.VERIFYING
+                FileTaskStatus.Succeeded,
+                is FileTaskStatus.Failed,
+                FileTaskStatus.Cancelled,
+                is FileTaskStatus.CleanupFailed,
+                -> FileDeliveryPhase.TERMINAL
+            },
+            ioStarted = status is FileTaskStatus.Transferring ||
+                status == FileTaskStatus.Verifying ||
+                status == FileTaskStatus.Committing ||
+                status.isTerminal,
+            cleanupConfirmed = status.isTerminal && status !is FileTaskStatus.CleanupFailed,
+            resourceUncertain = status is FileTaskStatus.CleanupFailed,
+        )
+    }
+
+val FilesUiState.navigationLocked: Boolean
+    get() = deliveryState?.let { delivery ->
+        (delivery.ioStarted && delivery.phase != FileDeliveryPhase.TERMINAL) ||
+            delivery.resourceUncertain
+    } == true
 
 internal fun fileTaskPresentation(state: FilesUiState): FileTaskPresentation? {
     val task = state.activeTask ?: return null
@@ -95,8 +159,8 @@ internal fun fileTaskPresentation(state: FilesUiState): FileTaskPresentation? {
         conflictDisplayName = state.pendingConflict?.displayName,
         canCancel = !status.isTerminal,
         canDismiss = status.isTerminal,
-        errorMessage = error?.userMessage,
-        errorNextStep = error?.nextStep,
+        errorMessage = error?.technicalCode,
+        errorNextStep = null,
     )
 }
 
@@ -146,6 +210,7 @@ sealed interface FilesAction {
     data class OpenBreadcrumb(val path: String) : FilesAction
     data object Refresh : FilesAction
     data class Select(val path: String?) : FilesAction
+    data class UpdateScrollAnchor(val anchor: FileScrollAnchor?) : FilesAction
     data class ShowContent(
         val path: String,
         val entries: List<FileBrowserEntry>,
@@ -164,16 +229,28 @@ internal object FilesReducer {
         is FilesAction.OpenBreadcrumb -> state.copy(browser = FilesBrowserState.Loading(action.path), selectedPath = null)
         FilesAction.Refresh -> state.copy(browser = FilesBrowserState.Loading(currentPath(state.browser)))
         is FilesAction.Select -> state.copy(selectedPath = action.path)
+        is FilesAction.UpdateScrollAnchor -> state.copy(scrollAnchor = action.anchor)
         is FilesAction.ShowContent -> state.copy(
-            browser = FilesBrowserState.Content(action.path, action.entries, action.breadcrumbs),
+            browser = FilesBrowserState.Content(
+                action.path,
+                sortFileEntries(action.entries),
+                action.breadcrumbs,
+            ),
             selectedPath = state.selectedPath?.takeIf { selected -> action.entries.any { it.absolutePath == selected } },
+            scrollAnchor = state.scrollAnchor?.takeIf { anchor ->
+                action.entries.any { it.absolutePath == anchor.absolutePath }
+            },
         )
         is FilesAction.ShowEmpty -> state.copy(
             browser = FilesBrowserState.Empty(action.path, action.breadcrumbs),
             selectedPath = null,
         )
         is FilesAction.ShowError -> state.copy(browser = FilesBrowserState.Error(action.error, action.path))
-        FilesAction.Disconnected -> state.copy(browser = FilesBrowserState.Disconnected, selectedPath = null)
+        FilesAction.Disconnected -> state.copy(
+            browser = FilesBrowserState.Disconnected,
+            selectedPath = null,
+            scrollAnchor = null,
+        )
         FilesAction.Cancelled -> state.copy(browser = FilesBrowserState.Cancelled)
     }
 
@@ -185,6 +262,21 @@ internal object FilesReducer {
         else -> null
     }
 }
+
+internal fun sortFileEntries(entries: List<FileBrowserEntry>): List<FileBrowserEntry> =
+    entries.withIndex()
+        .sortedWith(
+            compareBy<IndexedValue<FileBrowserEntry>> {
+                if (it.value.enterable) 0 else 1
+            }.thenBy {
+                if (it.value.modifiedEpochSeconds == null) 1 else 0
+            }.thenByDescending {
+                it.value.modifiedEpochSeconds ?: Long.MIN_VALUE
+            }.thenBy {
+                it.index
+            },
+        )
+        .map(IndexedValue<FileBrowserEntry>::value)
 
 internal fun breadcrumbDisplaySegments(
     breadcrumbs: List<RemoteBreadcrumb>,

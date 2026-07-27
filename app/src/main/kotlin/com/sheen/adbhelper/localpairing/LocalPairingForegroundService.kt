@@ -183,7 +183,7 @@ class LocalPairingForegroundService : Service() {
 
     private fun startForegroundImmediately() {
         if (foregroundStarted) return
-        val notification = baseNotification("请开启无线调试。", includeInputAction = false).build()
+        val notification = baseNotification("正在扫描配对端口。", includeInputAction = false).build()
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(
                 NOTIFICATION_ID,
@@ -224,7 +224,7 @@ class LocalPairingForegroundService : Service() {
             plan.showRemoteInput -> "已检测到配对端口，请输入配对码："
             plan.suggestNativeNotificationStyle -> "通知内输入不可用，请回到应用输入；可尝试系统原生通知样式"
             keyguardManager.isDeviceLocked -> "本机无线配对进行中，解锁后可继续输入"
-            else -> "请开启无线调试。"
+            else -> "正在扫描配对端口。"
         }
         notificationManager.notify(
             NOTIFICATION_ID,

@@ -19,12 +19,32 @@ data class ShellEntry(
     val dispatchMode: ShellDispatchMode = ShellDispatchMode.EXACT,
 )
 
-class ShellTranscriptBuffer(private val maxOutputBytes: Int = 1024 * 1024) {
+class ShellTranscriptBuffer(
+    private val maxOutputBytes: Int = 1024 * 1024,
+    private val maxEntries: Int = 2_000,
+) {
+    init {
+        require(maxOutputBytes > 0)
+        require(maxEntries > 0)
+    }
+
     private val entries = mutableListOf<ShellEntry>()
     var droppedOldestOutput: Boolean = false
         private set
 
     fun snapshot(): List<ShellEntry> = entries.toList()
+
+    fun filtered(query: String): List<ShellEntry> {
+        val needle = query.trim()
+        if (needle.isEmpty()) return snapshot()
+        return entries.filter { entry ->
+            entry.command.contains(needle, ignoreCase = true) ||
+                entry.stdout.contains(needle, ignoreCase = true) ||
+                entry.stderr.contains(needle, ignoreCase = true) ||
+                entry.status.name.contains(needle, ignoreCase = true) ||
+                entry.exitCode?.toString()?.contains(needle) == true
+        }
+    }
 
     fun add(entry: ShellEntry) {
         if (entry.wasTruncated) droppedOldestOutput = true
@@ -45,6 +65,10 @@ class ShellTranscriptBuffer(private val maxOutputBytes: Int = 1024 * 1024) {
     }
 
     private fun enforceLimit() {
+        while (entries.size > maxEntries) {
+            entries.removeAt(0)
+            droppedOldestOutput = true
+        }
         while (outputBytes() > maxOutputBytes && entries.size > 1) {
             entries.removeAt(0)
             droppedOldestOutput = true

@@ -25,7 +25,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -51,9 +53,13 @@ import com.sheen.adb.core.QuickActionKind
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SafeVerbatimPolicy
+import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.V01StringKey
 import com.sheen.adb.ui.V01Strings
+import com.sheen.adb.ui.V1SharedStringKey
+import com.sheen.adb.ui.V1SharedStrings
 import java.util.Locale
 
 @Composable
@@ -84,6 +90,7 @@ fun OverviewRoute(
         state = state,
         quickAction = quickAction,
         onRefresh = viewModel::refresh,
+        onDismissError = viewModel::dismissError,
         onScreenshot = viewModel::requestScreenshot,
         onScreenRecord = viewModel::requestScreenRecord,
         onReboot = viewModel::requestReboot,
@@ -99,6 +106,7 @@ fun OverviewScreen(
     state: OverviewUiState,
     quickAction: QuickActionUiState = QuickActionUiState.Idle,
     onRefresh: () -> Unit,
+    onDismissError: () -> Unit = {},
     onScreenshot: () -> Unit = {},
     onScreenRecord: () -> Unit = {},
     onReboot: () -> Unit = {},
@@ -116,7 +124,34 @@ fun OverviewScreen(
         DeviceIdentityCard(state, language)
         if (state.isLoading) CircularProgressIndicator()
         state.error?.let {
-            Text("${it.userMessage} ${it.nextStep}", color = MaterialTheme.colorScheme.error)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = SheenShapes.large,
+                color = MaterialTheme.colorScheme.errorContainer,
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 16.dp, top = 4.dp, bottom = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        listOf(
+                            OverviewStrings.text(language, OverviewStringKey.OUTCOME_UNKNOWN),
+                            OverviewStrings.resolve(language, OverviewStrings.technicalCode(it.technicalCode)),
+                        ).joinToString(" · "),
+                        modifier = Modifier.weight(1f),
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                    )
+                    IconButton(onClick = onDismissError) {
+                        Icon(
+                            SheenIcons.Close,
+                            contentDescription = V1SharedStrings.text(
+                                language,
+                                V1SharedStringKey.ACTION_CLOSE,
+                            ),
+                        )
+                    }
+                }
+            }
         }
         state.overview?.let { OverviewMetricGrid(it, language) }
         if (state.isConnected) {
@@ -130,7 +165,7 @@ fun OverviewScreen(
             )
         } else {
             Text(
-                V01Strings.text(language, V01StringKey.CONNECTION_DISCONNECTED),
+                OverviewStrings.text(language, OverviewStringKey.DISCONNECTED),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -141,15 +176,19 @@ fun OverviewScreen(
     ) {
         AlertDialog(
             onDismissRequest = onDismissReboot,
-            title = { Text(V01Strings.text(language, V01StringKey.QUICK_REBOOT_CONFIRM)) },
+            title = { Text(OverviewStrings.text(language, OverviewStringKey.REBOOT_CONFIRMATION)) },
             text = {
-                Text(V01Strings.text(language, V01StringKey.QUICK_REBOOT_RISK))
+                Text(OverviewStrings.text(language, OverviewStringKey.REBOOT_RISK))
             },
             confirmButton = {
-                Button(onClick = onConfirmReboot) { Text("确认重启") }
+                Button(onClick = onConfirmReboot) {
+                    Text(OverviewStrings.text(language, OverviewStringKey.CONFIRM_REBOOT))
+                }
             },
             dismissButton = {
-                TextButton(onClick = onDismissReboot) { Text("取消") }
+                TextButton(onClick = onDismissReboot) {
+                    Text(OverviewStrings.text(language, OverviewStringKey.CANCEL_REBOOT))
+                }
             },
         )
     }
@@ -188,7 +227,7 @@ private fun DeviceIdentityCard(state: OverviewUiState, language: UiLanguage) {
                 Text(
                     if (state.isConnected) {
                         "● ${localized(language, "已通过 TCP/IP 连接", "Connected over TCP/IP")}"
-                    } else "○ ${V01Strings.text(language, V01StringKey.CONNECTION_DISCONNECTED)}",
+                    } else "○ ${OverviewStrings.text(language, OverviewStringKey.DISCONNECTED)}",
                     color = if (state.isConnected) {
                         MaterialTheme.colorScheme.secondary
                     } else {
@@ -514,7 +553,7 @@ private fun QuickActionsCard(
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Text(
-                if (language == UiLanguage.ZH_CN) "快捷操作" else "Quick actions",
+                OverviewStrings.text(language, OverviewStringKey.QUICK_ACTIONS),
                 style = MaterialTheme.typography.titleMedium,
             )
             val busy = state is QuickActionUiState.Running ||
@@ -524,19 +563,37 @@ private fun QuickActionsCard(
             val recording = state as? QuickActionUiState.Running
             val isScreenRecording = recording?.kind == QuickActionKind.SCREEN_RECORD
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                QuickActionDesignButton(SheenIcons.Screenshot, V01Strings.text(language, V01StringKey.QUICK_SCREENSHOT), MaterialTheme.colorScheme.primary, !busy, onScreenshot, Modifier.weight(1f))
+                QuickActionDesignButton(
+                    SheenIcons.Screenshot,
+                    OverviewStrings.text(language, OverviewStringKey.SCREENSHOT),
+                    MaterialTheme.colorScheme.primary,
+                    !busy,
+                    onScreenshot,
+                    Modifier.weight(1f),
+                )
                 QuickActionDesignButton(
                     SheenIcons.ScreenRecord,
-                    V01Strings.text(
+                    OverviewStrings.text(
                         language,
-                        if (isScreenRecording) V01StringKey.QUICK_STOP else V01StringKey.QUICK_RECORD,
+                        if (isScreenRecording) {
+                            OverviewStringKey.STOP_SCREEN_RECORD
+                        } else {
+                            OverviewStringKey.SCREEN_RECORD
+                        },
                     ),
                     MaterialTheme.colorScheme.tertiary,
                     !busy || (isScreenRecording && recording?.isStopping == false),
                     onScreenRecord,
                     Modifier.weight(1f),
                 )
-                QuickActionDesignButton(SheenIcons.Power, V01Strings.text(language, V01StringKey.QUICK_REBOOT), MaterialTheme.colorScheme.onSurface, !busy, onReboot, Modifier.weight(1f))
+                QuickActionDesignButton(
+                    SheenIcons.Power,
+                    OverviewStrings.text(language, OverviewStringKey.REBOOT),
+                    MaterialTheme.colorScheme.onSurface,
+                    !busy,
+                    onReboot,
+                    Modifier.weight(1f),
+                )
             }
             QuickActionStatus(state, onExportRequested, language)
         }
@@ -563,7 +620,7 @@ private fun QuickActionDesignButton(
         verticalArrangement = Arrangement.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(28.dp), tint = tint)
+            Icon(icon, contentDescription = label, modifier = Modifier.size(28.dp), tint = tint)
             Text(label, textAlign = TextAlign.Center)
         }
     }
@@ -579,11 +636,7 @@ private fun QuickActionStatus(
         QuickActionUiState.Idle,
         is QuickActionUiState.Confirming -> Unit
         is QuickActionUiState.Running -> {
-            val status = if (state.kind == QuickActionKind.SCREEN_RECORD && state.isStopping) {
-                localized(language, "正在停止并生成录像", "Finalizing recording")
-            } else {
-                V01Strings.text(language, V01StringKey.QUICK_RECORDING)
-            }
+            val status = OverviewStrings.text(language, requireNotNull(state.statusKey))
             Text(
                 "$status · ${state.elapsedMillis / 1_000}s · ${formatBytes(state.bytesWritten)}",
                 fontFamily = FontFamily.Monospace,
@@ -593,26 +646,68 @@ private fun QuickActionStatus(
             onClick = { onExportRequested(state.artifact) },
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
         ) {
-            Text(V01Strings.text(language, V01StringKey.QUICK_EXPORT))
+            Text(saveActionLabel(state.kind, language))
         }
         is QuickActionUiState.Exporting -> Text(
-            if (language == UiLanguage.ZH_CN) "正在写入主控端所选位置…" else "Saving to the selected controller location…",
+            OverviewStrings.text(language, OverviewStringKey.SAVE_WRITING),
         )
-        is QuickActionUiState.Succeeded -> Text(
-            "已保存${state.destinationName?.let { "：$it" }.orEmpty()}",
-            color = MaterialTheme.colorScheme.secondary,
+        is QuickActionUiState.Succeeded -> {
+            val destination = state.destinationName?.let {
+                OverviewStrings.resolve(language, OverviewStrings.artifactLabel(it))
+            }
+            Text(
+                listOfNotNull(
+                    OverviewStrings.text(language, OverviewStringKey.SAVE_SUCCEEDED),
+                    destination,
+                ).joinToString(" · "),
+                color = MaterialTheme.colorScheme.secondary,
+            )
+        }
+        is QuickActionUiState.Cancelled -> Text(
+            listOf(
+                OverviewStrings.text(language, OverviewStringKey.SAVE_CANCELLED),
+                safeOverviewValue(state.reason, maxCodePoints = 64),
+            ).joinToString(" · "),
         )
-        is QuickActionUiState.Cancelled -> Text(V01Strings.text(language, V01StringKey.ERROR_CANCELLED))
-        is QuickActionUiState.Failed -> Text(
-            "操作失败（${state.technicalCode}）",
-            color = MaterialTheme.colorScheme.error,
-        )
+        is QuickActionUiState.Failed -> {
+            val technicalCode = OverviewStrings.resolve(
+                language,
+                OverviewStrings.technicalCode(state.technicalCode),
+            )
+            Text(
+                listOf(
+                    OverviewStrings.text(language, OverviewStringKey.SAVE_FAILED),
+                    technicalCode,
+                ).joinToString(" · "),
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
         is QuickActionUiState.ResultUnknown -> Text(
-            V01Strings.text(language, V01StringKey.QUICK_RESULT_UNKNOWN),
+            OverviewStrings.text(language, OverviewStringKey.OUTCOME_UNKNOWN),
             color = MaterialTheme.colorScheme.error,
         )
     }
 }
+
+private fun saveActionLabel(
+    kind: QuickActionKind,
+    language: UiLanguage,
+): String = OverviewStrings.text(
+    language,
+    if (kind == QuickActionKind.SCREENSHOT) {
+        OverviewStringKey.SAVE_SCREENSHOT
+    } else {
+        OverviewStringKey.SAVE_SCREEN_RECORD
+    },
+)
+
+private fun safeOverviewValue(
+    raw: String,
+    maxCodePoints: Int,
+): String = SafeVerbatimText.render(
+    raw = raw,
+    policy = SafeVerbatimPolicy.SingleLine(maxCodePoints),
+).display
 
 private fun usedOfTotal(total: Long?, available: Long?): String {
     if (total == null || available == null) return "不可用"

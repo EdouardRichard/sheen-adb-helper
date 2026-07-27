@@ -3,6 +3,7 @@ package com.sheen.adb.core.internal.processes
 import com.sheen.adb.core.ProcessFieldState
 import org.testng.Assert.assertEquals
 import org.testng.Assert.assertNull
+import org.testng.Assert.assertTrue
 import org.testng.annotations.Test
 
 class ProcessSnapshotParserTest {
@@ -77,5 +78,37 @@ class ProcessSnapshotParserTest {
 
         assertNull(entries.single().cpuPercent)
         assertEquals(entries.single().cpuState, ProcessFieldState.UNKNOWN)
+    }
+
+    @Test
+    fun `uses ps rss when protected pss is unavailable`() {
+        val entries = ProcessSnapshotParser.parse(
+            psText = """
+                USER PID PPID RSS NAME
+                u0_a123 101 1 2048 com.example.app
+            """.trimIndent(),
+            sessionId = "session-a",
+            generation = 10,
+            pssKiBByPid = emptyMap(),
+        )
+
+        assertEquals(entries.single().pssMiB, 2.0)
+        assertEquals(entries.single().pssState, ProcessFieldState.AVAILABLE)
+    }
+
+    @Test
+    fun `uses direct ps cpu and stable start marker without proc wide sampling`() {
+        val entries = ProcessSnapshotParser.parse(
+            psText = """
+                USER PID PPID RSS NAME %CPU STIME
+                u0_a123 101 1 2048 com.example.app 12.5 08:42
+            """.trimIndent(),
+            sessionId = "session-a",
+            generation = 11,
+        )
+
+        assertEquals(entries.single().cpuPercent, 12.5)
+        assertEquals(entries.single().cpuState, ProcessFieldState.AVAILABLE)
+        assertTrue(entries.single().identity.startTimeTicks != null)
     }
 }

@@ -5,6 +5,8 @@ import com.sheen.adb.core.WirelessAddress
 import com.sheen.adb.core.WirelessDiscoveryEvent
 import com.sheen.adb.core.WirelessDiscoveryState
 import com.sheen.adb.core.WirelessObservationId
+import com.sheen.adb.core.WirelessPairingTargetSelection
+import com.sheen.adb.core.WirelessPairingTargetSelector
 import com.sheen.adb.core.WirelessServiceObservation
 import com.sheen.adb.core.WirelessServiceStatus
 import com.sheen.adb.core.WirelessServiceType
@@ -172,6 +174,87 @@ class WirelessDiscoveryCoreTest {
 
             assertEquals(result, current)
         }
+    }
+
+    @Test
+    fun `selects the pairing code service correlated to the chosen connect service instead of discovery order`() {
+        val selectedConnect = observation(
+            type = WirelessServiceType.CONNECT,
+            name = "adb-synthetic-guid-alpha-connectsuffix",
+            addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 44)),
+            status = WirelessServiceStatus.RESOLVED,
+        )
+        val unrelatedFirst = observation(
+            type = WirelessServiceType.PAIRING,
+            name = "adb-synthetic-guid-beta",
+            addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 45)),
+            status = WirelessServiceStatus.RESOLVED,
+        )
+        val matchingSecond = observation(
+            type = WirelessServiceType.PAIRING,
+            name = "adb-synthetic-guid-alpha",
+            addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 44)),
+            status = WirelessServiceStatus.RESOLVED,
+        )
+        val pairingState = WirelessDiscoveryState(
+            generation = GENERATION + 1,
+            services = listOf(unrelatedFirst, matchingSecond),
+        )
+
+        val result = WirelessPairingTargetSelector.select(selectedConnect, pairingState)
+
+        assertEquals(
+            (result as WirelessPairingTargetSelection.Selected).observation.observationId,
+            matchingSecond.observationId,
+        )
+        assertEquals(result.target.generation, pairingState.generation)
+    }
+
+    @Test
+    fun `does not guess when selected connect service has no pairing match or several matches`() {
+        val selectedConnect = observation(
+            type = WirelessServiceType.CONNECT,
+            name = "vendor-connect-name",
+            addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 44)),
+            status = WirelessServiceStatus.RESOLVED,
+        )
+        val noMatch = WirelessDiscoveryState(
+            generation = GENERATION + 1,
+            services = listOf(
+                observation(
+                    type = WirelessServiceType.PAIRING,
+                    name = "adb-other-guid",
+                    addresses = listOf(WirelessAddress.Ipv4(192, 0, 2, 45)),
+                    status = WirelessServiceStatus.RESOLVED,
+                ),
+            ),
+        )
+        val ambiguous = WirelessDiscoveryState(
+            generation = GENERATION + 2,
+            services = listOf(
+                observation(
+                    type = WirelessServiceType.PAIRING,
+                    name = "vendor-pair-one",
+                    addresses = selectedConnect.addresses,
+                    status = WirelessServiceStatus.RESOLVED,
+                ),
+                observation(
+                    type = WirelessServiceType.PAIRING,
+                    name = "vendor-pair-two",
+                    addresses = selectedConnect.addresses,
+                    status = WirelessServiceStatus.RESOLVED,
+                ),
+            ),
+        )
+
+        assertEquals(
+            WirelessPairingTargetSelector.select(selectedConnect, noMatch),
+            WirelessPairingTargetSelection.Waiting,
+        )
+        assertEquals(
+            WirelessPairingTargetSelector.select(selectedConnect, ambiguous),
+            WirelessPairingTargetSelection.Ambiguous,
+        )
     }
 
     @Test
