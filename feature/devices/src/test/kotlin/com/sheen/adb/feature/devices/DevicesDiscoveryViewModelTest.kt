@@ -4,6 +4,7 @@ import com.sheen.adb.core.AdbConnectionState
 import com.sheen.adb.core.AdbDiagnosticEvent
 import com.sheen.adb.core.AdbEndpoint
 import com.sheen.adb.core.AdbOperationResult
+import com.sheen.adb.core.AdbOperationStage
 import com.sheen.adb.core.AdbSessionManager
 import com.sheen.adb.core.AdbError
 import com.sheen.adb.core.LocalPairingController
@@ -31,6 +32,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -174,10 +176,12 @@ class DevicesDiscoveryViewModelTest {
     }
 
     @Test
-    fun `confirmed unpaired selection opens QR overlay without submitting a code attempt`() = runTest {
+    fun `dynamic debug selection tries connect then opens QR only after authentication failure`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val manager = FakeManager()
+            manager.discoveredConnectResult =
+                AdbOperationResult.Failure(AdbError.AuthenticationFailed(AdbOperationStage.CONNECT))
             val flow = manager.enqueueDiscovery()
             val attemptId = PairingAttemptId.of("attempt-discovered")
             val viewModel = viewModel(manager, attemptId)
@@ -189,6 +193,7 @@ class DevicesDiscoveryViewModelTest {
 
             viewModel.selectDiscoveryConnect(target)
             viewModel.confirmDiscoverySelection()
+            runCurrent()
             viewModel.updatePairingCode("4".repeat(6))
             viewModel.pair()
             runCurrent()
@@ -198,16 +203,53 @@ class DevicesDiscoveryViewModelTest {
             assertEquals(manager.pairTargets, emptyList<WirelessDiscoveryTarget>())
             assertEquals(manager.pairAttempts, emptyList<PairingAttemptId>())
             assertEquals(manager.manualPairCalls, 0)
+            assertEquals(manager.connectTargets, listOf(target))
         } finally {
             Dispatchers.resetMain()
         }
     }
 
     @Test
-    fun `confirmed unpaired selection releases foreground discovery before QR pairing starts`() = runTest {
+    fun `unexpected disconnect restarts foreground discovery after the old scan terminated`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager(
+                AdbConnectionState.Connected(
+                    endpoint = AdbEndpoint("synthetic.invalid", 45_001),
+                    sessionId = "session-existing",
+                ),
+            )
+            manager.enqueueCompletedDiscovery(
+                AdbOperationResult.Failure(AdbError.DiscoverySessionChanged),
+            )
+            val restarted = manager.enqueueDiscovery()
+            val viewModel = viewModel(manager)
+
+            viewModel.onDiscoveryForeground()
+            runCurrent()
+            assertEquals(manager.discoveryRequests.size, 1)
+
+            manager.publishUnexpectedDisconnect()
+            runCurrent()
+            assertEquals(manager.discoveryRequests.size, 2)
+            assertEquals(restarted.subscriptionCount.value, 1)
+
+            restarted.emit(AdbOperationResult.Success(snapshot(22L, "restarted")))
+            runCurrent()
+            assertEquals(viewModel.discoveryState.value.generation, 22L)
+            assertEquals(viewModel.discoveryState.value.phase, DevicesDiscoveryPhase.CONTENT)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `authentication fallback releases foreground discovery before QR pairing starts`() = runTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val manager = FakeManager()
+            manager.discoveredConnectResult =
+                AdbOperationResult.Failure(AdbError.AuthenticationFailed(AdbOperationStage.CONNECT))
             val foreground = manager.enqueueDiscovery()
             val viewModel = viewModel(manager, PairingAttemptId.of("attempt-serialized-qr"))
             viewModel.onDiscoveryForeground()
@@ -227,6 +269,34 @@ class DevicesDiscoveryViewModelTest {
             )
             assertTrue(viewModel.state.value.showPairing)
             assertEquals(viewModel.pairingState.value.method, PairingMethod.QR)
+        } finally {
+            Dispatchers.resetMain()
+        }
+    }
+
+    @Test
+    fun `dynamic debug timeout does not open pairing`() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
+        try {
+            val manager = FakeManager()
+            manager.discoveredConnectResult =
+                AdbOperationResult.Failure(AdbError.Timeout(AdbOperationStage.CONNECT))
+            val flow = manager.enqueueDiscovery()
+            manager.enqueueDiscovery()
+            val viewModel = viewModel(manager)
+            viewModel.onDiscoveryForeground()
+            runCurrent()
+            flow.emit(AdbOperationResult.Success(snapshot(33L, "dynamic-debug-timeout")))
+            runCurrent()
+            val target = viewModel.discoveryState.value.items.single().connectTarget!!
+
+            viewModel.selectDiscoveryConnect(target)
+            viewModel.confirmDiscoverySelection()
+            advanceUntilIdle()
+
+            assertEquals(manager.connectTargets, listOf(target))
+            assertFalse(viewModel.state.value.showPairing)
+            assertEquals(viewModel.state.value.inputError, "ADB_TIMEOUT")
         } finally {
             Dispatchers.resetMain()
         }
@@ -342,13 +412,14 @@ class DevicesDiscoveryViewModelTest {
         private val connection = MutableStateFlow(initialConnectionState)
         private val diagnostics = MutableStateFlow<List<AdbDiagnosticEvent>>(emptyList())
         private val localController = UnsupportedLocalController()
-        private val discoveries = ArrayDeque<MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>>>()
+        private val discoveries = ArrayDeque<Flow<AdbOperationResult<WirelessDiscoveryState>>>()
         val discoveryRequests = mutableListOf<Pair<WirelessDiscoveryMode, Duration>>()
         val pairTargets = mutableListOf<WirelessDiscoveryTarget>()
         val pairAttempts = mutableListOf<PairingAttemptId>()
         val connectTargets = mutableListOf<WirelessDiscoveryTarget>()
         var manualPairCalls = 0
         var disconnectCalls = 0
+        var discoveredConnectResult: AdbOperationResult<WirelessDiscoveryState>? = null
 
         val instance: AdbSessionManager = Proxy.newProxyInstance(
             AdbSessionManager::class.java.classLoader,
@@ -372,7 +443,8 @@ class DevicesDiscoveryViewModelTest {
                 "connectDiscoveredService" -> {
                     val target = args!![0] as WirelessDiscoveryTarget
                     connectTargets += target
-                    AdbOperationResult.Success(WirelessDiscoveryState(target.generation))
+                    discoveredConnectResult
+                        ?: AdbOperationResult.Success(WirelessDiscoveryState(target.generation))
                 }
                 "pairWithSecret" -> {
                     manualPairCalls++
@@ -392,6 +464,14 @@ class DevicesDiscoveryViewModelTest {
 
         fun enqueueDiscovery(): MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>> =
             MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>>(extraBufferCapacity = 4).also(discoveries::add)
+
+        fun enqueueCompletedDiscovery(result: AdbOperationResult<WirelessDiscoveryState>) {
+            discoveries += flowOf(result)
+        }
+
+        fun publishUnexpectedDisconnect() {
+            connection.value = AdbConnectionState.Disconnected()
+        }
     }
 
     private class UnsupportedLocalController : LocalPairingController {

@@ -130,12 +130,19 @@ class AppsPresentationTest {
     }
 
     @Test
-    fun `view model consumes session bound metadata updates and cancels enrichment off page`() {
+    fun `view model consumes session bound metadata updates and detaches enrichment off page`() {
         val source = File("src/main/kotlin/com/sheen/adb/feature/apps/AppsViewModel.kt").readText()
+        val collector = source.substringAfter("private fun observeMetadata")
+            .substringBefore("private fun cancelMetadata")
 
         assertTrue(source.contains("observeApplicationMetadata(expectedSessionId)"))
         assertTrue(source.contains("displayNameByPackage + (update.packageName to update.displayName)"))
+        assertTrue(source.contains("releaseMetadataPageLoading()"))
         assertTrue(source.contains("metadataJob?.cancel()"))
+        assertFalse(
+            collector.contains("!foreground"),
+            "Detached Session-owned metadata must still populate the cache while another page is visible.",
+        )
     }
 
     @Test

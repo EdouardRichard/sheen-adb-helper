@@ -12,7 +12,10 @@ import org.testng.annotations.Test
 class SettingsPresentationTest {
     @Test
     fun `clear data requires explicit confirmation`() {
-        val requested = SettingsUiState("0.0.1", clearResult = "old").requestClearConfirmation()
+        val requested = SettingsUiState(
+            "0.0.1",
+            clearResult = SettingsMessageCode.CLEAR_FAILED,
+        ).requestClearConfirmation()
         assertTrue(requested.showClearConfirmation)
         assertNull(requested.clearResult)
         assertFalse(requested.dismissClearConfirmation().showClearConfirmation)
@@ -59,6 +62,41 @@ class SettingsPresentationTest {
     }
 
     @Test
+    fun `all settings cards actions progress and clear confirmation are bilingual`() {
+        val requiredSemanticNames = setOf(
+            "VERSION",
+            "PRIVACY_TITLE",
+            "PRIVACY_BODY",
+            "SUPPORT_TITLE",
+            "SUPPORT_BODY",
+            "LICENSES_TITLE",
+            "LICENSES_BODY",
+            "PAIRING_HELP_TITLE",
+            "PAIRING_HELP_BODY",
+            "OPEN_WIRELESS_DEBUGGING",
+            "OPEN_DEVELOPER_OPTIONS",
+            "CLEAR_ALL_DATA",
+            "CLEARING_DATA",
+            "CLEAR_CONFIRM_TITLE",
+            "CLEAR_CONFIRM_BODY",
+            "CLEAR_CONFIRM",
+            "CANCEL",
+        )
+
+        assertTrue(
+            SettingsStringKey.entries.map { it.name }.containsAll(requiredSemanticNames),
+        )
+        assertEquals(
+            SettingsStrings.requiredKeys(UiLanguage.ZH_CN),
+            SettingsStringKey.entries.toSet(),
+        )
+        assertEquals(
+            SettingsStrings.requiredKeys(UiLanguage.EN_US),
+            SettingsStringKey.entries.toSet(),
+        )
+    }
+
+    @Test
     fun `settings route receives root language and owns no second language source`() {
         val source = File(
             "src/main/kotlin/com/sheen/adb/feature/settings/SettingsScreen.kt",
@@ -69,6 +107,22 @@ class SettingsPresentationTest {
         assertTrue(source.contains("SettingsStrings.resolve("))
         assertFalse(source.contains("languagePreference.collect"))
         assertFalse(source.contains("\"语言偏好保存失败，请重试。\""))
+        assertFalse(source.contains("Text(\"打开无线调试设置\")"))
+        assertFalse(source.contains("Text(\"打开开发者选项\")"))
+        assertFalse(source.contains("InfoCard(\"应用版本\""))
+        assertFalse(source.contains("title = { Text(\"清除所有本地数据？\") }"))
+    }
+
+    @Test
+    fun `settings result messages remain semantic across language changes`() {
+        assertEquals(
+            SettingsUiState("1.0").applyClearResult(success = true).clearResult.toString(),
+            "CLEAR_SUCCEEDED",
+        )
+        assertEquals(
+            SettingsUiState("1.0").applyClearResult(success = false).clearResult.toString(),
+            "CLEAR_FAILED",
+        )
     }
 
     @Test

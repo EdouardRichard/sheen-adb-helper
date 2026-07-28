@@ -191,6 +191,8 @@ internal class DefaultAdbSessionManager(
     private val metadataReaderFactory: ((AdbProtocolClient, () -> Boolean) -> RemoteApkReader)? = null,
     private val metadataParser: (ByteArray, List<String>) -> ApplicationMetadataParseResult =
         ApplicationMetadataParser()::parse,
+    private val metadataBatchTimeout: Duration = 10.seconds,
+    private val metadataCancellationGrace: Duration = 3.seconds,
     private val qrPairingCoordinator: QrPairingCoordinator = QrPairingCoordinator(
         clock = MonotonicClock { System.nanoTime() / 1_000_000L },
         secureRandom = SecureRandom(),
@@ -372,6 +374,7 @@ internal class DefaultAdbSessionManager(
     private val applicationMetadataMutex = Mutex()
     private var applicationMetadataLoader: ApplicationMetadataLoader? = null
     private var applicationMetadataLoaderSessionId: String? = null
+    private var applicationMetadataClient: AdbProtocolClient? = null
     @Volatile
     private var latestProcessAnalysis: ProcessAnalysisSnapshot? = null
     private val mutableState = MutableStateFlow<AdbConnectionState>(AdbConnectionState.Disconnected())
@@ -3234,10 +3237,12 @@ internal class DefaultAdbSessionManager(
 
             val loader = applicationMetadataLoader
                 ?.takeIf { applicationMetadataLoaderSessionId == expectedSessionId }
-                ?: createApplicationMetadataLoader(session).also {
+                ?: run {
                     clearApplicationMetadata()
-                    applicationMetadataLoader = it
-                    applicationMetadataLoaderSessionId = expectedSessionId
+                    createApplicationMetadataLoader(session).also {
+                        applicationMetadataLoader = it
+                        applicationMetadataLoaderSessionId = expectedSessionId
+                    }
                 }
             loader.retainSession(expectedSessionId)
             try {
@@ -3276,28 +3281,29 @@ internal class DefaultAdbSessionManager(
                 Unit
             }
         } finally {
+            clearApplicationMetadata()
             applicationMetadataMutex.unlock()
         }
     }
 
-    private fun createApplicationMetadataLoader(session: ActiveSession): ApplicationMetadataLoader {
+    private suspend fun createApplicationMetadataLoader(session: ActiveSession): ApplicationMetadataLoader {
         val isCurrent = { active?.id == session.id }
-        val reader = metadataReaderFactory?.invoke(session.client, isCurrent) ?: BoundedRemoteApkReader(
-            client = session.client,
-            sessionIsCurrent = isCurrent,
-            ioDispatcher = ioDispatcher,
-            onForcedSessionClose = {
-                runCatching { session.client.close() }
-                if (active?.id == session.id) {
-                    active = null
-                    applicationSnapshot = null
-                    clearApplicationMetadata()
-                    clearProcessAnalysis()
-                    mutableState.value = AdbConnectionState.Disconnected()
-                }
-            },
+        val reader = metadataReaderFactory?.invoke(session.client, isCurrent) ?: run {
+            val childClient = runInterruptible(ioDispatcher) { clientFactory.open(session.endpoint) }
+            applicationMetadataClient = childClient
+            BoundedRemoteApkReader(
+                client = childClient,
+                sessionIsCurrent = isCurrent,
+                ioDispatcher = ioDispatcher,
+                cancellationGrace = metadataCancellationGrace,
+                onForcedSessionClose = { runCatching { childClient.close() } },
+            )
+        }
+        return ApplicationMetadataLoader(
+            reader = reader,
+            parseMetadata = metadataParser,
+            batchTimeout = metadataBatchTimeout,
         )
-        return ApplicationMetadataLoader(reader = reader, parseMetadata = metadataParser)
     }
 
     private fun com.sheen.adb.core.internal.applications.ApplicationMetadataLoadUpdate.toPublic(): ApplicationMetadataUpdate {
@@ -3321,6 +3327,10 @@ internal class DefaultAdbSessionManager(
         applicationMetadataLoader?.clear()
         applicationMetadataLoader = null
         applicationMetadataLoaderSessionId = null
+        applicationMetadataClient?.let { child ->
+            applicationMetadataClient = null
+            runCatching { child.close() }
+        }
     }
 
     private fun clearProcessAnalysis() {

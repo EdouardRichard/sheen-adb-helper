@@ -376,6 +376,22 @@
 - [X] T202 [US7] 在 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt` 实现目标感知配对端口选择、可见端点同步及手动覆盖语义；修改文件：上述 1 个文件；验收：T199 全部转绿，多设备发现顺序不影响目标，用户编辑端点后严格按编辑值提交，失败可重试且不遗留陈旧目标。
 - [ ] T203 [US7] 在 Android 16 主控与 Android 12 隔离目标上从全新系统配对窗口完成 QR、配对码及配对后自动连接实测，再执行 T197 全功能回归；修改文件：0；验收：每次失败均重新采集并定位原因直至成功，局域网列表只展示调试端口，未配对调试设备打开复用配对浮层，QR/配对码成功后无需再次点击即可进入已连接态，最终完成 Shell、Logcat、快速切页与断线恢复验证。
 
+## Phase 17: 跨实例回归缺陷修复
+
+- [X] T204 [US7] 在 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryReducerTest.kt` 增加已配对但身份尚未关联的动态调试服务应先尝试连接的 RED 测试；修改文件：上述 1 个文件；验收：确认选择后产生直接连接效果，不预判为未配对。
+- [X] T205 [US7] 在 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryReducer.kt` 实现动态调试服务先连接策略；修改文件：上述 1 个文件；验收：T204 转绿，已验证服务与旧版 5555 行为保持不变。
+- [X] T206 [US7] 在 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryViewModelTest.kt` 增加动态调试连接仅在鉴权失败时进入配对、其他错误不进入配对的 RED 测试；修改文件：上述 1 个文件；验收：成功连接不显示配对，`allowsPairingFallback` 为 true 时复用配对浮层，超时等错误保留连接错误。
+- [X] T207 [US7] 在 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt` 实现发现连接的鉴权失败配对回退；修改文件：上述 1 个文件；验收：T206 转绿，回退前释放前台发现且不复用陈旧 generation。
+- [X] T208 [US3] [US4] 为应用列表完成后立即进入进程页导致 Session 断开的路径增加 RED 测试；修改文件：最多 2 个测试文件；验收：稳定复现子任务切换错误关闭主 Session 或占用共享通道的原因。
+- [X] T209 [US3] [US4] 修复应用与进程快速切页的 Session/子流生命周期；修改文件：最多 2 个生产文件；验收：T208 转绿，离页只取消页面子任务，主 Session 保留，随后发现与重连不依赖被控端重启无线调试。
+- [ ] T210 [US7] 强制重跑相关模块、全量测试与 Debug 构建，并在三模拟器隔离网络上复验两个缺陷；修改文件：0；验收：自动化、跨实例、UI/功能、未执行项与发布门禁证据分开记录，Android 9 的 5555 结果不得冒充 Android 12 TLS 证据。
+- [X] T211 [US7] 在 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesPairingViewModelTest.kt` 更新配对目标关联回归夹具，使未配对路径由真实鉴权失败触发；修改文件：上述 1 个文件；验收：多设备目标关联覆盖保持不变，且不再把未知动态端口直接等同于未配对。
+- [X] T212 [US3] [US4] 在 `core/adb/src/test/kotlin/com/sheen/adb/core/internal/ApplicationMetadataSessionManagerTest.kt` 增加元数据 Sync 子传输超时/清理不得关闭主 Session 的 RED 测试；修改文件：上述 1 个文件；验收：元数据使用独立子客户端，子客户端清理后主 Session 仍可执行进程所需 Shell 请求。
+- [X] T213 [US3] [US4] 在 `core/adb/src/main/kotlin/com/sheen/adb/core/internal/DefaultAdbSessionManager.kt` 隔离应用元数据传输客户端并限定强制关闭范围；修改文件：上述 1 个文件；验收：T212 转绿，元数据批次结束、取消、超时或 Session 变化只关闭元数据子客户端，不关闭活动主 Session。
+- [X] T214 [US7] 在 `feature/devices/src/test/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryViewModelTest.kt` 增加前台意外断链后自动重启 NSD 的 RED 测试；修改文件：上述 1 个文件；验收：已终止的旧 discovery 不复用，断链后产生一个新 generation 的前台扫描。
+- [X] T215 [US7] 在 `feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesViewModel.kt` 实现前台意外断链后的 discovery 恢复；修改文件：上述 1 个文件；验收：T214 转绿，显式后台/取消仍不自动重启，旧 generation 回调仍被拒绝。
+- [X] T216 [US7] 强制重跑相关模块、全量测试与 Debug 构建，并在 Android 12 TLS 目标上执行应用页到进程页至少 20 秒观察及意外断链发现恢复复验；修改文件：0；验收：自动化与跨实例证据分开记录，Session 不因元数据子流超时断开，前台断链后无需重启被控端无线调试即可重新发现。
+
 ---
 
 ## Dependencies & Execution Order

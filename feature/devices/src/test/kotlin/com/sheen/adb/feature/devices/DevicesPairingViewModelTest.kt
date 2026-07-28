@@ -841,6 +841,8 @@ class DevicesPairingViewModelTest {
             assertFalse(pairedViewModel.state.value.showPairing)
 
             val unpairedManager = FakeManager()
+            unpairedManager.discoveredConnectResult =
+                AdbOperationResult.Failure(AdbError.AuthenticationFailed(AdbOperationStage.CONNECT))
             val material = FakeMaterial(PairingAttemptId.of("attempt-unpaired-overlay"))
             val unpairedDiscovery = unpairedManager.enqueueDiscovery()
             unpairedManager.enqueueQrAttempt(material)
@@ -863,7 +865,7 @@ class DevicesPairingViewModelTest {
             assertEquals(unpairedViewModel.pairingState.value.phase, PairingAttemptPhase.WAITING_FOR_TARGET)
             assertTrue(unpairedViewModel.pairingState.value.qrMatrix != null)
             assertTrue(unpairedManager.pairTargets.isEmpty(), "opening an overlay must not submit pairing")
-            assertTrue(unpairedManager.connectTargets.isEmpty(), "unpaired routing must not call connect")
+            assertEquals(unpairedManager.connectTargets, listOf(unpaired))
         } finally {
             Dispatchers.resetMain()
         }
@@ -874,6 +876,8 @@ class DevicesPairingViewModelTest {
         Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         try {
             val manager = FakeManager()
+            manager.discoveredConnectResult =
+                AdbOperationResult.Failure(AdbError.AuthenticationFailed(AdbOperationStage.CONNECT))
             val qrMaterial = FakeMaterial(PairingAttemptId.of("attempt-targeted-qr"))
             val lanDiscovery = manager.enqueueDiscovery()
             manager.enqueueQrAttempt(qrMaterial)
@@ -1138,6 +1142,7 @@ class DevicesPairingViewModelTest {
         var wirelessDiscoveryActive = false
         val discoveryModes = mutableListOf<WirelessDiscoveryMode>()
         val localController = FakeLocalPairingController { !wirelessDiscoveryActive }
+        var discoveredConnectResult: AdbOperationResult<WirelessDiscoveryState>? = null
 
         private val queuedMaterials = ArrayDeque<FakeMaterial>()
         private val queuedDiscoveries = ArrayDeque<MutableSharedFlow<AdbOperationResult<WirelessDiscoveryState>>>()
@@ -1192,7 +1197,8 @@ class DevicesPairingViewModelTest {
                 "connectDiscoveredService" -> {
                     val target = args!![0] as WirelessDiscoveryTarget
                     connectTargets += target
-                    AdbOperationResult.Success(WirelessDiscoveryState(target.generation))
+                    discoveredConnectResult
+                        ?: AdbOperationResult.Success(WirelessDiscoveryState(target.generation))
                 }
                 "connectLocalPairedDevice" -> {
                     localConnectAttempts += args!![0] as PairingAttemptId

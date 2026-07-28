@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.provider.Settings
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
@@ -26,6 +28,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sheen.adb.ui.SheenDimensions
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.data.LanguagePreference
 import com.sheen.adb.ui.UiLanguage
 
@@ -44,7 +47,18 @@ fun SettingsRoute(
             SettingsStrings.resolve(language, SettingsStringKey.TITLE),
             style = MaterialTheme.typography.headlineSmall,
         )
-        Card(Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
+            border = BorderStroke(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
+            ),
+        ) {
             Column(Modifier.padding(16.dp)) {
                 Text(
                     SettingsStrings.resolve(language, SettingsStringKey.LANGUAGE),
@@ -76,40 +90,65 @@ fun SettingsRoute(
                 }
             }
         }
-        InfoCard("应用版本", state.versionLabel)
         InfoCard(
-            "纯本地隐私承诺",
-            "无账号、后端、广告、统计、遥测或崩溃上报。设备档案仅保存在本机；Shell、进程与 Logcat 内容默认只在内存中。",
+            SettingsStrings.resolve(language, SettingsStringKey.VERSION),
+            state.versionLabel,
         )
         InfoCard(
-            "风险与支持范围",
-            "主控端 Android 11（API 30）及以上；优先支持 Android 11+ 标准无线调试。旧式 :5555 为尽力兼容。ADB Shell 命令可能改变设备数据。",
+            SettingsStrings.resolve(language, SettingsStringKey.PRIVACY_TITLE),
+            SettingsStrings.resolve(language, SettingsStringKey.PRIVACY_BODY),
         )
         InfoCard(
-            "开源与第三方许可证",
-            "本项目：Apache-2.0；Kadb 2.1.1：Apache-2.0；AndroidX：Apache-2.0；Coroutines 1.10.2：Apache-2.0；Okio 3.17.0：Apache-2.0；Bouncy Castle 1.83：MIT；spake2-java 1.0.5：Apache-2.0；HiddenApiBypass 6.1：Apache-2.0。",
+            SettingsStrings.resolve(language, SettingsStringKey.SUPPORT_TITLE),
+            SettingsStrings.resolve(language, SettingsStringKey.SUPPORT_BODY),
         )
         InfoCard(
-            "无线调试与配对帮助",
-            "先在被控端手动开启开发者选项和无线调试。首页始终先尝试调试端口；只有认证失败时才使用系统“使用配对码配对设备”中的配对端口和 6 位配对码。配对成功后回到无线调试主页面填写调试端口。",
+            SettingsStrings.resolve(language, SettingsStringKey.LICENSES_TITLE),
+            SettingsStrings.resolve(language, SettingsStringKey.LICENSES_BODY),
+        )
+        InfoCard(
+            SettingsStrings.resolve(language, SettingsStringKey.PAIRING_HELP_TITLE),
+            SettingsStrings.resolve(language, SettingsStringKey.PAIRING_HELP_BODY),
         )
         Button(onClick = { if (!openSettings(context, Intent("android.settings.WIRELESS_DEBUGGING_SETTINGS"))) viewModel.showManualSettingsPath() }) {
-            Text("打开无线调试设置")
+            Text(SettingsStrings.resolve(language, SettingsStringKey.OPEN_WIRELESS_DEBUGGING))
         }
         OutlinedButton(onClick = {
             if (!openSettings(context, Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS))) viewModel.showManualSettingsPath()
-        }) { Text("打开开发者选项") }
-        state.settingsHelp?.let { Text(it) }
-        OutlinedButton(onClick = viewModel::requestClear, enabled = !state.isClearing) { Text("清除所有本地数据") }
-        if (state.isClearing) Text("正在清除并验证……")
-        state.clearResult?.let { Text(it) }
+        }) {
+            Text(SettingsStrings.resolve(language, SettingsStringKey.OPEN_DEVELOPER_OPTIONS))
+        }
+        state.settingsHelp?.let {
+            Text(SettingsStrings.resolve(language, SettingsStrings.keyFor(it)))
+        }
+        OutlinedButton(onClick = viewModel::requestClear, enabled = !state.isClearing) {
+            Text(SettingsStrings.resolve(language, SettingsStringKey.CLEAR_ALL_DATA))
+        }
+        if (state.isClearing) {
+            Text(SettingsStrings.resolve(language, SettingsStringKey.CLEARING_DATA))
+        }
+        state.clearResult?.let {
+            Text(SettingsStrings.resolve(language, SettingsStrings.keyFor(it)))
+        }
     }
     if (state.showClearConfirmation) AlertDialog(
         onDismissRequest = viewModel::dismissClear,
-        title = { Text("清除所有本地数据？") },
-        text = { Text("将删除设备档案、ADB 主机身份、偏好和临时文件。之后可能需要重新配对，且无法撤销。") },
-        confirmButton = { TextButton(onClick = viewModel::clearAll) { Text("确认清除") } },
-        dismissButton = { TextButton(onClick = viewModel::dismissClear) { Text("取消") } },
+        title = {
+            Text(SettingsStrings.resolve(language, SettingsStringKey.CLEAR_CONFIRM_TITLE))
+        },
+        text = {
+            Text(SettingsStrings.resolve(language, SettingsStringKey.CLEAR_CONFIRM_BODY))
+        },
+        confirmButton = {
+            TextButton(onClick = viewModel::clearAll) {
+                Text(SettingsStrings.resolve(language, SettingsStringKey.CLEAR_CONFIRM))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = viewModel::dismissClear) {
+                Text(SettingsStrings.resolve(language, SettingsStringKey.CANCEL))
+            }
+        },
     )
 }
 
@@ -132,7 +171,18 @@ private fun LanguageOption(
 
 @Composable
 private fun InfoCard(title: String, body: String) {
-    Card(Modifier.fillMaxWidth()) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(
+                alpha = SheenTonalLayers.quietOutlineAlpha,
+            ),
+        ),
+    ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             Text(body)

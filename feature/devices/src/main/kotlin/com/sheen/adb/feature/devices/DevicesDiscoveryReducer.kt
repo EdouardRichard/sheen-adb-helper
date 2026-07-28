@@ -113,13 +113,9 @@ internal class DevicesDiscoveryReducer {
         val effect = when (selection) {
             is DevicesDiscoverySelection.Pairing -> DevicesDiscoveryEffect.OpenCodePairing(selection.target)
             is DevicesDiscoverySelection.Connect -> {
-                val item = state.items.firstOrNull { it.connectTarget == selection.target }
+                state.items.firstOrNull { it.connectTarget == selection.target }
                     ?: return DevicesDiscoveryReduction(state.copy(pendingSelection = null))
-                if (item.requiresPairing) {
-                    DevicesDiscoveryEffect.OpenQrPairing(selection.target)
-                } else {
-                    DevicesDiscoveryEffect.Connect(selection.target)
-                }
+                DevicesDiscoveryEffect.Connect(selection.target)
             }
         }
         return DevicesDiscoveryReduction(

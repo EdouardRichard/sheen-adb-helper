@@ -97,7 +97,7 @@ class DevicesDiscoveryReducerTest {
     }
 
     @Test
-    fun `unknown dynamic debug service pairs while verified and legacy debug services connect`() {
+    fun `unknown dynamic debug service connects first while verified and legacy debug services connect`() {
         val identity = VerifiedWirelessDeviceId("verified-route")
         val snapshot = WirelessDiscoveryState(
             generation = 5L,
@@ -120,7 +120,7 @@ class DevicesDiscoveryReducerTest {
         assertEquals(
             reduce(dynamicPending.state, DevicesDiscoveryEvent.ConfirmSelection)
                 .effects.single(),
-            DevicesDiscoveryEffect.OpenQrPairing(dynamic.connectTarget),
+            DevicesDiscoveryEffect.Connect(dynamic.connectTarget),
         )
 
         val verified = content.items.single { it.endpointLabel.endsWith("43003") }

@@ -30,6 +30,7 @@ import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 
 internal enum class DevicesDiscoveryAction {
     CONNECT,
@@ -190,7 +191,13 @@ private fun DiscoveryDeviceCard(
             .fillMaxWidth()
             .heightIn(min = 96.dp)
             .background(MaterialTheme.colorScheme.surfaceContainerLow, SheenShapes.extraLarge)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, SheenShapes.extraLarge)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
+                SheenShapes.extraLarge,
+            )
             .clickable(enabled = onSelect != null) { onSelect?.invoke() }
             .padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,

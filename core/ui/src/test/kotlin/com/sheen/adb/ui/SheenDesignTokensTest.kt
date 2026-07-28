@@ -37,11 +37,19 @@ class SheenDesignTokensTest {
         assertEquals(SheenDimensions.rhythm, 4.dp)
         assertEquals(SheenDimensions.gutter, 12.dp)
         assertEquals(SheenDimensions.screenPadding, 16.dp)
-        assertEquals(SheenCornerRadii.small, 2.dp)
+        assertEquals(SheenCornerRadii.small, 4.dp)
         assertEquals(SheenCornerRadii.default, 4.dp)
         assertEquals(SheenCornerRadii.medium, 6.dp)
         assertEquals(SheenCornerRadii.large, 8.dp)
         assertEquals(SheenCornerRadii.extraLarge, 12.dp)
+    }
+
+    @Test
+    fun `tonal layering keeps borders quiet and frameless overlays readable`() {
+        assertEquals(SheenTonalLayers.quietOutlineAlpha, 0.28f)
+        assertEquals(SheenTonalLayers.subtleOutlineAlpha, 0.42f)
+        assertEquals(SheenTonalLayers.emphasisOutlineAlpha, 0.72f)
+        assertEquals(SheenTonalLayers.framelessOverlayDimAlpha, 0.26f)
     }
 
     @Test

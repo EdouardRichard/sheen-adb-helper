@@ -130,6 +130,7 @@ import com.sheen.adb.feature.settings.SettingsViewModel
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.TextArgumentType
 import com.sheen.adb.ui.TypedTextArgument
@@ -754,60 +755,19 @@ fun SheenApp(
                         (pageLoadNavigationGate.waitStartedAtMillis ?: pageLoadGateNowMillis))
                 ).coerceAtLeast(0L) + 999L
             ) / 1_000L
-        Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.TopCenter,
-        ) {
-        Row(
-            modifier = Modifier
-                .padding(horizontal = 16.dp, vertical = 12.dp)
-                .background(
-                    MaterialTheme.colorScheme.surfaceContainerHighest,
-                    SheenShapes.default,
+        PageLoadNavigationOverlay(
+            waiting = waiting,
+            remainingSeconds = remainingSeconds,
+            language = language,
+            onCancel = {
+                val transition = PageLoadNavigationGate.cancelAndRecover(
+                    pageLoadNavigationGate,
+                    SystemClock.elapsedRealtime(),
                 )
-                .border(
-                    1.dp,
-                    MaterialTheme.colorScheme.outlineVariant,
-                    SheenShapes.default,
-                )
-                .padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-            Text(
-                text = if (waiting) {
-                    "${AppStrings.resolve(language, AppStrings.ref(AppStringKey.PAGE_LOADING_WAIT))} " +
-                        "(${remainingSeconds}s)"
-                } else {
-                    AppStrings.resolve(
-                        language,
-                        AppStrings.ref(AppStringKey.PAGE_LOADING_RECOVERING),
-                    )
-                },
-                style = MaterialTheme.typography.bodySmall,
-            )
-            if (waiting) {
-                TextButton(
-                    onClick = {
-                        val transition = PageLoadNavigationGate.cancelAndRecover(
-                            pageLoadNavigationGate,
-                            SystemClock.elapsedRealtime(),
-                        )
-                        pageLoadNavigationGate = transition.state
-                        cancelCurrentPageLoading()
-                    },
-                ) {
-                    Text(
-                        AppStrings.resolve(
-                            language,
-                            AppStrings.ref(AppStringKey.PAGE_LOADING_CANCEL),
-                        ),
-                    )
-                }
-            }
-        }
-        }
+                pageLoadNavigationGate = transition.state
+                cancelCurrentPageLoading()
+            },
+        )
     }
     if (pageHostState.overlay is RootOverlayState.Pairing) {
         Box(
@@ -964,10 +924,74 @@ fun SheenApp(
                 ) { Text(V01Strings.text(language, V01StringKey.ABOUT_OPEN_GITHUB)) }
             },
             dismissButton = {
-                TextButton(onClick = { showAbout = false }) { Text("关闭") }
+                TextButton(onClick = { showAbout = false }) {
+                    Text(
+                        if (language == UiLanguage.ZH_CN) "关闭" else "Close",
+                    )
+                }
             },
         )
     }
+    }
+}
+
+@Composable
+private fun PageLoadNavigationOverlay(
+    waiting: Boolean,
+    remainingSeconds: Long,
+    language: UiLanguage,
+    onCancel: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                MaterialTheme.colorScheme.scrim.copy(
+                    alpha = SheenTonalLayers.framelessOverlayDimAlpha,
+                ),
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(30.dp),
+                strokeWidth = 3.dp,
+            )
+            Text(
+                text = AppStrings.resolve(
+                    language,
+                    AppStrings.ref(
+                        if (waiting) {
+                            AppStringKey.PAGE_LOADING_WAIT
+                        } else {
+                            AppStringKey.PAGE_LOADING_RECOVERING
+                        },
+                    ),
+                ),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center,
+            )
+            if (waiting) {
+                Text(
+                    text = "${remainingSeconds}s",
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                TextButton(onClick = onCancel) {
+                    Text(
+                        AppStrings.resolve(
+                            language,
+                            AppStrings.ref(AppStringKey.PAGE_LOADING_CANCEL),
+                        ),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1020,7 +1044,7 @@ private fun DrawerContent(
     language: UiLanguage,
 ) {
     Column(Modifier.fillMaxHeight()) {
-        DrawerHeader(onClose)
+        DrawerHeader(onClose, language)
         Column(
             Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(vertical = 16.dp),
         ) {
@@ -1052,12 +1076,17 @@ private fun DrawerContent(
 }
 
 @Composable
-private fun DrawerHeader(onClose: () -> Unit) {
+private fun DrawerHeader(onClose: () -> Unit, language: UiLanguage) {
     Row(
         Modifier
             .fillMaxWidth()
             .heightIn(min = 112.dp)
-            .border(1.dp, MaterialTheme.colorScheme.surfaceContainerHigh)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.quietOutlineAlpha,
+                ),
+            )
             .padding(horizontal = 24.dp, vertical = 24.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -1075,11 +1104,15 @@ private fun DrawerHeader(onClose: () -> Unit) {
                 tint = MaterialTheme.colorScheme.onPrimaryContainer,
             )
         }
-        Text("ADB 助手", modifier = Modifier.weight(1f), style = MaterialTheme.typography.headlineMedium)
+        Text(
+            V01Strings.text(language, V01StringKey.APP_NAME),
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.headlineMedium,
+        )
         IconButton(onClick = onClose, modifier = Modifier.size(SheenDimensions.minimumTouchTarget)) {
             Icon(
                 SheenIcons.Close,
-                contentDescription = "关闭菜单",
+                contentDescription = V01Strings.text(language, V01StringKey.CLOSE_MENU),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
@@ -1370,7 +1403,12 @@ private fun SheenConnectionTopBar(
             .windowInsetsPadding(WindowInsets.statusBars)
             .heightIn(min = SheenDimensions.minimumTouchTarget)
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
+            )
             .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1408,7 +1446,13 @@ private fun SheenConnectionTopBar(
                     .weight(1f)
                     .height(SheenDimensions.topBarVisualHeight - 8.dp)
                     .background(MaterialTheme.colorScheme.surfaceContainerLow, SheenShapes.default)
-                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, SheenShapes.default)
+                    .border(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant.copy(
+                            alpha = SheenTonalLayers.subtleOutlineAlpha,
+                        ),
+                        SheenShapes.default,
+                    )
                     .padding(horizontal = 12.dp)
                     .semantics {
                         contentDescription = V01Strings.text(
@@ -1464,7 +1508,12 @@ private fun SheenBottomNavigation(
             .fillMaxWidth()
             .height(SheenDimensions.bottomBarHeight)
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.quietOutlineAlpha,
+                ),
+            )
             .padding(horizontal = 4.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

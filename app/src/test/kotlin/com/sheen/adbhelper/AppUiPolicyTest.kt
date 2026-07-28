@@ -175,11 +175,11 @@ class AppUiPolicyTest {
             "../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DeviceHistoryMenu.kt",
         )
         val strings = source("../core/ui/src/main/kotlin/com/sheen/adb/ui/V01Strings.kt")
-        assertTrue(history.contains("历史连接设备"))
+        assertTrue(history.contains("DevicesStringKey.HISTORY_TITLE"))
         assertTrue(app.contains("DeviceHistoryMenu("))
         assertTrue(app.contains("V01StringKey.SETTINGS"))
         assertTrue(app.contains("V01StringKey.ABOUT"))
-        assertTrue(strings.contains("制作不易，请帮忙到 GitHub 点个 Star。"))
+        assertTrue(strings.contains("V01StringKey.ABOUT_SUPPORT"))
         assertTrue(app.contains("https://github.com/EdouardRichard/sheen-adb-helper"))
         assertTrue(app.contains("Intent(Intent.ACTION_VIEW"))
         assertTrue(app.contains("BuildConfig.VERSION_NAME"))

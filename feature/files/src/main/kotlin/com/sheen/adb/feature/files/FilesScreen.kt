@@ -52,6 +52,7 @@ import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.V1SharedStringKey
 import com.sheen.adb.ui.V1SharedStrings
@@ -173,7 +174,12 @@ private fun FilesPathBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surfaceContainer)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = .2f))
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.quietOutlineAlpha,
+                ),
+            )
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -76,10 +76,12 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
             val pickerOpen = state.task?.phase == AppsTaskPhase.PickerOpen
             dismissConfirmation()
             tasks.cancelPendingConfirmation()
-            loadAttemptedSessionId = null
             if (!pickerOpen) {
+                if (state.activeOperation == AppsOperation.LOADING) {
+                    loadAttemptedSessionId = null
+                }
                 cancelActive(leavingPage = true)
-                cancelMetadata()
+                releaseMetadataPageLoading()
                 cancelTaskAndCleanup()
             }
         } else {
@@ -446,8 +448,11 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
     }
 
     fun cancelPageLoading() {
+        if (mutableState.value.activeOperation == AppsOperation.LOADING) {
+            loadAttemptedSessionId = null
+        }
         cancelActive(leavingPage = false)
-        cancelMetadata()
+        releaseMetadataPageLoading()
     }
 
     private fun updateTaskPhase(taskId: String, phase: AppsTaskPhase) {
@@ -526,7 +531,6 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
                     val update = (result as? AdbOperationResult.Success)?.value ?: return@collect
                     mutableState.update { state ->
                         if (
-                            !foreground ||
                             state.sessionId != update.sessionId ||
                             state.userId != update.userId ||
                             state.applications.none { it.packageName == update.packageName }
@@ -559,6 +563,10 @@ class AppsViewModel(private val manager: AdbSessionManager) : ViewModel() {
         metadataGeneration += 1L
         metadataJob?.cancel()
         metadataJob = null
+        mutableState.update { it.copy(isMetadataLoading = false) }
+    }
+
+    private fun releaseMetadataPageLoading() {
         mutableState.update { it.copy(isMetadataLoading = false) }
     }
 

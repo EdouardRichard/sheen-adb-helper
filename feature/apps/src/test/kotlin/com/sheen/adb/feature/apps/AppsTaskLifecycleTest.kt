@@ -50,37 +50,38 @@ class AppsTaskLifecycleTest {
     }
 
     @Test
-    fun `system picker stop preserves picker task until the activity result returns`() {
+    fun `page exit detaches metadata loading without cancelling the shared Session child stream`() {
         val viewModel = File("src/main/kotlin/com/sheen/adb/feature/apps/AppsViewModel.kt").readText()
         val foregroundHandler = viewModel.substringAfter("fun setForeground")
             .substringBefore("\n    fun ")
+        val pageLoadingCancellation = viewModel.substringAfter("fun cancelPageLoading")
+            .substringBefore("\n    private fun ")
 
         assertTrue(viewModel.contains("state.task?.phase == AppsTaskPhase.PickerOpen"))
         assertTrue(
             foregroundHandler.contains(
                 "if (!pickerOpen) {\n                cancelActive(leavingPage = true)\n                cancelMetadata()\n                cancelTaskAndCleanup()",
-            ),
+            ).not(),
         )
         assertTrue(
-            foregroundHandler.contains(
-                "if (!pickerOpen) {\n                cancelActive(leavingPage = true)\n                cancelMetadata()",
-            ),
-            "Picker ON_STOP must not cancel an in-flight Sync metadata read and force-close the shared Session.",
+            foregroundHandler.contains("releaseMetadataPageLoading()"),
+            "Leaving the applications page must release the loading gate without cancelling Sync.",
         )
         assertFalse(
-            foregroundHandler.substringBefore("if (!pickerOpen)").contains("cancelMetadata()"),
-            "Metadata cancellation must be guarded by the picker lifecycle exception.",
+            foregroundHandler.contains("cancelMetadata()"),
+            "Page exit must not cancel an in-flight Sync read and force-close the shared Session.",
         )
         assertTrue(
-            foregroundHandler.contains(
-                "if (!pickerOpen) {\n                cancelActive(leavingPage = true)",
-            ),
+            Regex("if \\(!pickerOpen\\) \\{[\\s\\S]{0,240}cancelActive\\(leavingPage = true\\)")
+                .containsMatchIn(foregroundHandler),
             "Picker ON_STOP must not cancel an in-flight applications snapshot read and transiently disconnect the shared Session.",
         )
         assertFalse(
             foregroundHandler.substringBefore("if (!pickerOpen)").contains("cancelActive("),
             "All Session-bound application reads must be guarded by the picker lifecycle exception.",
         )
+        assertTrue(pageLoadingCancellation.contains("releaseMetadataPageLoading()"))
+        assertFalse(pageLoadingCancellation.contains("cancelMetadata()"))
     }
 
     @Test

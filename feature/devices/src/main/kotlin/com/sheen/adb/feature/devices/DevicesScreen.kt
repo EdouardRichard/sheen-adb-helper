@@ -64,6 +64,7 @@ import com.sheen.adb.data.DeviceProfile
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.SafeVerbatimPolicy
 import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.UiLanguage
@@ -381,7 +382,11 @@ private fun DismissibleInputError(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.errorContainer, SheenShapes.large)
-            .border(1.dp, MaterialTheme.colorScheme.error, SheenShapes.large)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.error.copy(alpha = SheenTonalLayers.emphasisOutlineAlpha),
+                SheenShapes.large,
+            )
             .padding(start = 12.dp, top = 8.dp, bottom = 8.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -418,7 +423,11 @@ private fun CompactConnectionError(
         Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.errorContainer, SheenShapes.large)
-            .border(1.dp, MaterialTheme.colorScheme.error, SheenShapes.large)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.error.copy(alpha = SheenTonalLayers.emphasisOutlineAlpha),
+                SheenShapes.large,
+            )
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -491,7 +500,13 @@ private fun DesignActionButton(
             .fillMaxWidth()
             .heightIn(min = 56.dp)
             .background(MaterialTheme.colorScheme.surfaceContainerHigh, SheenShapes.extraLarge)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, SheenShapes.extraLarge)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
+                SheenShapes.extraLarge,
+            )
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.Center,

@@ -171,6 +171,31 @@ class StrictUiDesignContractTest {
 
         assertTrue(history.contains("HistoryDeviceRow("))
         assertTrue(history.contains("ActiveDeviceIndicator("))
-        assertTrue(history.contains("Offline"))
+        assertTrue(history.contains("DevicesStringKey.HISTORY_OFFLINE"))
+    }
+
+    @Test
+    fun `all v1 destinations share restrained tonal layering tokens`() {
+        val screens = listOf(
+            "src/main/kotlin/com/sheen/adbhelper/SheenApp.kt",
+            "../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesScreen.kt",
+            "../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DevicesDiscoveryPanel.kt",
+            "../feature/devices/src/main/kotlin/com/sheen/adb/feature/devices/DeviceHistoryMenu.kt",
+            "../feature/overview/src/main/kotlin/com/sheen/adb/feature/overview/OverviewScreen.kt",
+            "../feature/files/src/main/kotlin/com/sheen/adb/feature/files/FilesScreen.kt",
+            "../feature/apps/src/main/kotlin/com/sheen/adb/feature/apps/AppsScreen.kt",
+            "../feature/processes/src/main/kotlin/com/sheen/adb/feature/processes/ProcessesScreen.kt",
+            "../feature/shell/src/main/kotlin/com/sheen/adb/feature/shell/ShellScreen.kt",
+            "../feature/logcat/src/main/kotlin/com/sheen/adb/feature/logcat/LogcatScreen.kt",
+            "../feature/settings/src/main/kotlin/com/sheen/adb/feature/settings/SettingsScreen.kt",
+        )
+
+        screens.forEach { path ->
+            val screen = source(path)
+            assertTrue(
+                screen.contains("SheenTonalLayers."),
+                "$path must use the shared tonal-layer contract",
+            )
+        }
     }
 }

@@ -96,4 +96,16 @@ class LogcatPresentationTest {
             "rows must not own independent horizontal scroll positions",
         )
     }
+
+    @Test
+    fun `compact toolbar controls keep the minimum touch target`() {
+        val source = screen.readText()
+        val utilityBar = source.substringAfter("private fun LogcatUtilityBar")
+            .substringBefore("@Composable\nprivate fun LevelButton")
+        val levelButton = source.substringAfter("private fun LevelButton")
+            .substringBefore("@Composable\nprivate fun LogcatBody")
+
+        assertTrue(utilityBar.contains("size(SheenDimensions.minimumTouchTarget)"))
+        assertTrue(levelButton.contains("heightIn(min = SheenDimensions.minimumTouchTarget)"))
+    }
 }

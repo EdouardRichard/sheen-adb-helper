@@ -18,8 +18,8 @@ data class SettingsUiState(
     val versionLabel: String,
     val showClearConfirmation: Boolean = false,
     val isClearing: Boolean = false,
-    val clearResult: String? = null,
-    val settingsHelp: String? = null,
+    val clearResult: SettingsMessageCode? = null,
+    val settingsHelp: SettingsMessageCode? = null,
     val language: LanguagePreference = LanguagePreference.ZH_CN,
     val isSavingLanguage: Boolean = false,
     val languageMessage: SettingsMessageCode? = null,
@@ -51,7 +51,7 @@ class SettingsViewModel(
     fun requestClear() = mutableState.update(SettingsUiState::requestClearConfirmation)
     fun dismissClear() = mutableState.update(SettingsUiState::dismissClearConfirmation)
     fun showManualSettingsPath() = mutableState.update {
-        it.copy(settingsHelp = "请手动打开：系统设置 → 关于手机 → 连续点击系统版本开启开发者选项 → 更多设置 → 开发者选项 → 无线调试。")
+        it.copy(settingsHelp = SettingsMessageCode.MANUAL_SETTINGS_PATH)
     }
 
     fun selectLanguage(language: LanguagePreference) {
@@ -100,8 +100,8 @@ internal fun SettingsUiState.applyClearResult(success: Boolean): SettingsUiState
         isClearing = false,
         language = if (success) LanguagePreference.ZH_CN else language,
         clearResult = if (success) {
-            "所有本地数据已清除并验证不可继续使用旧身份。"
+            SettingsMessageCode.CLEAR_SUCCEEDED
         } else {
-            "清除未完全成功，请重启应用后重试。"
+            SettingsMessageCode.CLEAR_FAILED
         },
     )

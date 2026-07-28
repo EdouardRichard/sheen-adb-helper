@@ -17,6 +17,21 @@ enum class DevicesStringKey(
     DISCOVERY_ERROR("devices.discovery.error"),
     CONNECTION_ERROR("devices.connection.error"),
     DISMISS_ERROR("devices.connection.dismiss_error"),
+    HISTORY_TITLE("devices.history.title"),
+    HISTORY_EMPTY("devices.history.empty"),
+    HISTORY_RENAME("devices.history.rename"),
+    HISTORY_DELETE("devices.history.delete"),
+    HISTORY_RENAME_TITLE("devices.history.rename.title"),
+    HISTORY_DISPLAY_NAME("devices.history.rename.display_name"),
+    HISTORY_SAVE("devices.history.rename.save"),
+    HISTORY_CANCEL("devices.history.cancel"),
+    HISTORY_DELETE_TITLE("devices.history.delete.title"),
+    HISTORY_DELETE_BODY(
+        "devices.history.delete.body",
+        mapOf("displayName" to TextArgumentType.VERBATIM),
+    ),
+    HISTORY_CONFIRM_DELETE("devices.history.delete.confirm"),
+    HISTORY_OFFLINE("devices.history.offline"),
 
     PAIRING_QR_TITLE("devices.pairing.qr.title"),
     PAIRING_QR_INSTRUCTION("devices.pairing.qr.instruction"),
@@ -78,6 +93,19 @@ object DevicesStrings {
             DevicesStringKey.DISCOVERY_ERROR to "设备扫描失败",
             DevicesStringKey.CONNECTION_ERROR to "连接失败",
             DevicesStringKey.DISMISS_ERROR to "关闭错误提示",
+            DevicesStringKey.HISTORY_TITLE to "历史连接设备",
+            DevicesStringKey.HISTORY_EMPTY to "暂无历史设备。关闭菜单后可手动连接或扫描设备。",
+            DevicesStringKey.HISTORY_RENAME to "重命名",
+            DevicesStringKey.HISTORY_DELETE to "删除",
+            DevicesStringKey.HISTORY_RENAME_TITLE to "编辑显示名",
+            DevicesStringKey.HISTORY_DISPLAY_NAME to "显示名",
+            DevicesStringKey.HISTORY_SAVE to "保存",
+            DevicesStringKey.HISTORY_CANCEL to "取消",
+            DevicesStringKey.HISTORY_DELETE_TITLE to "删除设备档案？",
+            DevicesStringKey.HISTORY_DELETE_BODY to
+                "将删除“{displayName}”及不再被其他档案引用的主机身份，之后可能需要重新配对。",
+            DevicesStringKey.HISTORY_CONFIRM_DELETE to "确认删除",
+            DevicesStringKey.HISTORY_OFFLINE to "离线",
             DevicesStringKey.PAIRING_QR_TITLE to "二维码配对",
             DevicesStringKey.PAIRING_QR_INSTRUCTION to
                 "在被控端打开系统“无线调试”，由被控端系统扫描这里显示的临时二维码。",
@@ -126,6 +154,20 @@ object DevicesStrings {
             DevicesStringKey.DISCOVERY_ERROR to "Device discovery failed",
             DevicesStringKey.CONNECTION_ERROR to "Connection failed",
             DevicesStringKey.DISMISS_ERROR to "Dismiss error",
+            DevicesStringKey.HISTORY_TITLE to "Connection history",
+            DevicesStringKey.HISTORY_EMPTY to
+                "No saved devices. Close the menu to connect manually or scan for devices.",
+            DevicesStringKey.HISTORY_RENAME to "Rename",
+            DevicesStringKey.HISTORY_DELETE to "Delete",
+            DevicesStringKey.HISTORY_RENAME_TITLE to "Edit display name",
+            DevicesStringKey.HISTORY_DISPLAY_NAME to "Display name",
+            DevicesStringKey.HISTORY_SAVE to "Save",
+            DevicesStringKey.HISTORY_CANCEL to "Cancel",
+            DevicesStringKey.HISTORY_DELETE_TITLE to "Delete device profile?",
+            DevicesStringKey.HISTORY_DELETE_BODY to
+                "This removes “{displayName}” and any host identity no longer used by another profile. Pairing may be required again.",
+            DevicesStringKey.HISTORY_CONFIRM_DELETE to "Delete",
+            DevicesStringKey.HISTORY_OFFLINE to "Offline",
             DevicesStringKey.PAIRING_QR_TITLE to "Pair with QR code",
             DevicesStringKey.PAIRING_QR_INSTRUCTION to
                 "Scan this QR code on the controlled device to complete pairing",
@@ -229,6 +271,9 @@ object DevicesStrings {
 
     fun technicalCodeRef(technicalCode: String): LocalizedTextRef =
         verbatimRef(DevicesStringKey.VERBATIM_TECHNICAL_CODE, "technicalCode", technicalCode)
+
+    fun historyDeleteBodyRef(displayName: String): LocalizedTextRef =
+        verbatimRef(DevicesStringKey.HISTORY_DELETE_BODY, "displayName", displayName)
 
     fun resolve(
         language: UiLanguage,

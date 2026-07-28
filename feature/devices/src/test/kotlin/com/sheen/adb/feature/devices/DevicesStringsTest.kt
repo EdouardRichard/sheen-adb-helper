@@ -115,4 +115,33 @@ class DevicesStringsTest {
         assertFalse(source.contains(".userMessage"), "core error prose must not become final Devices text")
         assertFalse(source.contains(".nextStep"), "core next-step prose must not become final Devices text")
     }
+
+    @Test
+    fun `device history actions and dialogs are bilingual semantic text`() {
+        val strings = sourceFile.readText()
+        val menu = File(
+            "src/main/kotlin/com/sheen/adb/feature/devices/DeviceHistoryMenu.kt",
+        ).readText()
+
+        listOf(
+            "HISTORY_TITLE",
+            "HISTORY_EMPTY",
+            "HISTORY_RENAME",
+            "HISTORY_DELETE",
+            "HISTORY_RENAME_TITLE",
+            "HISTORY_DISPLAY_NAME",
+            "HISTORY_SAVE",
+            "HISTORY_CANCEL",
+            "HISTORY_DELETE_TITLE",
+            "HISTORY_DELETE_BODY",
+            "HISTORY_CONFIRM_DELETE",
+            "HISTORY_OFFLINE",
+        ).forEach { token ->
+            assertTrue(strings.contains(token), "missing history semantic key $token")
+        }
+        assertTrue(menu.contains("DevicesStrings.text(language"))
+        assertFalse(menu.contains("Text(\"历史连接设备\")"))
+        assertFalse(menu.contains("Text(\"编辑显示名\")"))
+        assertFalse(menu.contains("Text(\"删除设备档案？\")"))
+    }
 }

@@ -52,6 +52,7 @@ import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 import java.util.Locale
 
@@ -158,7 +159,13 @@ private fun SearchSection(
                 .fillMaxWidth()
                 .height(48.dp)
                 .background(MaterialTheme.colorScheme.surface, SheenShapes.large)
-                .border(1.dp, MaterialTheme.colorScheme.surfaceBright, SheenShapes.large)
+                .border(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant.copy(
+                        alpha = SheenTonalLayers.subtleOutlineAlpha,
+                    ),
+                    SheenShapes.large,
+                )
                 .padding(horizontal = 12.dp),
             contentAlignment = Alignment.CenterStart,
         ) {

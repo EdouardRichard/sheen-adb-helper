@@ -32,6 +32,7 @@ import com.sheen.adb.core.AdbConnectionState
 import com.sheen.adb.data.DeviceProfile
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 
 data class DeviceHistoryMenuItem(
@@ -96,13 +97,13 @@ fun DeviceHistoryMenu(
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         Text(
-            "历史连接设备",
+            DevicesStrings.text(language, DevicesStringKey.HISTORY_TITLE),
             style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
         )
         if (presentation.isEmpty) {
             Text(
-                "暂无历史设备。关闭菜单后可手动连接或扫描设备。",
+                DevicesStrings.text(language, DevicesStringKey.HISTORY_EMPTY),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
@@ -116,34 +117,53 @@ fun DeviceHistoryMenu(
     state.pendingRenameProfile?.let {
         AlertDialog(
             onDismissRequest = actions::dismissRename,
-            title = { Text("编辑显示名") },
+            title = {
+                Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_RENAME_TITLE))
+            },
             text = {
                 OutlinedTextField(
                     value = state.renameInput,
                     onValueChange = actions::updateRename,
-                    label = { Text("显示名") },
+                    label = {
+                        Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_DISPLAY_NAME))
+                    },
                 )
             },
             confirmButton = {
-                TextButton(onClick = actions::confirmRename) { Text("保存") }
+                TextButton(onClick = actions::confirmRename) {
+                    Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_SAVE))
+                }
             },
             dismissButton = {
-                TextButton(onClick = actions::dismissRename) { Text("取消") }
+                TextButton(onClick = actions::dismissRename) {
+                    Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_CANCEL))
+                }
             },
         )
     }
     state.pendingDeleteProfile?.let { profile ->
         AlertDialog(
             onDismissRequest = actions::dismissDelete,
-            title = { Text("删除设备档案？") },
+            title = {
+                Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_DELETE_TITLE))
+            },
             text = {
-                Text("将删除“${profile.displayName}”及不再被其他档案引用的主机身份，之后可能需要重新配对。")
+                Text(
+                    DevicesStrings.resolve(
+                        language,
+                        DevicesStrings.historyDeleteBodyRef(profile.displayName),
+                    ),
+                )
             },
             confirmButton = {
-                TextButton(onClick = actions::confirmDelete) { Text("确认删除") }
+                TextButton(onClick = actions::confirmDelete) {
+                    Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_CONFIRM_DELETE))
+                }
             },
             dismissButton = {
-                TextButton(onClick = actions::dismissDelete) { Text("取消") }
+                TextButton(onClick = actions::dismissDelete) {
+                    Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_CANCEL))
+                }
             },
         )
     }
@@ -162,7 +182,9 @@ private fun HistoryDeviceRow(
                 .fillMaxWidth()
                 .heightIn(min = 64.dp)
                 .background(
-                    if (item.isOnline) MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = .5f)
+                    if (item.isOnline) MaterialTheme.colorScheme.surfaceContainerHighest.copy(
+                        alpha = SheenTonalLayers.subtleOutlineAlpha,
+                    )
                     else androidx.compose.ui.graphics.Color.Transparent,
                     SheenShapes.large,
                 )
@@ -191,7 +213,7 @@ private fun HistoryDeviceRow(
                 )
                 Text(
                     if (item.isOnline) item.endpointLabel
-                    else if (language == UiLanguage.ZH_CN) "离线" else "Offline",
+                    else DevicesStrings.text(language, DevicesStringKey.HISTORY_OFFLINE),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -204,14 +226,18 @@ private fun HistoryDeviceRow(
         }
         DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
             DropdownMenuItem(
-                text = { Text(if (language == UiLanguage.ZH_CN) "重命名" else "Rename") },
+                text = {
+                    Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_RENAME))
+                },
                 onClick = {
                     showActions = false
                     callbacks.onRename(item.profile)
                 },
             )
             DropdownMenuItem(
-                text = { Text(if (language == UiLanguage.ZH_CN) "删除" else "Delete") },
+                text = {
+                    Text(DevicesStrings.text(language, DevicesStringKey.HISTORY_DELETE))
+                },
                 onClick = {
                     showActions = false
                     callbacks.onDelete(item.profile)

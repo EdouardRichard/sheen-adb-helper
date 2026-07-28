@@ -44,8 +44,15 @@ object SheenColors {
     val terminalBackground = Color.Black
 }
 
+object SheenTonalLayers {
+    const val quietOutlineAlpha = 0.28f
+    const val subtleOutlineAlpha = 0.42f
+    const val emphasisOutlineAlpha = 0.72f
+    const val framelessOverlayDimAlpha = 0.26f
+}
+
 object SheenCornerRadii {
-    val small = 2.dp
+    val small = 4.dp
     val default = 4.dp
     val medium = 6.dp
     val large = 8.dp

@@ -53,6 +53,7 @@ import com.sheen.adb.core.QuickActionKind
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.SafeVerbatimPolicy
 import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.UiLanguage
@@ -613,7 +614,13 @@ private fun QuickActionDesignButton(
         modifier
             .heightIn(min = 100.dp)
             .alpha(if (enabled) 1f else .38f)
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, SheenShapes.large)
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
+                SheenShapes.large,
+            )
             .clickable(enabled = enabled, onClick = onClick)
             .padding(12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,

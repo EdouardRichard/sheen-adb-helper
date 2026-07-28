@@ -32,4 +32,20 @@ class V1NavigationPresentationTest {
         assertFalse(app.contains("slideIn"))
         assertFalse(app.contains("slideOut"))
     }
+
+    @Test
+    fun `page loading navigation wait is a frameless centered overlay`() {
+        val app = File("src/main/kotlin/com/sheen/adbhelper/SheenApp.kt").readText()
+
+        assertTrue(app.contains("PageLoadNavigationOverlay("))
+        val overlay = app.substringAfter("private fun PageLoadNavigationOverlay(")
+            .substringBefore("\n@Composable", missingDelimiterValue = "")
+        assertTrue(overlay.contains("contentAlignment = Alignment.Center"))
+        assertTrue(overlay.contains("SheenTonalLayers.framelessOverlayDimAlpha"))
+        assertTrue(overlay.contains("PAGE_LOADING_WAIT"))
+        assertTrue(overlay.contains("PAGE_LOADING_CANCEL"))
+        assertFalse(overlay.contains("Alignment.TopCenter"))
+        assertFalse(overlay.contains("surfaceContainerHighest"))
+        assertFalse(overlay.contains(".border("))
+    }
 }

@@ -60,6 +60,7 @@ import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.data.SafComponentOutputStore
 import com.sheen.adb.data.SafDocumentStore
@@ -272,7 +273,9 @@ private fun SearchBar(
             .background(MaterialTheme.colorScheme.surfaceContainerLow, SheenShapes.extraLarge)
             .border(
                 1.dp,
-                MaterialTheme.colorScheme.surfaceBright,
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
                 SheenShapes.extraLarge,
             )
             .padding(8.dp),
@@ -385,7 +388,9 @@ private fun ApplicationCard(
             .fillMaxWidth()
             .border(
                 .5.dp,
-                MaterialTheme.colorScheme.surfaceBright.copy(alpha = .5f),
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.quietOutlineAlpha,
+                ),
                 SheenShapes.extraLarge,
             ),
         shape = SheenShapes.extraLarge,

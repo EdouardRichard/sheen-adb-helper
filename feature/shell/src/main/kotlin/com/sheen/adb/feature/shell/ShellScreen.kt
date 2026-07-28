@@ -61,6 +61,7 @@ import com.sheen.adb.ui.SheenColors
 import com.sheen.adb.ui.SheenDimensions
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.V1SharedStringKey
 import com.sheen.adb.ui.V1SharedStrings
@@ -135,7 +136,9 @@ private fun ShellUtilityBar(
             .background(MaterialTheme.colorScheme.surfaceContainerLowest)
             .border(
                 1.dp,
-                MaterialTheme.colorScheme.outlineVariant.copy(alpha = .3f),
+                MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.quietOutlineAlpha,
+                ),
             )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -196,7 +199,12 @@ private fun UtilityButton(
         onClick = onClick,
         shape = SheenShapes.default,
         color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(
+                alpha = SheenTonalLayers.subtleOutlineAlpha,
+            ),
+        ),
         modifier = Modifier.semantics { contentDescription = description },
     ) {
         Row(

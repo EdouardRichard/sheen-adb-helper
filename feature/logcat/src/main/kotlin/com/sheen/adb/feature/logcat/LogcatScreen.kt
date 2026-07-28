@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -56,6 +57,8 @@ import com.sheen.adb.ui.SafeVerbatimPolicy
 import com.sheen.adb.ui.SafeVerbatimText
 import com.sheen.adb.ui.SheenIcons
 import com.sheen.adb.ui.SheenShapes
+import com.sheen.adb.ui.SheenDimensions
+import com.sheen.adb.ui.SheenTonalLayers
 import com.sheen.adb.ui.UiLanguage
 import com.sheen.adb.ui.V1SharedStringKey
 import com.sheen.adb.ui.V1SharedStrings
@@ -134,9 +137,11 @@ private fun LogcatUtilityBar(
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
             .border(
                 width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .35f),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(
+                    alpha = SheenTonalLayers.subtleOutlineAlpha,
+                ),
             )
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .padding(horizontal = 12.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
@@ -190,7 +195,7 @@ private fun LogcatUtilityBar(
                 onClick = onClear,
                 enabled = state.rawWindowSnapshot.isNotEmpty(),
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(SheenDimensions.minimumTouchTarget)
                     .semantics {
                         contentDescription = LogcatStrings.text(
                             language,
@@ -204,7 +209,7 @@ private fun LogcatUtilityBar(
                 onClick = onDownload,
                 enabled = state.rawWindowSnapshot.isNotEmpty() && !state.isSaveWriting,
                 modifier = Modifier
-                    .size(36.dp)
+                    .size(SheenDimensions.minimumTouchTarget)
                     .semantics {
                         contentDescription = LogcatStrings.text(
                             language,
@@ -226,7 +231,7 @@ private fun LevelButton(
 ) {
     Surface(
         onClick = onClick,
-        modifier = Modifier.height(30.dp),
+        modifier = Modifier.heightIn(min = SheenDimensions.minimumTouchTarget),
         shape = SheenShapes.default,
         color = if (selected) {
             MaterialTheme.colorScheme.primaryContainer
@@ -238,7 +243,12 @@ private fun LevelButton(
         } else {
             MaterialTheme.colorScheme.onSurfaceVariant
         },
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        border = BorderStroke(
+            1.dp,
+            MaterialTheme.colorScheme.outlineVariant.copy(
+                alpha = SheenTonalLayers.subtleOutlineAlpha,
+            ),
+        ),
     ) {
         Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
             Text(

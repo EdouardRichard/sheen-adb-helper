@@ -125,6 +125,7 @@ class DevicesViewModel(
     init {
         viewModelScope.launch {
             manager.connectionState.collect { connection ->
+                val previousConnection = mutableState.value.connectionState
                 mutableState.update {
                     it.copy(
                         connectionState = connection,
@@ -157,6 +158,13 @@ class DevicesViewModel(
                 if (pairingWasActive && connection is AdbConnectionState.Connected) {
                     if (activeLocalWindowId != null) stopLocalPairingWindow()
                     cancelPairingOperation(markCancelled = true)
+                }
+                if (
+                    previousConnection is AdbConnectionState.Connected &&
+                    connection is AdbConnectionState.Disconnected &&
+                    operation?.isActive != true
+                ) {
+                    resumeLanDiscoveryIfForeground()
                 }
             }
         }
@@ -794,13 +802,33 @@ class DevicesViewModel(
                 }
             }
             is AdbOperationResult.Failure -> if (generation == operationGeneration) {
-                mutableState.update {
-                    it.copy(
-                        awaitingDiscoverySessionReplacement = false,
-                        inputError = result.error.technicalCode,
-                    )
+                pendingDiscoveryConnectTarget = null
+                if (result.error.allowsPairingFallback) {
+                    selectedPairingConnectObservation = latestLanDiscoveryState
+                        ?.services
+                        ?.singleOrNull {
+                            it.observationId == target.observationId &&
+                                it.serviceType == WirelessServiceType.CONNECT &&
+                                latestLanDiscoveryState?.generation == target.generation
+                        }
+                    mutableState.update {
+                        it.copy(
+                            awaitingDiscoverySessionReplacement = false,
+                            inputError = null,
+                        )
+                    }
+                    launchAfterForegroundDiscoveryStops {
+                        openDiscoveryQrPairing(target = null)
+                    }
+                } else {
+                    mutableState.update {
+                        it.copy(
+                            awaitingDiscoverySessionReplacement = false,
+                            inputError = result.error.technicalCode,
+                        )
+                    }
+                    resumeLanDiscoveryAfterConnectionAttempt()
                 }
-                resumeLanDiscoveryAfterConnectionAttempt()
             }
             AdbOperationResult.Cancelled -> if (generation == operationGeneration) {
                 resumeLanDiscoveryAfterConnectionAttempt()
