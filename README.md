@@ -1,55 +1,106 @@
 # Sheen ADB 助手
 
-Sheen ADB 助手是运行在 Android 设备上的纯本地无线 ADB 工具，可连接同一局域网中的 Android 设备或本机 `127.0.0.1`，查看设备概览、执行原始 Shell、查看只读进程列表和前台实时 Logcat，并管理被控端当前用户的第三方应用状态。
+把一台 Android 设备变成随身 ADB 工具：在同一网络中连接另一台 Android 设备，直接管理文件、应用和进程，使用 Shell 与 Logcat，并执行截屏、录屏等常用操作。
 
-## 文档入口
+- 纯本地运行，无账号、后端、广告或遥测。
+- 不需要电脑常驻，不使用 Root、Shizuku 或无障碍服务。
+- 配对、认证和设备操作均由 App 自身完成。
+- 当前用户可见版本：`v1.0`。
 
-- 工程宪法：[`.specify/memory/constitution.md`](.specify/memory/constitution.md)
-- Spec Kit 工作流：[`docs/Spec-Kit工作流.md`](docs/Spec-Kit工作流.md)
-- 当前架构事实：[`docs/architecture/`](docs/architecture/)
-- 功能规格与计划：[`specs/`](specs/)
-- ADR、权限、隐私、依赖与历史证据：[`docs/`](docs/)
+## 可以做什么
 
-Spec Kit 官方基础设施位于 `.specify/`，Codex 工作流技能位于 `.agents/skills/`。`specs/001-*`、`specs/002-*` 和 `docs/archive/` 是历史审计材料，未来功能开发默认不加载。
+- 发现、配对并连接 Android 设备（含安卓11以下设备）的无线调试服务。
+- 查看处理器、内存、存储和电池概览。
+- 浏览被控端目录，在两台设备之间上传或下载文件。
+- 搜索应用，提取或安装 APK，并管理普通应用状态。
+- 查看和筛选进程，按进程或应用结束任务。
+- 使用持续交互式 Shell，支持过滤、自动滚动和常用特殊键。
+- 按需采集、筛选、保存 Logcat；离开页面即停止采集。
+- 对被控端截屏、录屏或发送重启请求。
 
-## 系统要求
+## Android 16 → Android 12 演示
 
-- 主控端：Android 11（API 30）及以上。
-- 被控端：优先 Android 11+ 标准无线调试；旧式 `adb tcpip 5555` 仅尽力兼容。
-- 构建：JDK 21、Android SDK 36；项目使用 Gradle Wrapper。
+下面的画面来自真实模拟器运行：Android 16 作为主控端，Android 12 作为被控端。两台模拟器使用独立 TAP 接入同一个隔离测试网络；无线调试的发现、配对、认证和连接由 Sheen ADB 助手完成，没有使用 host `adb pair` 或 `adb connect` 代替产品能力。
 
-## 首次配对
+为避免记录敏感数据，截图裁掉了已连接页面顶部的真实端点栏；应用和进程页使用无匹配演示关键词，Shell 已清空，Logcat 保持未采集状态。
 
-1. 在被控端打开“开发者选项 → 无线调试”。应用不会替你开启或更改该设置。
-2. 首页先输入无线调试主页面的“IP 地址和端口”并直接连接。
-3. 仅当应用明确报告认证/未配对错误时，点击“使用配对码”。
-4. 在系统“使用配对码配对设备”弹窗中读取配对地址和 6 位配对码并输入。配对端口与调试端口不同。
-5. 配对成功后回到无线调试主页面，输入当前调试端口连接。
+### 1. 配对与连接
 
-本机连接从抽屉选择“本机连接”，应用只预填 `127.0.0.1:`，端口仍需由用户填写。
+App 可扫描系统公布的无线调试服务，并支持二维码、六位配对码和本机配对。
+安卓11以下设备请直接连接5555端口。
 
-## 隐私承诺
+<img src="docs/images/readme/connection.png" width="680" alt="无线调试配对码界面">
 
-无账号、后端、广告、统计、遥测、崩溃上报、支付或远程 Web 内容。ADB 主机身份由 Android Keystore 包装保护；配对码只短暂存在内存；Shell、进程和 Logcat 内容默认不落盘。Logcat 仅在用户点击开始且页面位于前台时采集，导出只使用系统文件创建器。
+### 2. 设备概览与快捷操作
+
+连接后可以查看设备状态，并从同一页面发起截屏、录屏或重启。
+
+<img src="docs/images/readme/overview.png" width="680" alt="已连接设备概览和快捷操作">
+
+### 3. 文件管理
+
+浏览被控端目录，通过行尾按钮进入文件夹或下载文件，也可以从主控端上传文件。
+
+<img src="docs/images/readme/files.png" width="680" alt="被控端文件管理页面">
+
+### 4. 应用管理
+
+按应用名或包名搜索；普通应用可提取 APK、禁用或启用、强制停止和卸载，右下角入口用于安装主控端 APK。
+
+<img src="docs/images/readme/apps.png" width="680" alt="应用搜索入口">
+
+### 5. 进程管理
+
+即时筛选进程，并在页面可见时定期刷新 CPU 与内存数据。
+
+<img src="docs/images/readme/processes.png" width="680" alt="进程筛选页面">
+
+### 6. 交互式 Shell
+
+命令在被控端执行；终端提供清空、过滤、自动滚动、Esc、Tab、Ctrl、Alt 和方向键。
+
+<img src="docs/images/readme/shell.png" width="680" alt="已清空内容的交互式 Shell 页面">
+
+### 7. 按需 Logcat
+
+进入页面不会自动读取日志。点击开始后才采集，可按文本和 `all/debug/info/error` 过滤，并保存本次完整采集窗口。
+
+<img src="docs/images/readme/logcat.png" width="680" alt="尚未开始采集的 Logcat 页面">
+
+## 快速开始
+
+1. 在被控端打开“开发者选项 → 无线调试”，并确认两台设备位于同一网络。
+2. 在 Sheen ADB 助手连接页选择发现的设备；首次使用时按提示完成二维码或六位码配对。
+3. 配对成功后等待 App 自动连接，或从无线调试主页面输入当前连接端点。
+4. 通过底部导航进入文件、应用、进程、终端或日志页面。
+
+配对端口和连接端口不是同一个端口，而且可能随无线调试重新启用而变化。App 不会替用户绕过系统授权。
+
+## 隐私与安全
+
+- ADB 主机身份由 Android Keystore 包装保护。
+- 配对码、二维码口令和服务信息只在当前配对过程的内存中短暂存在。
+- Shell、进程和 Logcat 内容默认不落盘。
+- 文件、APK、日志、截屏和录屏只写入用户通过系统文件选择器指定的位置。
+- 卸载、强制安装、结束进程、重启和高风险 Shell 等操作需要明确确认。
 
 详见 [隐私政策](docs/privacy-policy.md) 与 [权限矩阵](docs/权限矩阵.md)。
 
-## 构建
+## 系统与构建
+
+- 构建环境：JDK 21、Android SDK 36、Gradle Wrapper。
 
 ```powershell
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 .\gradlew.bat assembleRelease
 ```
 
-Release 构建启用 R8 与资源收缩，但仓库不包含生产签名材料。输出的未签名/调试签名产物不得冒充商店正式包。
+## 工程文档
 
-## 限制
+- [工程宪法](.specify/memory/constitution.md)
+- [Spec Kit 工作流](docs/Spec-Kit工作流.md)
+- [当前架构事实](docs/architecture/)
+- [功能规格与计划](specs/)
+- [第三方依赖与许可证](docs/第三方依赖与许可证.md)
 
-- 不扫描局域网、不做 mDNS/二维码发现。
-- 应用管理只限被控端当前用户第三方包的列表、单包强停、禁用和重新启用；不安装、提取或卸载 APK，不管理系统包或其他用户。
-- 不做文件管理、高级重启、截图、录屏或远程控制。
-- 不使用 Root、Shizuku、无障碍、前台服务、后台 Logcat 或自启动。
-- ROM 的 `ps`、`dumpsys`、`ip` 输出可能不同；无法可靠解析的字段显示“设备未提供”。
-- Android 11+ 无线调试端口可能变化，失败时请回系统页面核对。
-
-许可证：Apache-2.0。第三方依赖见 [依赖与许可证清单](docs/第三方依赖与许可证.md)。
+许可证：Apache-2.0。
